@@ -2,7 +2,7 @@
 // 部署到 Vercel 后,这个文件会自动变成 POST /api/generate 这个接口
 // GEMINI_API_KEY 是服务端环境变量,浏览器永远看不到,安全
 
-const MODEL = "gemini-2.5-flash"; // 免费额度模型,够用;不要改成 -pro 系列(已不在免费额度内)
+const MODEL = "gemini-3.5-flash"; // 2026年5月发布的最新版,依然在免费额度内(15次/分钟、1500次/天),指令遵循更可靠
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {

@@ -47,7 +47,17 @@ export default async function handler(req, res) {
 
     if (!geminiRes.ok) {
       const msg = (data && data.error && data.error.message) || `Gemini HTTP ${geminiRes.status}`;
-      res.status(geminiRes.status).json({ error: { message: msg } });
+      let retryAfter = null;
+      // Gemini 的 429 错误通常会在 details 里带一个 RetryInfo,告诉你具体等几秒
+      const details = data && data.error && data.error.details;
+      if (Array.isArray(details)) {
+        const retryInfo = details.find((d) => d["@type"] && d["@type"].includes("RetryInfo"));
+        if (retryInfo && retryInfo.retryDelay) {
+          const seconds = parseFloat(String(retryInfo.retryDelay).replace("s", ""));
+          if (!isNaN(seconds)) retryAfter = seconds;
+        }
+      }
+      res.status(geminiRes.status).json({ error: { message: msg, retryAfter } });
       return;
     }
 

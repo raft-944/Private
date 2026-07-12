@@ -242,7 +242,8 @@ function extractFirstJsonObject(text) {
 
 async function callAI(system, user) {
   let lastErr;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const MAX_ATTEMPTS = 4;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
@@ -254,6 +255,7 @@ async function callAI(system, user) {
         const msg = (data && data.error && data.error.message) || ("HTTP " + res.status);
         const err = new Error(msg);
         err.status = res.status;
+        err.retryAfter = data && data.error && data.error.retryAfter;
         throw err;
       }
       const text = (data.content || []).map((c) => (c.type === "text" ? c.text : "")).join("");
@@ -265,9 +267,18 @@ async function callAI(system, user) {
     } catch (e) {
       lastErr = e;
       const s = e && e.status;
-      // 429(限流)与其它4xx(除408外)属确定性错误,重试无意义,直接抛出
-      if (s === 429 || (s >= 400 && s < 500 && s !== 408)) throw e;
-      if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      if (s === 429) {
+        // Gemini免费额度的短时限流,通常等它建议的秒数就能恢复,自动等一下再重试(而不是直接放弃)
+        if (attempt < MAX_ATTEMPTS - 1) {
+          const wait = e.retryAfter && e.retryAfter > 0 ? Math.min(e.retryAfter, 45) : 15;
+          await new Promise((r) => setTimeout(r, wait * 1000 + 500));
+          continue;
+        }
+        throw e;
+      }
+      // 其它4xx(除408外)属确定性错误(参数不对、密钥问题等),重试无意义,直接抛出
+      if (s >= 400 && s < 500 && s !== 408) throw e;
+      if (attempt < MAX_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
     }
   }
   throw lastErr;

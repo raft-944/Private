@@ -22,6 +22,10 @@ export default async function handler(req, res) {
     return;
   }
 
+  // Gemini 有时候比 Claude 更啰嗦,1200 tokens 容易在写判卷讲解时被截断导致JSON不完整
+  // 这里不管前端传多少,都保底给够 2048,避免"判卷失败:返回内容不含完整JSON"这类问题
+  const outputTokens = Math.max(max_tokens || 0, 2048);
+
   try {
     const geminiRes = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`,
@@ -32,7 +36,7 @@ export default async function handler(req, res) {
           systemInstruction: system ? { parts: [{ text: system }] } : undefined,
           contents: [{ role: "user", parts: [{ text: user }] }],
           generationConfig: {
-            maxOutputTokens: max_tokens || 1200,
+            maxOutputTokens: outputTokens,
             temperature: 0.9,
           },
         }),
@@ -52,11 +56,17 @@ export default async function handler(req, res) {
       candidate && candidate.content && candidate.content.parts
         ? candidate.content.parts.map((p) => p.text || "").join("")
         : "";
+    const finishReason = candidate && candidate.finishReason;
+
+    if (finishReason === "MAX_TOKENS") {
+      // 即使有部分文字,也大概率是被截断的不完整JSON,记录下来方便在 Vercel 的 Functions 日志里排查
+      // eslint-disable-next-line no-console
+      console.warn("Gemini 输出被 maxOutputTokens 截断,考虑进一步调大 outputTokens");
+    }
 
     if (!text) {
       // 常见原因:被安全过滤器拦截(finishReason: SAFETY)等
-      const reason = candidate && candidate.finishReason;
-      res.status(502).json({ error: { message: "Gemini 没有返回内容" + (reason ? `(finishReason: ${reason})` : "") } });
+      res.status(502).json({ error: { message: "Gemini 没有返回内容" + (finishReason ? `(finishReason: ${finishReason})` : "") } });
       return;
     }
 

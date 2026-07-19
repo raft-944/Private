@@ -6,6 +6,7 @@
  * 否则会打乱已保存的学习进度(db.prog 按 id 存储)。
  */
 import { PATTERNS_CHUKYU } from "./data/chukyu-01-02.js";
+import { PATTERNS_CHUKYU_03 } from "./data/chukyu-03.js";
 
 const SHOKYU = [
   {
@@ -2376,7 +2377,11 @@ const SHOKYU = [
   }
 ];
 
-export const PATTERNS = [...SHOKYU, ...PATTERNS_CHUKYU.map((p) => ({ ...p, ext: false }))].map((p, i) => ({ ...p, id: i }));
+export const PATTERNS = [
+  ...SHOKYU,
+  ...PATTERNS_CHUKYU.map((p) => ({ ...p, ext: false })),
+  ...PATTERNS_CHUKYU_03.map((p) => ({ ...p, ext: false })),
+].map((p, i) => ({ ...p, id: i }));
 
 /* 学习与展示顺序:按课次排序;id 保持稳定,已保存的进度不受影响 */
 export const ORDERED = [...PATTERNS].sort((a, b) => a.lesson - b.lesson || a.id - b.id);

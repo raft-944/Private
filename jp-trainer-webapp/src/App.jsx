@@ -1430,7 +1430,7 @@ function Style() {
 .card .btn-main{margin-top:16px}
 
 .stamp{position:absolute;top:-22px;right:2px;margin:0;width:150px;height:150px;border:3px solid var(--shu);border-radius:50%;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--shu);background:var(--card);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--shu);background:transparent;
   box-shadow:0 4px 14px rgba(192,57,47,.18);
   transform:rotate(-8deg);animation:stampIn .4s cubic-bezier(.2,1.6,.4,1);gap:2px;z-index:2}
 .stamp-mark{font-size:40px;line-height:1;font-weight:700}

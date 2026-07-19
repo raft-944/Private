@@ -1,8 +1,8 @@
 // Vercel Serverless Function
 // 部署到 Vercel 后,这个文件会自动变成 POST /api/generate 这个接口
-// GEMINI_API_KEY 是服务端环境变量,浏览器永远看不到,安全
+// DEEPSEEK_API_KEY 是服务端环境变量,浏览器永远看不到,安全
 
-const MODEL = "gemini-3.5-flash"; // 2026年5月发布的最新版,依然在免费额度内(15次/分钟、1500次/天),指令遵循更可靠
+const MODEL = "deepseek-v4-flash";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -10,9 +10,9 @@ export default async function handler(req, res) {
     return;
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
-    res.status(500).json({ error: { message: "服务端没有配置 GEMINI_API_KEY,请检查 Vercel 项目的环境变量设置" } });
+    res.status(500).json({ error: { message: "服务端没有配置 DEEPSEEK_API_KEY,请检查 Vercel 项目的环境变量设置" } });
     return;
   }
 
@@ -22,61 +22,53 @@ export default async function handler(req, res) {
     return;
   }
 
-  // Gemini 有时候比 Claude 更啰嗦,1200 tokens 容易在写判卷讲解时被截断导致JSON不完整
+  // DeepSeek 有时候比 Claude 更啰嗦,1200 tokens 容易在写判卷讲解时被截断导致JSON不完整
   // 这里不管前端传多少,都保底给够 2048,避免"判卷失败:返回内容不含完整JSON"这类问题
   const outputTokens = Math.max(max_tokens || 0, 2048);
 
   try {
-    const geminiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: system ? { parts: [{ text: system }] } : undefined,
-          contents: [{ role: "user", parts: [{ text: user }] }],
-          generationConfig: {
-            maxOutputTokens: outputTokens,
-            temperature: 0.9,
-          },
-        }),
-      }
-    );
+    const messages = [];
+    if (system) messages.push({ role: "system", content: system });
+    messages.push({ role: "user", content: user });
 
-    const data = await geminiRes.json();
+    const deepseekRes = await fetch("https://api.deepseek.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages,
+        max_tokens: outputTokens,
+        temperature: 0.9,
+      }),
+    });
 
-    if (!geminiRes.ok) {
-      const msg = (data && data.error && data.error.message) || `Gemini HTTP ${geminiRes.status}`;
-      let retryAfter = null;
-      // Gemini 的 429 错误通常会在 details 里带一个 RetryInfo,告诉你具体等几秒
-      const details = data && data.error && data.error.details;
-      if (Array.isArray(details)) {
-        const retryInfo = details.find((d) => d["@type"] && d["@type"].includes("RetryInfo"));
-        if (retryInfo && retryInfo.retryDelay) {
-          const seconds = parseFloat(String(retryInfo.retryDelay).replace("s", ""));
-          if (!isNaN(seconds)) retryAfter = seconds;
-        }
-      }
-      res.status(geminiRes.status).json({ error: { message: msg, retryAfter } });
+    const data = await deepseekRes.json();
+
+    if (!deepseekRes.ok) {
+      const msg = (data && data.error && data.error.message) || `DeepSeek HTTP ${deepseekRes.status}`;
+      // DeepSeek(OpenAI 兼容接口)的 429 通常把等待秒数放在 Retry-After 响应头里,不在 JSON body 里
+      const retryAfterHeader = deepseekRes.headers.get("retry-after");
+      const retryAfter = retryAfterHeader ? parseFloat(retryAfterHeader) : null;
+      res.status(deepseekRes.status).json({ error: { message: msg, retryAfter: isNaN(retryAfter) ? null : retryAfter } });
       return;
     }
 
-    const candidate = data.candidates && data.candidates[0];
-    const text =
-      candidate && candidate.content && candidate.content.parts
-        ? candidate.content.parts.map((p) => p.text || "").join("")
-        : "";
-    const finishReason = candidate && candidate.finishReason;
+    const choice = data.choices && data.choices[0];
+    const text = (choice && choice.message && choice.message.content) || "";
+    const finishReason = choice && choice.finish_reason;
 
-    if (finishReason === "MAX_TOKENS") {
+    if (finishReason === "length") {
       // 即使有部分文字,也大概率是被截断的不完整JSON,记录下来方便在 Vercel 的 Functions 日志里排查
       // eslint-disable-next-line no-console
-      console.warn("Gemini 输出被 maxOutputTokens 截断,考虑进一步调大 outputTokens");
+      console.warn("DeepSeek 输出被 max_tokens 截断,考虑进一步调大 outputTokens");
     }
 
     if (!text) {
-      // 常见原因:被安全过滤器拦截(finishReason: SAFETY)等
-      res.status(502).json({ error: { message: "Gemini 没有返回内容" + (finishReason ? `(finishReason: ${finishReason})` : "") } });
+      // 常见原因:被内容审核拦截、或触发了其他终止条件
+      res.status(502).json({ error: { message: "DeepSeek 没有返回内容" + (finishReason ? `(finish_reason: ${finishReason})` : "") } });
       return;
     }
 

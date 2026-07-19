@@ -180,14 +180,26 @@ ${avoid && avoid.length ? "避免与这些情境雷同: " + avoid.join(" / ") : 
   return { ...q, type: "combo", label: "複合作文 · 请在一句话/一段小对话里同时用上下面两个句型" };
 }
 
+/* 判卷提示词里 explain/contrasts 的长度兜底:防止以后写 N2/N1 教材解释时手滑写太长,
+   突然搞出一个超大 prompt。纯粹是保险丝,不是为了省 token。 */
+function truncateText(text, max) {
+  return text.length > max ? text.slice(0, max) + "…" : text;
+}
+function explainText(p) {
+  return truncateText(p.explain || "无", 300);
+}
+function contrastsText(p) {
+  const t = p.contrasts && p.contrasts.length ? p.contrasts.map((c) => c[0] + "：" + c[1]).join("\n") : "无";
+  return truncateText(t, 400);
+}
+
 async function gradeCombo(p1, p2, q, answer) {
   const sys = "あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:N5〜N4。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号\",否则会破坏JSON格式。";
-  const contrastsText = (p) => (p.contrasts && p.contrasts.length ? p.contrasts.map((c) => c[0] + "：" + c[1]).join("\n") : "无");
   const user = `句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})
-【句型A教材解释】${p1.explain || "无"}
+【句型A教材解释】${explainText(p1)}
 【句型A易混淆点】${contrastsText(p1)}
 句型B: ${p2.pattern}(${p2.conn} / ${p2.meaning})
-【句型B教材解释】${p2.explain || "无"}
+【句型B教材解释】${explainText(p2)}
 【句型B易混淆点】${contrastsText(p2)}
 题目(複合作文): ${q.task}
 学生的答案: ${answer}
@@ -300,10 +312,9 @@ ${list}
 
 async function gradeAnswer(p, q, answer) {
   const sys = "あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:N5〜N4。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号\",否则会破坏JSON格式。";
-  const contrastsText = p.contrasts && p.contrasts.length ? p.contrasts.map((c) => c[0] + "：" + c[1]).join("\n") : "无";
   const user = `句型: ${p.pattern}(${p.conn} / ${p.meaning})
-【教材解释】${p.explain || "无"}
-【易混淆点】${contrastsText}
+【教材解释】${explainText(p)}
+【易混淆点】${contrastsText(p)}
 题目(${q.type === "translation" ? "翻译题" : "造句题"}): ${q.task} ${q.hint ? "提示:" + q.hint : ""}
 学生的答案: ${answer}
 

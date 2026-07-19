@@ -32,11 +32,20 @@ function mergeDb(saved) {
   };
 }
 
-/* 听力难度分级:根据听力累计答对次数自动升级 */
+/* 听力难度分级:根据听力累计答对次数自动升级句子的长度/结构复杂度。
+   注意这条轴只管"长短繁简",跟词汇/语法难度上限(由句型的 level 决定,见 levelBenchmark)彻底解耦——
+   一个刚开始练听力(短句档)的中级句型,词汇语法依然要给到位,不会因为档位低就被降级到初级词汇。 */
 function listenTier(ok) {
-  if (ok >= 20) return { name: "高级", spec: "句子长度20~35个日语字符,可以包含两个分句或一个从属结构(比如用て形连接、から表原因、条件句等),用词可以更丰富一些(仍在N4范围内),信息量更接近自然口语。" };
-  if (ok >= 8) return { name: "中级", spec: "句子长度15~25个日语字符,可以包含一个简单的连接(比如て形、から、し等),比最基础的单句稍微复杂一点。" };
-  return { name: "基础", spec: "句子长度8~14个日语字符,单句,只使用最常见的N5核心词汇,结构简单清晰。" };
+  if (ok >= 20) return { name: "长句", spec: "句子长度20~35个日语字符,可以包含两个分句或一个从属结构(比如用て形连接、から表原因、条件句等),信息量更接近自然口语。" };
+  if (ok >= 8) return { name: "中句", spec: "句子长度15~25个日语字符,可以包含一个简单的连接(比如て形、から、し等),比最基础的单句稍微复杂一点。" };
+  return { name: "短句", spec: "句子长度8~14个日语字符,单句,结构简单清晰。" };
+}
+
+/* 出题/判卷时对 AI 说的难度基准,统一由句型的 level 字段决定:
+   初級(大家的日语初级 I+II,第1~50课)按 N4,中級(第51课起)按 N3~N2。
+   这是唯一改这个映射关系的地方。 */
+function levelBenchmark(level) {
+  return level === "中級" ? "N3〜N2" : "N4";
 }
 
 /* ================= AI 调用 ================= */
@@ -168,7 +177,7 @@ function speakJa(text, rate = 1, voiceURI) {
 }
 
 async function genComboQuestion(p1, p2, avoid) {
-  const sys = "あなたは日本語教師です。学習者:JLPT N5〜N4(《大家的日语》初级水平)。出题词汇必须限定在初级范围内。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号\",否则会破坏JSON格式。";
+  const sys = `あなたは日本語教師です。学習者:句型A对应 JLPT ${levelBenchmark(p1.level)},句型B对应 JLPT ${levelBenchmark(p2.level)}(《大家的日语》初中级)。出题词汇和语法请分别符合各自句型的难度基准,不要因为其中一个句型简单/难就把另一个也拉到同一水平。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `请出一道"複合作文"练习题,要求学习者在同一句话(或简短的两三句对话)中,同时正确使用以下两个句型。
 句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})
 句型B: ${p2.pattern}(${p2.conn} / ${p2.meaning})
@@ -194,7 +203,7 @@ function contrastsText(p) {
 }
 
 async function gradeCombo(p1, p2, q, answer) {
-  const sys = "あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:N5〜N4。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号\",否则会破坏JSON格式。";
+  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:句型A ${levelBenchmark(p1.level)},句型B ${levelBenchmark(p2.level)}。判卷标准需分别符合各自句型的难度基准。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})
 【句型A教材解释】${explainText(p1)}
 【句型A易混淆点】${contrastsText(p1)}
@@ -218,7 +227,7 @@ async function gradeCombo(p1, p2, q, answer) {
 }
 
 async function genListeningSentence(p, avoid, tier) {
-  const sys = "あなたは日本語教師です。学習者:JLPT N5〜N4(《大家的日语》初级水平)。词汇必须限定在初级范围内,句子要自然、适合朗读听力练习。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
+  const sys = `あなたは日本語教師です。学習者:JLPT ${levelBenchmark(p.level)}(《大家的日语》${p.level}水平)。词汇和语法必须限定在该难度范围内,句子要自然、适合朗读听力练习。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `请为以下句型新造一句自然的日语例句(不要用课本原句),用于听力练习,学习者只能听、看不到文字。
 句型: ${p.pattern}(${p.conn} / ${p.meaning})
 难度档位(${tier.name}): ${tier.spec}
@@ -234,7 +243,7 @@ ${avoid && avoid.length ? "避免与这些句子雷同: " + avoid.join(" / ") : 
 }
 
 async function gradeListening(p, q, answer) {
-  const sys = "あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:N5〜N4。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
+  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `目标句型: ${p.pattern}(${p.conn} / ${p.meaning})
 听力原文(日语,学生只听到了声音,没看到文字): ${q.jp}
 学生听写下来的内容(允许用假名代替汉字,这不算错): ${answer}
@@ -253,7 +262,7 @@ async function gradeListening(p, q, answer) {
 async function genQuestion(p, avoid, forceType) {
   const type = forceType || (Math.random() < 0.6 ? "translation" : "composition");
   const topic = TOPICS[Math.floor(Math.random() * TOPICS.length)];
-  const sys = "あなたは日本語教師です。学習者:JLPT N5〜N4(《大家的日语》初级水平)。出题词汇必须限定在初级范围内。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号\",否则会破坏JSON格式。";
+  const sys = `あなたは日本語教師です。学習者:JLPT ${levelBenchmark(p.level)}(《大家的日语》${p.level}水平)。出题词汇和语法必须限定在该难度范围内。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `请围绕以下句型出一道练习题。
 句型: ${p.pattern}
 接续: ${p.conn}
@@ -276,8 +285,8 @@ ${avoid && avoid.length ? "避免与这些题目雷同: " + avoid.join(" / ") : 
    题型(翻译/造句)提前指定好,顺序必须和输出的数组一一对应。
    用于"每日复习"这类一次要出好几道题、又不确定固定题型的场景。 */
 async function genQuestionBatch(items) {
-  const sys = "あなたは日本語教師です。学習者:JLPT N5〜N4(《大家的日语》初级水平)。出题词汇必须限定在初级范围内。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
-  const list = items.map((it, i) => `第${i + 1}题 — 句型:${it.p.pattern}(${it.p.conn} / ${it.p.meaning}) — 题型:${it.type === "translation" ? "翻译题" : "造句题"}`).join("\n");
+  const sys = "あなたは日本語教師です。这批题目里每道题都会单独标注该题句型对应的 JLPT 难度基准(如 N4、N3〜N2),请严格按各自的标注出题,不要用同一个难度套所有题目,更不要把简单句型的题也拉到难句型的水平。出题词汇和语法必须符合各题标注的难度范围。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
+  const list = items.map((it, i) => `第${i + 1}题 — 句型:${it.p.pattern}(${it.p.conn} / ${it.p.meaning}) — 【難易度基準】${levelBenchmark(it.p.level)} — 题型:${it.type === "translation" ? "翻译题" : "造句题"}`).join("\n");
   const user = `请一次性为下面这 ${items.length} 道题各自出题,每题的句型和题型已经指定好,请严格按顺序对应,不要弄混、不要跳过任何一题、不要合并。
 
 ${list}
@@ -296,8 +305,8 @@ ${list}
 /* 批量版(纯翻译题):专门给"每日作业"里那些必须是翻译题的题位用,
    比genQuestionBatch更简单,因为不用在提示词里区分题型 */
 async function genTranslationBatch(patterns) {
-  const sys = "あなたは日本語教師です。学習者:JLPT N5〜N4(《大家的日语》初级水平)。出题词汇必须限定在初级范围内。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
-  const list = patterns.map((p, i) => `第${i + 1}题 — 句型:${p.pattern}(${p.conn} / ${p.meaning})`).join("\n");
+  const sys = "あなたは日本語教師です。这批题目里每道题都会单独标注该题句型对应的 JLPT 难度基准(如 N4、N3〜N2),请严格按各自的标注出题,不要用同一个难度套所有题目,更不要把简单句型的题也拉到难句型的水平。出题词汇和语法必须符合各题标注的难度范围。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
+  const list = patterns.map((p, i) => `第${i + 1}题 — 句型:${p.pattern}(${p.conn} / ${p.meaning}) — 【難易度基準】${levelBenchmark(p.level)}`).join("\n");
   const user = `请一次性为下面这 ${patterns.length} 个句型各出一道翻译题,顺序必须和句型编号一一对应,不要弄混、不要跳过、不要合并。
 
 ${list}
@@ -311,7 +320,7 @@ ${list}
 }
 
 async function gradeAnswer(p, q, answer) {
-  const sys = "あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:N5〜N4。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号\",否则会破坏JSON格式。";
+  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `句型: ${p.pattern}(${p.conn} / ${p.meaning})
 【教材解释】${explainText(p)}
 【易混淆点】${contrastsText(p)}

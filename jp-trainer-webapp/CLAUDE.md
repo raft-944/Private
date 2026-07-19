@@ -2,9 +2,29 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Language
+# 句型道場 项目约定
 
-始终用中文回复，代码注释也用中文（与本仓库现有代码风格一致）。
+## 项目简介
+自建的日语句型练习应用，自用。使用者以中文为母语，已通过 JLPT N4，最终目标 N1。
+句型库现覆盖《大家的日语》初级 I+II 全 50 课 180+ 句型，正在按 N3→N2→N1 逐级扩充。
+技术栈：Vite + React 前端，Vercel Serverless 代理 AI 接口，Supabase 负责数据库与登录，
+出题判卷由 AI 完成，语音走 Web Speech API，已部署在 Vercel。
+
+## 交流方式
+- 始终用中文回复，代码注释也用中文
+- 每次改动后检查 JSX 语法
+- 改完提醒我重新部署
+- 涉及出题/判卷提示词的改动，要说明改了哪条规则、解决什么问题
+
+## 句型库数据规范
+- 采用具名对象格式，字段定义见 schema-v2.js
+- 课号规则：初级 1-50，中级 51-62（= 50 + 中级课号）
+- 修改句型库顺序前必须提醒我备份学习进度
+
+## 出题与判卷难度
+- 难度基准要随当前学习阶段调整，不要默认停留在 N5～N4
+- 判卷时须依据句型的 explain（教材解释）和 contrasts（易混淆辨析）字段，
+  语法正确但文体、语气、使用场景不当的，也要指出
 
 ## What this is
 

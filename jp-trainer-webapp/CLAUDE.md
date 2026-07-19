@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Language
+
+始终用中文回复，代码注释也用中文（与本仓库现有代码风格一致）。
+
 ## What this is
 
 句型道場 ("Sentence Pattern Dojo") — a Japanese (JLPT N5–N4, based on 《大家的日语》Minna no Nihongo I+II) sentence-pattern trainer. Single-page React app deployed to Vercel, using Vercel Serverless Functions for AI grading and Supabase for auth + progress storage. It's a personal-use app ported out of a Claude Artifact (see README.md for the original migration story) — there is no test suite, linter config, or CI.

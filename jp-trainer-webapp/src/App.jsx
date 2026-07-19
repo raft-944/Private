@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, Component } from "react";
+import { supabase } from "./supabaseClient";
 
 /* ================= 数据:大家的日语 初级 I+II 句型库 =================
    格式: [课, 句型, 接续, 意思, 例句(日), 例句(中)] */
@@ -211,6 +212,23 @@ const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2
 
 const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, session: null };
 
+/* 安全地合并存档:旧版本存下来的数据可能缺少新版本才有的字段(比如后来才加的 voiceURI、listenStats),
+   如果直接用 {...DEFAULT_DB, ...saved} 这种浅合并,saved.settings 会把整个 settings 对象替换掉、
+   新加的子字段就没了。这里对几个嵌套对象逐层补齐,保证老存档导进来也不会缺字段。 */
+function mergeDb(saved) {
+  const s = saved && typeof saved === "object" ? saved : {};
+  return {
+    ...DEFAULT_DB,
+    ...s,
+    settings: { ...DEFAULT_DB.settings, ...(s.settings || {}) },
+    meta: { ...DEFAULT_DB.meta, ...(s.meta || {}) },
+    stats: { ...DEFAULT_DB.stats, ...(s.stats || {}) },
+    listenStats: { ...DEFAULT_DB.listenStats, ...(s.listenStats || {}) },
+    prog: s.prog || {},
+    mistakes: Array.isArray(s.mistakes) ? s.mistakes : [],
+  };
+}
+
 /* 听力难度分级:根据听力累计答对次数自动升级 */
 function listenTier(ok) {
   if (ok >= 20) return { name: "高级", spec: "句子长度20~35个日语字符,可以包含两个分句或一个从属结构(比如用て形连接、から表原因、条件句等),用词可以更丰富一些(仍在N4范围内),信息量更接近自然口语。" };
@@ -240,15 +258,48 @@ function extractFirstJsonObject(text) {
   return null; // 花括号没配平,大概率是被截断了
 }
 
-async function callAI(system, user) {
+/* 同上,但找的是数组的中括号配对,用于批量出题的返回结果 */
+function extractFirstJsonArray(text) {
+  const start = text.indexOf("[");
+  if (start === -1) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+    } else {
+      if (ch === '"') inStr = true;
+      else if (ch === "[") depth++;
+      else if (ch === "]") { depth--; if (depth === 0) return text.slice(start, i + 1); }
+    }
+  }
+  return null;
+}
+
+/* 全局节流:不管调用多频繁,两次AI调用之间至少间隔这么久,给免费额度留缓冲,
+   从源头上减少撞到"短时间窗口内请求次数超限"这类429的概率 */
+let lastCallAt = 0;
+const MIN_CALL_GAP_MS = 3500;
+async function throttleGap() {
+  const wait = MIN_CALL_GAP_MS - (Date.now() - lastCallAt);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastCallAt = Date.now();
+}
+
+/* 真正发请求+429退避重试的共用逻辑,只返回原始文字,不在这里解析JSON形状,
+   这样单个问题(callAI)和批量问题(callAIArray)可以共用同一套重试机制 */
+async function callAIRaw(system, user, maxTokens) {
   let lastErr;
   const MAX_ATTEMPTS = 4;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
+      await throttleGap();
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ max_tokens: 1200, system, user }),
+        body: JSON.stringify({ max_tokens: maxTokens || 1200, system, user }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -258,12 +309,7 @@ async function callAI(system, user) {
         err.retryAfter = data && data.error && data.error.retryAfter;
         throw err;
       }
-      const text = (data.content || []).map((c) => (c.type === "text" ? c.text : "")).join("");
-      const jsonStr = extractFirstJsonObject(text);
-      if (!jsonStr) throw new Error("返回内容不含完整JSON:" + text.slice(0, 80));
-      const parsed = JSON.parse(jsonStr);
-      if (!parsed || typeof parsed !== "object") throw new Error("解析结果异常");
-      return parsed;
+      return (data.content || []).map((c) => (c.type === "text" ? c.text : "")).join("");
     } catch (e) {
       lastErr = e;
       const s = e && e.status;
@@ -282,6 +328,25 @@ async function callAI(system, user) {
     }
   }
   throw lastErr;
+}
+
+async function callAI(system, user) {
+  const text = await callAIRaw(system, user, 1200);
+  const jsonStr = extractFirstJsonObject(text);
+  if (!jsonStr) throw new Error("返回内容不含完整JSON:" + text.slice(0, 80));
+  const parsed = JSON.parse(jsonStr);
+  if (!parsed || typeof parsed !== "object") throw new Error("解析结果异常");
+  return parsed;
+}
+
+/* 批量版:一次调用要多道题,maxTokens按题数放大一些,避免写到一半被截断 */
+async function callAIArray(system, user, itemCount) {
+  const text = await callAIRaw(system, user, Math.min(6000, 700 * Math.max(itemCount, 1) + 500));
+  const jsonStr = extractFirstJsonArray(text);
+  if (!jsonStr) throw new Error("返回内容不含完整JSON数组:" + text.slice(0, 80));
+  const parsed = JSON.parse(jsonStr);
+  if (!Array.isArray(parsed)) throw new Error("解析结果不是数组");
+  return parsed;
 }
 
 /* 用浏览器内置的语音合成朗读日语,免费、不消耗AI额度 */
@@ -385,6 +450,44 @@ ${avoid && avoid.length ? "避免与这些题目雷同: " + avoid.join(" / ") : 
   return q;
 }
 
+/* 批量版(混合题型):items = [{p, type}, ...],一次调用生成items.length道题,
+   题型(翻译/造句)提前指定好,顺序必须和输出的数组一一对应。
+   用于"每日复习"这类一次要出好几道题、又不确定固定题型的场景。 */
+async function genQuestionBatch(items) {
+  const sys = "あなたは日本語教師です。学習者:JLPT N5〜N4(《大家的日语》初级水平)。出题词汇必须限定在初级范围内。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
+  const list = items.map((it, i) => `第${i + 1}题 — 句型:${it.p.jp}(${it.p.conn} / ${it.p.cn}) — 题型:${it.type === "translation" ? "翻译题" : "造句题"}`).join("\n");
+  const user = `请一次性为下面这 ${items.length} 道题各自出题,每题的句型和题型已经指定好,请严格按顺序对应,不要弄混、不要跳过任何一题、不要合并。
+
+${list}
+
+出题要求:
+- "翻译题":给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型
+- "造句题":场景(中文,25字以内)只能表达一个清晰、单一的意思,不能同时塞入两件不相关的信息,不多给也不少给信息;配1~2个日语提示词(单词,不是整句)
+- 各题之间内容不要相似雷同
+
+按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"task":"题目内容(中文)","hint":"提示(可为空字符串)"}`;
+  const arr = await callAIArray(sys, user, items.length);
+  if (arr.length !== items.length) throw new Error("批量出题数量(" + arr.length + ")与预期(" + items.length + ")不符");
+  return arr.map((q, i) => ({ type: items[i].type, task: q.task, hint: q.hint || "" }));
+}
+
+/* 批量版(纯翻译题):专门给"每日作业"里那些必须是翻译题的题位用,
+   比genQuestionBatch更简单,因为不用在提示词里区分题型 */
+async function genTranslationBatch(patterns) {
+  const sys = "あなたは日本語教師です。学習者:JLPT N5〜N4(《大家的日语》初级水平)。出题词汇必须限定在初级范围内。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
+  const list = patterns.map((p, i) => `第${i + 1}题 — 句型:${p.jp}(${p.conn} / ${p.cn})`).join("\n");
+  const user = `请一次性为下面这 ${patterns.length} 个句型各出一道翻译题,顺序必须和句型编号一一对应,不要弄混、不要跳过、不要合并。
+
+${list}
+
+每一题:给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型。各题之间内容不要相似雷同。
+
+按顺序输出一个JSON数组,长度必须正好是 ${patterns.length},每个元素格式: {"task":"题目内容(中文)","hint":"提示(可为空字符串)"}`;
+  const arr = await callAIArray(sys, user, patterns.length);
+  if (arr.length !== patterns.length) throw new Error("批量出题数量(" + arr.length + ")与预期(" + patterns.length + ")不符");
+  return arr.map((q) => ({ type: "translation", task: q.task, hint: q.hint || "" }));
+}
+
 async function gradeAnswer(p, q, answer) {
   const sys = "あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:N5〜N4。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号\",否则会破坏JSON格式。";
   const user = `句型: ${p.jp}(${p.conn} / ${p.cn})
@@ -461,6 +564,8 @@ function AppInner() {
   const [openLesson, setOpenLesson] = useState(null);
   const actionsRef = useRef({});
   const recentTasks = useRef({});
+  const preGenRef = useRef({}); // 批量出题的结果缓存,key是题目在当前队列里的下标
+  const sessionGenRef = useRef(0); // 每次开始新的一组题就递增,防止上一轮延迟返回的批量结果写错地方
 
   /* --- 读档 --- */
   useEffect(() => {
@@ -476,7 +581,7 @@ function AppInner() {
           }
           const r = await window.storage.get(STORE_KEY);
           // get 成功就一定代表读到了真实数据(官方文档:不存在的 key 只会抛错,不会返回 null)
-          data = r && r.value ? { ...DEFAULT_DB, ...JSON.parse(r.value) } : { ...DEFAULT_DB };
+          data = r && r.value ? mergeDb(JSON.parse(r.value)) : { ...DEFAULT_DB };
           ok = true;
         } catch {
           // 拿不到明确结果:可能真的是首次使用,也可能只是网络/桥接抖动
@@ -590,19 +695,47 @@ function AppInner() {
   const weekDone = db.meta.weekKey === mondayOf(t);
 
   /* --- 会话流程 --- */
+  /* 批量预取:把一组"待出题的坑位"分成每5个一批,后台异步逐批请求,
+     结果存进 preGenRef,后面轮到对应题目时优先直接用,减少现场一题一次调用的次数。
+     某一批失败也没关系,失败的那几题届时会自动退回原来的单题请求,不影响使用。 */
+  const runPrefetch = (indexedItems, generator) => {
+    const myGen = sessionGenRef.current;
+    const CHUNK_SIZE = 5;
+    for (let i = 0; i < indexedItems.length; i += CHUNK_SIZE) {
+      const chunk = indexedItems.slice(i, i + CHUNK_SIZE);
+      if (chunk.length === 0) continue;
+      generator(chunk)
+        .then((qs) => {
+          if (sessionGenRef.current !== myGen) return; // 已经切到别的会话了,这批结果作废,避免张冠李戴
+          qs.forEach((q, j) => { preGenRef.current[chunk[j].idx] = q; });
+        })
+        .catch(() => { /* 批量失败就算了,届时退回单题现场请求 */ });
+    }
+  };
+
   const startSession = () => {
+    sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     const items = [
       ...dueList.sort((a, b) => (db.prog[a.id].due < db.prog[b.id].due ? -1 : 1)).map((p) => ({ p, isNew: false })),
       ...newList.map((p) => ({ p, isNew: true })),
     ];
     if (!items.length) return;
+    preGenRef.current = {};
     setQueue(items); setIdx(0); setFreeMode(false); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 });
     setView("session");
-    beginItem(items[0]);
+    beginItem(items[0], 0);
+    // 后台批量预取"待复习"题目。跳过第0题(它已经在上面单独请求了,再算进来会重复生成、白花一次调用);
+    // 新句型也不预取(要等你点开介绍页读完才需要出题)
+    const dueIndexed = items
+      .map((it, idx) => ({ idx, p: it.p, isNew: it.isNew }))
+      .filter((it) => !it.isNew && it.idx !== 0)
+      .map((it) => ({ ...it, type: Math.random() < 0.6 ? "translation" : "composition" }));
+    runPrefetch(dueIndexed, (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type }))));
   };
 
   const startFree = (p, mistakeId) => {
+    sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     setQueue([{ p, isNew: false, mistakeId }]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 });
     setView("session");
@@ -610,6 +743,7 @@ function AppInner() {
   };
 
   const startListenFree = (p, mistakeId) => {
+    sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     const item = { p, isNew: false, mistakeId };
     setQueue([item]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(true);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 });
@@ -618,6 +752,7 @@ function AppInner() {
   };
 
   const startHomework = () => {
+    sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     const learned = PATTERNS.filter((p) => db.prog[p.id]);
     if (learned.length === 0) return;
     const pickN = (n, pool) => {
@@ -644,13 +779,21 @@ function AppInner() {
       ...pickN(remainComp, learned).map((p) => ({ p, hw: "comp" })),
       ...pickN(remainTrans, learned).map((p) => ({ p, hw: "trans" })),
     ];
+    preGenRef.current = {};
     setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(true); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 });
     setView("session");
-    beginHomeworkItem(items[0]);
+    beginHomeworkItem(items[0], 0);
+    // 后台批量预取"翻译题"(作业里只有这类题位真正需要AI出题,造句题是固定文案不用调用)。
+    // 跳过第0题:如果它正好是翻译题,上面已经单独请求过了,再算进来会重复生成
+    const transIndexed = items
+      .map((it, idx) => ({ idx, ...it }))
+      .filter((it) => it.sub !== "combo" && it.hw === "trans" && it.idx !== 0);
+    runPrefetch(transIndexed, (chunk) => genTranslationBatch(chunk.map((c) => c.p)));
   };
 
   const startWeekly = () => {
+    sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     if (comboPool.length < 2) return;
     const pickPair = () => {
       const a = comboPool[Math.floor(Math.random() * comboPool.length)];
@@ -678,6 +821,7 @@ function AppInner() {
   };
 
   const startListening = () => {
+    sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     const learned = PATTERNS.filter((p) => db.prog[p.id]);
     if (learned.length === 0) return;
     const shuffled = [...learned].sort(() => Math.random() - 0.5);
@@ -709,16 +853,26 @@ function AppInner() {
   };
 
   const startComboFree = (p1, p2, mistakeId) => {
+    sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     setQueue([{ sub: "combo", p1, p2, mistakeId }]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(true); setWeeklyFormal(false); setListenMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 });
     setView("session");
     beginWeeklyItem({ sub: "combo", p1, p2, mistakeId });
   };
 
-  const beginItem = (item) => {
+  const beginItem = (item, qIdx) => {
     setAnswer(""); setResult(null); setQ(null);
     if (item.isNew) setPhase("intro");
-    else loadQuestion(item.p);
+    else {
+      const cached = qIdx != null ? preGenRef.current[qIdx] : null;
+      if (cached) {
+        delete preGenRef.current[qIdx];
+        setQ(cached);
+        setPhase("question");
+      } else {
+        loadQuestion(item.p);
+      }
+    }
   };
 
   const resumeSession = () => {
@@ -733,9 +887,9 @@ function AppInner() {
     setView("session");
     const item = items[s.idx];
     if (s.kind === "weekly") beginWeeklyItem(item);
-    else if (s.kind === "homework") beginHomeworkItem(item);
+    else if (s.kind === "homework") beginHomeworkItem(item, s.idx);
     else if (s.kind === "listen") beginListenItem(item);
-    else beginItem(item);
+    else beginItem(item, s.idx);
   };
 
   const discardSession = () => setDb((d) => ({ ...d, session: null }));
@@ -755,7 +909,7 @@ function AppInner() {
     try {
       const parsed = JSON.parse(importText.trim());
       if (!parsed || typeof parsed !== "object" || !parsed.prog) throw new Error("format");
-      setDb({ ...DEFAULT_DB, ...parsed });
+      setDb(mergeDb(parsed));
       setImportMsg("导入成功!");
       setTimeout(() => { setShowImport(false); setImportText(""); setImportMsg(""); }, 1200);
     } catch {
@@ -782,7 +936,7 @@ function AppInner() {
     }
   };
 
-  const beginHomeworkItem = (item) => {
+  const beginHomeworkItem = (item, qIdx) => {
     setAnswer(""); setResult(null);
     if (item.sub === "combo") {
       loadComboQuestion(item.p1, item.p2);
@@ -790,7 +944,14 @@ function AppInner() {
       setQ({ type: "composition", task: `この文型「${item.p.jp}」を使って、自由に文を作ってください。`, hint: "", label: "作文 · 请用该句型自由造句(无场景限定)" });
       setPhase("question");
     } else {
-      loadQuestion(item.p, "translation");
+      const cached = qIdx != null ? preGenRef.current[qIdx] : null;
+      if (cached) {
+        delete preGenRef.current[qIdx];
+        setQ(cached);
+        setPhase("question");
+      } else {
+        loadQuestion(item.p, "translation");
+      }
     }
   };
 
@@ -865,7 +1026,9 @@ function AppInner() {
         }
         nd.mistakes = nd.mistakes.slice(0, 100);
       }
-      if (!freeMode) {
+      // 注意:复合题(combo)的 item 只有 p1/p2、没有 p。目前所有 combo 路径都是 freeMode(不影响排期),
+      // 所以走不到这里;但加一道 item.p 的保险,免得将来改动时漏设 freeMode 直接崩掉。
+      if (!freeMode && item.p) {
         const existed = nd.prog[item.p.id];
         const cur = existed ? { ...existed } : { lv: 0, ok: 0, ng: 0, learnedDate: t };
         let { lv } = cur;
@@ -888,9 +1051,9 @@ function AppInner() {
       setIdx(idx + 1);
       const nextItem = queue[idx + 1];
       if (weeklyMode) beginWeeklyItem(nextItem);
-      else if (homeworkMode) beginHomeworkItem(nextItem);
+      else if (homeworkMode) beginHomeworkItem(nextItem, idx + 1);
       else if (listenMode) beginListenItem(nextItem);
-      else beginItem(nextItem);
+      else beginItem(nextItem, idx + 1);
     } else {
       setDb((d) => {
         const nd = { ...d, meta: { ...d.meta }, session: null };
@@ -1076,6 +1239,17 @@ function AppInner() {
                 {importMsg && <div className="copy-msg">{importMsg}</div>}
               </div>
             )}
+          </section>
+
+          <section className="account-section">
+            <button
+              className="btn-mini ghost"
+              onClick={async () => {
+                if (!window.confirm("确定要退出登录吗?进度已经存在云端,重新登录后还在。")) return;
+                await supabase.auth.signOut();
+                window.location.reload();
+              }}
+            >退出登录</button>
           </section>
         </main>
       )}
@@ -1367,6 +1541,7 @@ function Style() {
 .mini-stats{margin-top:14px;font-size:12px;color:var(--ink-soft);text-align:center}
 
 .backup-section{margin-top:22px;padding-top:14px;border-top:1px dashed var(--line)}
+.account-section{margin-top:18px;padding-top:14px;border-top:1px dashed var(--line);text-align:center}
 .backup-head{font-size:11px;color:var(--ink-soft);letter-spacing:1px;margin-bottom:8px;text-align:center}
 .backup-card{margin-top:10px;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:12px}
 .backup-title{font-size:12px;color:var(--ink-soft);line-height:1.6;margin-bottom:8px}

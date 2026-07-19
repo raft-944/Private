@@ -220,9 +220,12 @@ async function gradeCombo(p1, p2, q, answer) {
 
 请依据上述教材解释判卷。若学习者的句子语法无误,但违反了教材解释中说明的使用场景、文体或语气限制,须明确指出,不可判为完全正确。若踩中易混淆点,请说明与哪个句型混淆了、区别在哪。
 
-输出JSON: {"verdict":"correct|partial|wrong","reference":"一个自然的参考答案(日语,需同时包含两个句型)","explanation":"分别点评两个句型各自的使用情况,指出哪里好、哪里需要改,中日混合,150字以内"}`;
+给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。
+
+输出JSON: {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语,需同时包含两个句型)","explanation":"分别点评两个句型各自的使用情况,指出哪里好、哪里需要改,中日混合,150字以内"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
+  if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
   return g;
 }
 
@@ -253,9 +256,12 @@ async function gradeListening(p, q, answer) {
 - "partial": 大体框架听对了,但漏听/听错了个别助词、词尾变化或某个词
 - "wrong": 明显没听清,内容和原文有实质性出入,或没有作答
 
-输出JSON: {"verdict":"correct|partial|wrong","explanation":"具体指出听写内容和原文的差异(比如漏了哪个助词、把哪个词的活用形式听错了),再用一句话说明这句话的中文意思,中日混合,120字以内"}`;
+给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何听写差异、听错/漏听的地方,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。
+
+输出JSON: {"verdict":"correct|partial|wrong","selfCheck":true|false,"explanation":"具体指出听写内容和原文的差异(比如漏了哪个助词、把哪个词的活用形式听错了),再用一句话说明这句话的中文意思,中日混合,120字以内"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
+  if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
   return { ...g, reference: q.jp };
 }
 
@@ -334,9 +340,12 @@ async function gradeAnswer(p, q, answer) {
 
 请依据上述教材解释判卷。若学习者的句子语法无误,但违反了教材解释中说明的使用场景、文体或语气限制,须明确指出,不可判为完全正确。若踩中易混淆点,请说明与哪个句型混淆了、区别在哪。
 
-输出JSON: {"verdict":"correct|partial|wrong","reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,中日混合,120字以内"}`;
+给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。
+
+输出JSON: {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,中日混合,120字以内"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
+  if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
   return g;
 }
 
@@ -843,16 +852,18 @@ function AppInner() {
       const isCombo = (weeklyMode || homeworkMode) && item.sub === "combo";
       const isListening = q && q.type === "listening";
       if (isListening) nd.listenStats.total += 1;
+      // AI 自我核验:verdict 是 correct 但 selfCheck 为 false,说明判定和讲解自相矛盾,
+      // 存在"误判为 correct 导致漏检"的风险 → 不直接放行,继续留在错题本等人工复核
+      const needsReview = g.verdict === "correct" && g.selfCheck === false;
       if (g.verdict === "correct") {
         nd.stats.ok += 1;
         if (isListening) nd.listenStats.ok += 1;
-        // 如果这道题是从错题本重练来的,做对了就自动移除,不用手动清
-        if (item.mistakeId) nd.mistakes = nd.mistakes.filter((m) => m.id !== item.mistakeId);
-      } else {
-        const base = { task: q.task, type: q.type, ans: answer.trim() || "(未作答)", ref: g.reference, exp: g.explanation, date: t };
+      }
+      if (g.verdict !== "correct" || needsReview) {
+        const base = { task: q.task, type: q.type, ans: answer.trim() || "(未作答)", ref: g.reference, exp: g.explanation, date: t, needsReview };
         const idPart = isCombo ? { pid: item.p1.id, pid2: item.p2.id } : { pid: item.p.id };
         if (item.mistakeId) {
-          // 重练了还是不对:刷新原来那条记录,而不是再叠加一条新的
+          // 重练了还是不对/仍需复核:刷新原来那条记录,而不是再叠加一条新的
           const pos = nd.mistakes.findIndex((m) => m.id === item.mistakeId);
           if (pos !== -1) nd.mistakes[pos] = { ...nd.mistakes[pos], ...base };
           else nd.mistakes.unshift({ ...base, ...idPart, id: newId() });
@@ -860,6 +871,9 @@ function AppInner() {
           nd.mistakes.unshift({ ...base, ...idPart, id: newId() });
         }
         nd.mistakes = nd.mistakes.slice(0, 100);
+      } else if (item.mistakeId) {
+        // verdict correct 且 selfCheck 通过:这道题真正过关了,从错题本移除
+        nd.mistakes = nd.mistakes.filter((m) => m.id !== item.mistakeId);
       }
       // 注意:复合题(combo)的 item 只有 p1/p2、没有 p。目前所有 combo 路径都是 freeMode(不影响排期),
       // 所以走不到这里;但加一道 item.p 的保险,免得将来改动时漏设 freeMode 直接崩掉。
@@ -1187,6 +1201,9 @@ function AppInner() {
               {phase === "result" && result && (
                 <div className="result-wrap">
                   <Stamp verdict={result.verdict} />
+                  {result.verdict === "correct" && result.selfCheck === false && (
+                    <div className="review-flag">⚠️ 建议复核 · AI判定与讲解有出入,已留在错题本</div>
+                  )}
                   {answer.trim() && <div className="your-ans"><label>你的答案</label><div className="serif">{answer}</div></div>}
                   <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{result.reference}</div></div>
                   <div className="exp-block"><label>先生の講評</label><div>{result.explanation}</div></div>
@@ -1264,13 +1281,20 @@ function AppInner() {
             const p2 = m.pid2 !== undefined ? PATTERNS[m.pid2] : null;
             return (
               <div key={m.id || i} className="card mistake-card">
-                <div className="mk-head"><span className="serif">{p.pattern}{p2 && <> ＋ {p2.pattern}</>}</span><span className="mk-date">{m.date}</span></div>
+                <div className="mk-head">
+                  <span className="mk-head-left">
+                    <span className="serif">{p.pattern}{p2 && <> ＋ {p2.pattern}</>}</span>
+                    {m.needsReview && <span className="badge badge-review">⚠️ 建议复核</span>}
+                  </span>
+                  <span className="mk-date">{m.date}</span>
+                </div>
                 <div className="mk-task">{m.type === "listening" ? "🎧 聴解练习(听力原文见下方参考答案)" : m.task}</div>
                 <div className="mk-line"><label>当时答</label><span className="serif">{m.ans}</span></div>
                 <div className="mk-line"><label>参考</label><span className="serif shu">{m.ref}</span></div>
                 <div className="mk-exp">{m.exp}</div>
                 <div className="btn-row">
                   <button className="btn-mini" onClick={() => (p2 ? startComboFree(p, p2, m.id) : m.type === "listening" ? startListenFree(p, m.id) : startFree(p, m.id))}>{p2 ? "重练这组合" : m.type === "listening" ? "重新听一次" : "重练这个句型"}</button>
+                  {m.needsReview && <button className="btn-mini" onClick={() => setDb((d) => ({ ...d, mistakes: d.mistakes.filter((x, j) => (m.id ? x.id !== m.id : j !== i)) }))}>✓ 确认无误</button>}
                   <button className="btn-mini ghost" onClick={() => setDb((d) => ({ ...d, mistakes: d.mistakes.filter((x, j) => (m.id ? x.id !== m.id : j !== i)) }))}>移除</button>
                 </div>
               </div>
@@ -1428,6 +1452,8 @@ function Style() {
 .exp-block{margin-top:12px;font-size:14px;line-height:1.8;background:#FAF4EC;border-radius:10px;padding:12px}
 .exp-block label{margin-bottom:6px}
 .card .btn-main{margin-top:16px}
+.review-flag{margin:8px 0 4px;padding:8px 12px;background:#FBEAEA;border:1px solid #EAC5C5;border-radius:10px;
+  font-size:12px;color:var(--shu);line-height:1.6}
 
 .stamp{position:absolute;top:-22px;right:2px;margin:0;width:150px;height:150px;border:3px solid var(--shu);border-radius:50%;
   display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--shu);background:transparent;
@@ -1462,8 +1488,10 @@ function Style() {
 .drill-bar .btn-outline{border-color:#6B3F9A;color:#6B3F9A}
 .drill-bar .btn-outline:hover{background:#EFE6F5}
 .mistake-card{margin-bottom:12px;padding:16px}
-.mk-head{display:flex;justify-content:space-between;font-size:15px;font-weight:700;color:var(--ai-deep)}
-.mk-date{font-size:11px;color:var(--ink-soft);font-weight:400}
+.mk-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:15px;font-weight:700;color:var(--ai-deep)}
+.mk-head-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.badge-review{background:#FBEAEA;color:var(--shu)}
+.mk-date{font-size:11px;color:var(--ink-soft);font-weight:400;white-space:nowrap}
 .mk-task{font-size:14px;margin:8px 0}
 .mk-line{margin:6px 0;font-size:14px}
 .mk-line label{display:inline-block;margin-right:8px;margin-bottom:0}

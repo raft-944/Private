@@ -220,7 +220,7 @@ const S = {
   title: { fontSize: 22, fontWeight: 700, color: "#223A5E", marginBottom: 4 },
   sub: { fontSize: 12, color: "#6B6D76", marginBottom: 20 },
   modeTitle: { fontSize: 15, fontWeight: 600, color: "#2A2B30", marginBottom: 14, paddingBottom: 10, borderBottom: "1px solid #E4E0D4" },
-  input: { width: "100%", padding: "12px 14px", fontSize: 15, border: "1.5px solid #E4E0D4", borderRadius: 10, marginBottom: 10, boxSizing: "border-box", background: "#FDFCF9", color: "#2A2B30" },
+  input: { width: "100%", padding: "12px 14px", fontSize: 16, border: "1.5px solid #E4E0D4", borderRadius: 10, marginBottom: 10, boxSizing: "border-box", background: "#FDFCF9", color: "#2A2B30" },
   btn: { width: "100%", padding: "13px", fontSize: 15, fontWeight: 600, color: "#fff", background: "#2E4A7D", border: "none", borderRadius: 10, cursor: "pointer", marginTop: 4 },
   err: { color: "#C0392F", fontSize: 13, marginTop: 12, lineHeight: 1.6, background: "#FCEBE9", padding: "10px 12px", borderRadius: 8 },
   msg: { color: "#2E7D5B", fontSize: 13, marginTop: 12, lineHeight: 1.7, background: "#E4F0EC", padding: "10px 12px", borderRadius: 8 },

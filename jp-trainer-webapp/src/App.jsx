@@ -1401,7 +1401,7 @@ function Style() {
 .wk-card{border-color:#D9C7E8}
 .ls-card{border-color:#B7D9C9}
 .voice-picker{display:flex;gap:8px;margin-bottom:12px;align-items:center}
-.voice-picker select{flex:1;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:#FDFCF9;color:var(--ink)}
+.voice-picker select{flex:1;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:16px;background:#FDFCF9;color:var(--ink)}
 .voice-picker .btn-mini{margin-top:0;flex:0 0 auto;white-space:nowrap}
 .ls-btn{border-color:#2E7D5B;color:#2E7D5B}
 .ls-btn:hover{background:#E4F0EC}
@@ -1417,7 +1417,7 @@ function Style() {
 .backup-head{font-size:11px;color:var(--ink-soft);letter-spacing:1px;margin-bottom:8px;text-align:center}
 .backup-card{margin-top:10px;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:12px}
 .backup-title{font-size:12px;color:var(--ink-soft);line-height:1.6;margin-bottom:8px}
-.backup-box{width:100%;height:90px;font-size:11px;padding:8px;border:1px solid var(--line);border-radius:8px;
+.backup-box{width:100%;height:110px;font-size:16px;padding:8px;border:1px solid var(--line);border-radius:8px;
   background:#FDFCF9;color:var(--ink);resize:vertical;word-break:break-all}
 .copy-msg{margin-top:8px;font-size:12px;color:var(--ai)}
 

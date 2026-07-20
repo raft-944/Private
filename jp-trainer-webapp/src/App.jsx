@@ -142,13 +142,23 @@ async function callAIRaw(system, user, maxTokens) {
   throw lastErr;
 }
 
-async function callAI(system, user) {
-  const text = await callAIRaw(system, user, 1200);
-  const jsonStr = extractFirstJsonObject(text);
-  if (!jsonStr) throw new Error("返回内容不含完整JSON:" + text.slice(0, 80));
-  const parsed = JSON.parse(jsonStr);
-  if (!parsed || typeof parsed !== "object") throw new Error("解析结果异常");
-  return parsed;
+/* 自我核验加长了判卷的输出内容,偶尔会在预算不够时把JSON写到一半就被截断。
+   这里遇到"截断/解析失败"时自动加大预算重试一次,不够了才把错误抛给用户看。 */
+async function callAI(system, user, maxTokens = 3000) {
+  let lastErr;
+  for (const budget of [maxTokens, maxTokens * 2]) {
+    const text = await callAIRaw(system, user, budget);
+    try {
+      const jsonStr = extractFirstJsonObject(text);
+      if (!jsonStr) throw new Error("返回内容不含完整JSON:" + text.slice(0, 80));
+      const parsed = JSON.parse(jsonStr);
+      if (!parsed || typeof parsed !== "object") throw new Error("解析结果异常");
+      return parsed;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
 }
 
 /* 批量版:一次调用要多道题,maxTokens按题数放大一些,避免写到一半被截断 */
@@ -202,6 +212,42 @@ function contrastsText(p) {
   return truncateText(t, 400);
 }
 
+/* 课本例句的逐词标注结果缓存在 localStorage(和判卷/进度数据分开存,不用同步到云端),
+   同一句例句所有人反复练到时不用重复调 AI。 */
+const WORD_CACHE_KEY = "jp_word_cache_v1";
+function getCachedWords(text) {
+  try {
+    const store = JSON.parse(localStorage.getItem(WORD_CACHE_KEY) || "{}");
+    return store[text] || null;
+  } catch { return null; }
+}
+function setCachedWords(text, words) {
+  try {
+    const store = JSON.parse(localStorage.getItem(WORD_CACHE_KEY) || "{}");
+    store[text] = words;
+    const keys = Object.keys(store);
+    if (keys.length > 400) delete store[keys[0]]; // 简单限制缓存条数,避免无限增长
+    localStorage.setItem(WORD_CACHE_KEY, JSON.stringify(store));
+  } catch { /* 缓存失败不影响功能,忽略即可 */ }
+}
+
+/* 生词点选提示:课本例句是静态数据,不是每次都跟着出题一起生成的,
+   所以逐词读音/释义单独用一个轻量调用现取,现取的结果由调用方(组件里)缓存到 localStorage,
+   同一句例句以后不用再调 AI。 */
+async function annotateWords(jpTextRaw) {
+  // 提示词经常被AI自己包一层「」装饰性引号(不是真正的句子内容),
+  // 这种引号交给AI去切词容易越权处理成一个"片段",这里先剥掉,只把干净的文本送去切词。
+  const jpText = jpTextRaw.replace(/[「」『』]/g, "").trim();
+  if (!jpText) throw new Error("empty text after strip");
+  const sys = `あなたは日本語教師です。请把给定的日语句子切分成适合学习者查词的自然单位(助词可以附着在前面的词上,不用切得过细),并给出每个部分在该语境下的假名读音和简明中文释义。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const user = `句子: ${jpText}
+注意:所有切分片段按顺序拼接起来必须和原句一字不差,不能有遗漏、增补或改动。
+输出JSON: {"words":[{"surface":"片段原文","yomi":"该语境下的假名读音","meaning":"简明中文释义(3~8字以内)"}]}`;
+  const r = await callAI(sys, user);
+  if (!Array.isArray(r.words) || !r.words.length) throw new Error("bad word annotation");
+  return r.words;
+}
+
 async function gradeCombo(p1, p2, q, answer) {
   const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:句型A ${levelBenchmark(p1.level)},句型B ${levelBenchmark(p2.level)}。判卷标准需分别符合各自句型的难度基准。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})
@@ -220,9 +266,9 @@ async function gradeCombo(p1, p2, q, answer) {
 
 请依据上述教材解释判卷。若学习者的句子语法无误,但违反了教材解释中说明的使用场景、文体或语气限制,须明确指出,不可判为完全正确。若踩中易混淆点,请说明与哪个句型混淆了、区别在哪。
 
-给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。
+给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
 
-输出JSON: {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语,需同时包含两个句型)","explanation":"分别点评两个句型各自的使用情况,指出哪里好、哪里需要改,中日混合,150字以内"}`;
+输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语,需同时包含两个句型)","explanation":"分别点评两个句型各自的使用情况,指出哪里好、哪里需要改,中日混合,150字以内"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
   if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
@@ -256,9 +302,9 @@ async function gradeListening(p, q, answer) {
 - "partial": 大体框架听对了,但漏听/听错了个别助词、词尾变化或某个词
 - "wrong": 明显没听清,内容和原文有实质性出入,或没有作答
 
-给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何听写差异、听错/漏听的地方,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。
+给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何听写差异、听错/漏听的地方,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
 
-输出JSON: {"verdict":"correct|partial|wrong","selfCheck":true|false,"explanation":"具体指出听写内容和原文的差异(比如漏了哪个助词、把哪个词的活用形式听错了),再用一句话说明这句话的中文意思,中日混合,120字以内"}`;
+输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"explanation":"具体指出听写内容和原文的差异(比如漏了哪个助词、把哪个词的活用形式听错了),再用一句话说明这句话的中文意思,中日混合,120字以内"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
   if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
@@ -281,9 +327,11 @@ async function genQuestion(p, avoid, forceType) {
 4. 提示词(1~2个日语单词,不是整句)必须直接服务于这唯一的意思,不能引向别的方向`}
 话题方向: ${topic}
 ${avoid && avoid.length ? "避免与这些题目雷同: " + avoid.join(" / ") : ""}
-输出JSON格式: {"type":"${type}","task":"题目内容(中文)","hint":"提示(可为空字符串,如提示词或注意点)"}`;
+${type === "composition" ? "重要:hint里给的每一个日语提示词,都必须在hintWords数组里对应给出一条{surface,yomi,meaning},一个都不能漏、不能只写空数组。" : "重要:hint只能用来提示题目里生僻词汇的日语写法/读音(比如学习者可能不会写的名词),绝对不能透露目标句型本身应该变成的具体形式(比如活用形、时态、敬体简体、否定形等)——那正是这道题要考的东西,写出来就等于剧透了答案。没有需要提示的生词时,hint留空字符串\"\"。"}
+输出JSON格式: {"type":"${type}","task":"题目内容(中文)","hint":"提示(可为空字符串,如提示词或注意点)","hintWords":[{"surface":"提示词原文","yomi":"该语境下的假名读音","meaning":"简明中文释义(3~8字)"}]${type === "composition" ? "(hint里的每个日语提示词都要在这里给一条,不能空)" : "(翻译题给空数组[])"}}`;
   const q = await callAI(sys, user);
   if (!q.task) throw new Error("bad question");
+  q.hintWords = Array.isArray(q.hintWords) ? q.hintWords : [];
   return q;
 }
 
@@ -298,14 +346,14 @@ async function genQuestionBatch(items) {
 ${list}
 
 出题要求:
-- "翻译题":给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型
-- "造句题":场景(中文,25字以内)只能表达一个清晰、单一的意思,不能同时塞入两件不相关的信息,不多给也不少给信息;配1~2个日语提示词(单词,不是整句)
+- "翻译题":给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型;hintWords给空数组[]。hint只能用来提示生僻词汇的日语写法/读音,绝对不能透露目标句型本身应该变成的具体形式(活用形、时态、敬体简体、否定形等)——那正是这道题要考的东西,写出来就等于剧透了答案;没有需要提示的生词时hint留空字符串""
+- "造句题":场景(中文,25字以内)只能表达一个清晰、单一的意思,不能同时塞入两件不相关的信息,不多给也不少给信息;配1~2个日语提示词(单词,不是整句)写进hint里,并且hint里的每一个提示词都必须在hintWords数组里对应给出一条{surface,yomi,meaning}(该语境下的假名读音+简明中文释义),一个都不能漏、不能只写空数组
 - 各题之间内容不要相似雷同
 
-按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"task":"题目内容(中文)","hint":"提示(可为空字符串)"}`;
+按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"task":"题目内容(中文)","hint":"提示(可为空字符串)","hintWords":[{"surface":"提示词原文","yomi":"...","meaning":"..."}]}`;
   const arr = await callAIArray(sys, user, items.length);
   if (arr.length !== items.length) throw new Error("批量出题数量(" + arr.length + ")与预期(" + items.length + ")不符");
-  return arr.map((q, i) => ({ type: items[i].type, task: q.task, hint: q.hint || "" }));
+  return arr.map((q, i) => ({ type: items[i].type, task: q.task, hint: q.hint || "", hintWords: Array.isArray(q.hintWords) ? q.hintWords : [] }));
 }
 
 /* 批量版(纯翻译题):专门给"每日作业"里那些必须是翻译题的题位用,
@@ -318,6 +366,7 @@ async function genTranslationBatch(patterns) {
 ${list}
 
 每一题:给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型。各题之间内容不要相似雷同。
+hint只能用来提示生僻词汇的日语写法/读音,绝对不能透露目标句型本身应该变成的具体形式(活用形、时态、敬体简体、否定形等)——那正是这道题要考的东西,写出来就等于剧透了答案;没有需要提示的生词时hint留空字符串""。
 
 按顺序输出一个JSON数组,长度必须正好是 ${patterns.length},每个元素格式: {"task":"题目内容(中文)","hint":"提示(可为空字符串)"}`;
   const arr = await callAIArray(sys, user, patterns.length);
@@ -325,28 +374,60 @@ ${list}
   return arr.map((q) => ({ type: "translation", task: q.task, hint: q.hint || "" }));
 }
 
-async function gradeAnswer(p, q, answer) {
+async function gradeAnswer(p, q, answer, hintedWords) {
   const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `句型: ${p.pattern}(${p.conn} / ${p.meaning})
 【教材解释】${explainText(p)}
 【易混淆点】${contrastsText(p)}
 题目(${q.type === "translation" ? "翻译题" : "造句题"}): ${q.task} ${q.hint ? "提示:" + q.hint : ""}
 学生的答案: ${answer}
+${hintedWords && hintedWords.length ? `学生在做题过程中主动点开查看过读音/释义的生词(说明这些词单纯是词汇量不够,不代表句型没掌握): ${hintedWords.join("、")}` : ""}
 
 判定标准:
-- "correct": 语法正确且正确使用了目标句型(允许不同但自然的表达、汉字/假名书写差异)
-- "partial": 用了目标句型且意思基本传达,但有小错误(助词、活用、时态等)
+- "correct": 语法正确且正确使用了目标句型(允许不同但自然的表达、汉字/假名书写差异)。若唯一的问题出在上面"主动查过的生词"列表对应的词的写法或用法上、句型结构本身正确,也判 correct,在讲解里提醒这个词还需巩固即可,不要因此降级
+- "partial": 用了目标句型且意思基本传达,但有小错误(助词、活用、时态等),且这些错误不属于上面"主动查过的生词"能解释的范围
 - "wrong": 没有使用目标句型,或有严重语法错误,或意思不对
 
 请依据上述教材解释判卷。若学习者的句子语法无误,但违反了教材解释中说明的使用场景、文体或语气限制,须明确指出,不可判为完全正确。若踩中易混淆点,请说明与哪个句型混淆了、区别在哪。
 
-给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。
+给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
 
-输出JSON: {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,中日混合,120字以内"}`;
+输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,中日混合,120字以内"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
   if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
   return g;
+}
+
+/* ================= 生词点选提示组件 =================
+   words 没传入(还没加载好/加载失败)时,原样显示纯文本,不可点击——不能阻塞主流程。
+   words 传入后,按词切分成可点击的片段:第一次点显示假名读音(ruby注音),
+   第二次点在后面追加显示中文释义,第三次点收起,循环。 */
+function WordHintText({ text, words, onHintWord, className }) {
+  const [clicks, setClicks] = useState({});
+  if (!words || !words.length) return <span className={className}>{text}</span>;
+  return (
+    <span className={className}>
+      {words.map((w, i) => {
+        const st = clicks[i] || 0;
+        return (
+          <span key={i}>
+            <ruby
+              className={"wh-word" + (st > 0 ? " wh-hinted" : "")}
+              onClick={() => {
+                setClicks((c) => ({ ...c, [i]: ((c[i] || 0) + 1) % 3 }));
+                onHintWord && onHintWord(w.surface);
+              }}
+            >
+              {w.surface}
+              {st > 0 && <rt>{w.yomi}</rt>}
+            </ruby>
+            {st > 1 && <span className="wh-meaning">({w.meaning})</span>}
+          </span>
+        );
+      })}
+    </span>
+  );
 }
 
 /* ================= 印章组件(签名元素) ================= */
@@ -372,12 +453,18 @@ function AppInner() {
   const [needsFirstUseConfirm, setNeedsFirstUseConfirm] = useState(false);
   const [speechOk] = useState(() => typeof window !== "undefined" && !!window.speechSynthesis);
   const [jaVoices, setJaVoices] = useState([]);
+  const [hintedWords, setHintedWords] = useState([]); // 本题里学生主动点开查过的生词,判卷时从宽处理
+  const [exWords, setExWords] = useState(null); // intro 例句的逐词读音/释义,懒加载+本地缓存
+  const markHinted = (w) => setHintedWords((hw) => (hw.includes(w) ? hw : [...hw, w]));
 
   useEffect(() => {
     if (!window.speechSynthesis) return;
     const loadVoices = () => {
       const all = window.speechSynthesis.getVoices();
-      setJaVoices(all.filter((v) => v.lang && v.lang.toLowerCase().startsWith("ja")));
+      const ja = all.filter((v) => v.lang && v.lang.toLowerCase().startsWith("ja"));
+      // iOS 上同一个名字(比如 Kyoko)有时会重复出现两条 voiceURI 不同的记录,按名字去重避免下拉框里出现两个一样的选项
+      const seen = new Set();
+      setJaVoices(ja.filter((v) => (seen.has(v.name) ? false : (seen.add(v.name), true))));
     };
     loadVoices();
     window.speechSynthesis.onvoiceschanged = loadVoices; // 语音列表常常是异步加载的
@@ -393,6 +480,37 @@ function AppInner() {
   const [q, setQ] = useState(null);
   const [answer, setAnswer] = useState("");
   const [result, setResult] = useState(null);
+
+  /* intro 阶段的课本例句逐词标注:优先查本地缓存,没有才现调一次AI,失败就静默放弃
+     (这是锦上添花的辅助功能,不能因为它挂了就卡住正常做题流程)。 */
+  useEffect(() => {
+    if (phase !== "intro") return;
+    const text = queue[idx] && queue[idx].p && queue[idx].p.exJP;
+    if (!text) return;
+    const cached = getCachedWords(text);
+    if (cached) { setExWords(cached); return; }
+    let cancelled = false;
+    annotateWords(text)
+      .then((words) => { if (!cancelled) { setCachedWords(text, words); setExWords(words); } })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [phase, idx, queue]);
+
+  /* 出题时如果AI漏给了hintWords(批量出题时偶尔会漏),这里兜底现调一次补上,
+     同样走 localStorage 缓存,不会每次都调 AI。只对造句题生效——翻译题的hint是
+     AI自由发挥写的中文说明文字,不是词汇列表,不该被当日语句子去切词。 */
+  const [hintWordsFallback, setHintWordsFallback] = useState(null);
+  useEffect(() => {
+    setHintWordsFallback(null);
+    if (!q || q.type !== "composition" || !q.hint || (q.hintWords && q.hintWords.length)) return;
+    const cached = getCachedWords(q.hint);
+    if (cached) { setHintWordsFallback(cached); return; }
+    let cancelled = false;
+    annotateWords(q.hint)
+      .then((words) => { if (!cancelled) { setCachedWords(q.hint, words); setHintWordsFallback(words); } })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [q]);
   const [freeMode, setFreeMode] = useState(false);
   const [homeworkMode, setHomeworkMode] = useState(false);
   const [weeklyMode, setWeeklyMode] = useState(false);
@@ -705,7 +823,7 @@ function AppInner() {
   };
 
   const beginItem = (item, qIdx) => {
-    setAnswer(""); setResult(null); setQ(null);
+    setAnswer(""); setResult(null); setQ(null); setHintedWords([]); setExWords(null);
     if (item.isNew) setPhase("intro");
     else {
       const cached = qIdx != null ? preGenRef.current[qIdx] : null;
@@ -762,7 +880,7 @@ function AppInner() {
   };
 
   const beginWeeklyItem = (item) => {
-    setAnswer(""); setResult(null);
+    setAnswer(""); setResult(null); setHintedWords([]); setExWords(null);
     if (item.sub === "combo") loadComboQuestion(item.p1, item.p2);
     else loadQuestion(item.p, "translation");
   };
@@ -781,7 +899,7 @@ function AppInner() {
   };
 
   const beginHomeworkItem = (item, qIdx) => {
-    setAnswer(""); setResult(null);
+    setAnswer(""); setResult(null); setHintedWords([]); setExWords(null);
     if (item.sub === "combo") {
       loadComboQuestion(item.p1, item.p2);
     } else if (item.hw === "comp") {
@@ -820,7 +938,7 @@ function AppInner() {
         ? await gradeCombo(item.p1, item.p2, q, answer.trim())
         : q && q.type === "listening"
         ? await gradeListening(item.p, q, answer.trim())
-        : await gradeAnswer(item.p, q, answer.trim());
+        : await gradeAnswer(item.p, q, answer.trim(), hintedWords);
       setResult(g);
       applyResult(item, g);
       setPhase("result");
@@ -1139,7 +1257,8 @@ function AppInner() {
             <section className="card intro-card">
               <div className="intro-row"><label>接続</label><div className="serif">{cur.p.conn}</div></div>
               <div className="intro-row"><label>意味</label><div>{cur.p.meaning}</div></div>
-              <div className="intro-row"><label>例文</label><div><div className="serif ex-jp">{cur.p.exJP}</div><div className="ex-cn">{cur.p.exCN}</div></div></div>
+              <div className="intro-row"><label>例文</label><div><div className="serif ex-jp"><WordHintText text={cur.p.exJP} words={exWords} onHintWord={markHinted} /></div><div className="ex-cn">{cur.p.exCN}</div></div></div>
+              {exWords && <div className="wh-tip-note">生词不认识?点一下看读音,再点一下看释义</div>}
               <button className="btn-main" onClick={() => loadQuestion(cur.p)}>読めた,开始做题 →</button>
             </section>
           )}
@@ -1172,7 +1291,11 @@ function AppInner() {
               ) : (
                 <div className="q-task serif">{q.task}</div>
               )}
-              {q.hint && <div className="q-hint">ヒント: {q.hint}</div>}
+              {q.hint && (
+                <div className="q-hint">
+                  ヒント: <WordHintText text={q.hint} words={(q.hintWords && q.hintWords.length ? q.hintWords : hintWordsFallback)} onHintWord={markHinted} />
+                </div>
+              )}
 
               {phase === "question" && (
                 <>
@@ -1324,7 +1447,7 @@ function Style() {
   --ai:#2E4A7D; --ai-deep:#223A5E; --shu:#C0392F; --line:#E4E0D4;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-.app{min-height:100vh;background:var(--paper);color:var(--ink);
+.app{min-height:100vh;min-height:100dvh;background:var(--paper);color:var(--ink);
   font-family:"Noto Sans JP","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
   padding-bottom:76px;max-width:640px;margin:0 auto}
 .serif{font-family:"Noto Sans JP","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif}
@@ -1440,6 +1563,11 @@ function Style() {
 .btn-listen{padding:14px 20px;background:var(--ai);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:600;cursor:pointer}
 .btn-listen.ghost{background:none;border:1.5px solid var(--ai);color:var(--ai)}
 .q-hint{font-size:13px;color:var(--ink-soft);margin-bottom:8px}
+.wh-word{cursor:pointer;border-bottom:1.5px dotted var(--ai);ruby-align:center}
+.wh-word.wh-hinted{border-bottom-style:solid;color:var(--ai-deep)}
+.wh-word rt{font-size:10px;color:var(--ai);user-select:none}
+.wh-meaning{font-size:12px;color:var(--ink-soft)}
+.wh-tip-note{font-size:11px;color:var(--ink-soft);margin:-6px 0 10px}
 .answer-box{width:100%;margin-top:10px;padding:12px;font-size:17px;line-height:1.7;border:1.5px solid var(--line);
   border-radius:12px;background:#FDFCF9;resize:vertical;color:var(--ink)}
 .answer-box:focus{outline:2px solid var(--ai);border-color:var(--ai)}

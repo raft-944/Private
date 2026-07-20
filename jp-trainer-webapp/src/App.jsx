@@ -142,13 +142,23 @@ async function callAIRaw(system, user, maxTokens) {
   throw lastErr;
 }
 
-async function callAI(system, user) {
-  const text = await callAIRaw(system, user, 1200);
-  const jsonStr = extractFirstJsonObject(text);
-  if (!jsonStr) throw new Error("返回内容不含完整JSON:" + text.slice(0, 80));
-  const parsed = JSON.parse(jsonStr);
-  if (!parsed || typeof parsed !== "object") throw new Error("解析结果异常");
-  return parsed;
+/* 自我核验加长了判卷的输出内容,偶尔会在预算不够时把JSON写到一半就被截断。
+   这里遇到"截断/解析失败"时自动加大预算重试一次,不够了才把错误抛给用户看。 */
+async function callAI(system, user, maxTokens = 3000) {
+  let lastErr;
+  for (const budget of [maxTokens, maxTokens * 2]) {
+    const text = await callAIRaw(system, user, budget);
+    try {
+      const jsonStr = extractFirstJsonObject(text);
+      if (!jsonStr) throw new Error("返回内容不含完整JSON:" + text.slice(0, 80));
+      const parsed = JSON.parse(jsonStr);
+      if (!parsed || typeof parsed !== "object") throw new Error("解析结果异常");
+      return parsed;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
 }
 
 /* 批量版:一次调用要多道题,maxTokens按题数放大一些,避免写到一半被截断 */
@@ -220,9 +230,9 @@ async function gradeCombo(p1, p2, q, answer) {
 
 请依据上述教材解释判卷。若学习者的句子语法无误,但违反了教材解释中说明的使用场景、文体或语气限制,须明确指出,不可判为完全正确。若踩中易混淆点,请说明与哪个句型混淆了、区别在哪。
 
-给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。
+给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
 
-输出JSON: {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语,需同时包含两个句型)","explanation":"分别点评两个句型各自的使用情况,指出哪里好、哪里需要改,中日混合,150字以内"}`;
+输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语,需同时包含两个句型)","explanation":"分别点评两个句型各自的使用情况,指出哪里好、哪里需要改,中日混合,150字以内"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
   if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
@@ -256,9 +266,9 @@ async function gradeListening(p, q, answer) {
 - "partial": 大体框架听对了,但漏听/听错了个别助词、词尾变化或某个词
 - "wrong": 明显没听清,内容和原文有实质性出入,或没有作答
 
-给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何听写差异、听错/漏听的地方,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。
+给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何听写差异、听错/漏听的地方,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
 
-输出JSON: {"verdict":"correct|partial|wrong","selfCheck":true|false,"explanation":"具体指出听写内容和原文的差异(比如漏了哪个助词、把哪个词的活用形式听错了),再用一句话说明这句话的中文意思,中日混合,120字以内"}`;
+输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"explanation":"具体指出听写内容和原文的差异(比如漏了哪个助词、把哪个词的活用形式听错了),再用一句话说明这句话的中文意思,中日混合,120字以内"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
   if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
@@ -340,9 +350,9 @@ async function gradeAnswer(p, q, answer) {
 
 请依据上述教材解释判卷。若学习者的句子语法无误,但违反了教材解释中说明的使用场景、文体或语气限制,须明确指出,不可判为完全正确。若踩中易混淆点,请说明与哪个句型混淆了、区别在哪。
 
-给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。
+给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
 
-输出JSON: {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,中日混合,120字以内"}`;
+输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,中日混合,120字以内"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
   if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
@@ -377,7 +387,10 @@ function AppInner() {
     if (!window.speechSynthesis) return;
     const loadVoices = () => {
       const all = window.speechSynthesis.getVoices();
-      setJaVoices(all.filter((v) => v.lang && v.lang.toLowerCase().startsWith("ja")));
+      const ja = all.filter((v) => v.lang && v.lang.toLowerCase().startsWith("ja"));
+      // iOS 上同一个名字(比如 Kyoko)有时会重复出现两条 voiceURI 不同的记录,按名字去重避免下拉框里出现两个一样的选项
+      const seen = new Set();
+      setJaVoices(ja.filter((v) => (seen.has(v.name) ? false : (seen.add(v.name), true))));
     };
     loadVoices();
     window.speechSynthesis.onvoiceschanged = loadVoices; // 语音列表常常是异步加载的
@@ -1324,7 +1337,7 @@ function Style() {
   --ai:#2E4A7D; --ai-deep:#223A5E; --shu:#C0392F; --line:#E4E0D4;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-.app{min-height:100vh;background:var(--paper);color:var(--ink);
+.app{min-height:100vh;min-height:100dvh;background:var(--paper);color:var(--ink);
   font-family:"Noto Sans JP","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
   padding-bottom:76px;max-width:640px;margin:0 auto}
 .serif{font-family:"Noto Sans JP","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif}

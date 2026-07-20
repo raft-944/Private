@@ -162,17 +162,30 @@ async function callAIArray(system, user, itemCount) {
 }
 
 /* 用浏览器内置的语音合成朗读日语,免费、不消耗AI额度 */
+let currentUtterance = null; // 保留强引用,防止 iOS/Android 上 utterance 被提前 GC 导致静音不报错
+
 function speakJa(text, rate = 1, voiceURI) {
-  if (!window.speechSynthesis) return false;
-  window.speechSynthesis.cancel(); // 打断上一句还没播完的
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "ja-JP";
-  u.rate = rate;
-  if (voiceURI) {
-    const v = window.speechSynthesis.getVoices().find((v) => v.voiceURI === voiceURI);
-    if (v) u.voice = v;
+  const synth = window.speechSynthesis;
+  if (!synth) return false;
+  const doSpeak = () => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "ja-JP";
+    u.rate = rate;
+    if (voiceURI) {
+      const v = synth.getVoices().find((v) => v.voiceURI === voiceURI);
+      if (v) u.voice = v;
+    }
+    currentUtterance = u;
+    synth.speak(u);
+  };
+  if (synth.speaking || synth.pending) {
+    // iOS Safari 有个已知 bug:cancel() 之后同步立刻 speak() 会被静默丢弃、既不报错也不出声,
+    // 必须让 cancel 先完成一轮事件循环再排下一句
+    synth.cancel();
+    setTimeout(doSpeak, 50);
+  } else {
+    doSpeak();
   }
-  window.speechSynthesis.speak(u);
   return true;
 }
 

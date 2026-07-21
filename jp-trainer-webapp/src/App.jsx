@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, Component } from "react";
 import { supabase } from "./supabaseClient";
 import { PATTERNS, ORDERED } from "./patternsData.js";
 import { SCENES, resolveScenePatterns } from "./data/scenes.js";
+import { CONFUSION_SCENES } from "./data/confusionScenes.js";
+import { CONFUSION_EMAIL_TOPICS } from "./data/confusionEmails.js";
 
 /* ================= 遗忘曲线参数 ================= */
 const INTERVALS = [1, 2, 4, 7, 15, 30, 60]; // 天
@@ -99,6 +101,15 @@ function listenTier(ok) {
    这是唯一改这个映射关系的地方。 */
 function levelBenchmark(level) {
   return level === "中級" ? "N3〜N2" : "N4";
+}
+
+/* 練習帳(易混点辨析/场景对话)不挂在具体句型上,没有现成的 level 字段可用,
+   这里用已学句型里"中級"的占比粗略推断当前所处阶段,同样不默认停留在 N5~N4。 */
+function confusionStageBenchmark(db) {
+  const learned = PATTERNS.filter((p) => db.prog[p.id]);
+  if (!learned.length) return "N4";
+  const advancedRatio = learned.filter((p) => p.level === "中級").length / learned.length;
+  return advancedRatio >= 0.5 ? "N3〜N2" : "N4";
 }
 
 /* ================= AI 调用 ================= */
@@ -543,6 +554,270 @@ verdict 是 "correct" 时,breakdown 设为 null。` : ""}
   return g;
 }
 
+/* ================= 練習帳 · 知识辨析(自由练习,不进排期/不进统计/不进错题本) =================
+   这三个函数只服务「練習帳」的知识辨析小项(自他动词/授受动词/助词辨析等),
+   和 SRS 那一整套 db.prog/db.stats/db.mistakes 完全无关,调用方也绝不会把结果写回那些字段。 */
+
+/* 内置的知识辨析小项。"动词变形"和其余几个不一样:题型固定为中译日、范围表按固定的
+   7 个变形标签分层、判卷要把"变形对不对"和其他小问题分开说——所以给它单独的 kind="verbform",
+   下面三个函数(genConfusionItems/genConfusionQuiz/gradeConfusionAnswer)按 kind 分流,
+   其余小项(不管内置还是用户自建)统统走 kind="generic" 那一支。 */
+const CONFUSION_BUILTIN_TOPICS = [
+  { id: "builtin_transitivity", name: "自他动词", keyword: "", kind: "generic" },
+  { id: "builtin_giving_receiving", name: "授受动词", keyword: "", kind: "generic" },
+  { id: "builtin_particles", name: "助词辨析", keyword: "", kind: "generic" },
+  { id: "builtin_verbform", name: "动词变形", keyword: "", kind: "verbform" },
+];
+
+/* "动词变形"范围表条目固定用这 7 个 sub 标签(生成时会要求 AI 原样使用,不许自创),
+   这里把每个标签归到"基础/复杂/语境辨别"三层,给抽题时的分层混抽用。 */
+const VERBFORM_LAYER_OF_SUB = {
+  て形: "basic", ない形: "basic", た形: "basic", 可能形: "basic",
+  使役形: "advanced", 被动形: "advanced", 使役被动形: "advanced",
+  语境辨别: "context",
+};
+
+/* 生成/追加知识范围表条目。avoidHeads 是该小项已有条目的 head 列表,"再补充一批"时用来避免重复。
+   "不追求穷尽、不为凑数编造冷门用法"直接写进 prompt,而不是靠代码后处理过滤——过滤不出编造的内容。 */
+async function genConfusionItems(topicName, keyword, avoidHeads, stageBenchmark, count = 15, kind = "generic") {
+  const sys = `あなたは日本語教師です。请围绕给定的日语易混淆知识点,列出一批实用条目,作为学习者长期积累的知识范围表。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const avoidLine = avoidHeads && avoidHeads.length ? "已有条目(不要和这些重复): " + avoidHeads.join("、") : "";
+  const user = kind === "verbform" ? `知识点: 动词变形
+学习者水平: ${stageBenchmark}(中文母语,已过N4,目标N1)
+
+这个知识点要覆盖三个层次,不要只出某一层:
+1. 基础变形层:て形、ない形、た形、可能形
+2. 复杂变形层:使役形、被动形、使役被动形
+3. 语境辨别层:不是"会不会变形",而是"该语境下该选哪个形式"(比如带"すでに"提示要用完了/た形、带"もし"提示要用假定形,这类时态/语气暗示词引导的选择判断)
+
+请列出 ${count} 条条目,尽量覆盖以上三层(不要全集中在某一层)。
+${avoidLine}
+
+每条给:
+- head: 该条目的标题(比如具体动词+目标形式"飲む→飲まないで",或语境线索"すでに→た形/完了")
+- sub: 固定从下面7个标签里选一个、原样使用、不要自创新标签: "て形"/"ない形"/"た形"/"可能形"/"使役形"/"被动形"/"使役被动形"/"语境辨别"
+- note: 简明说明怎么变/这个语境线索指向哪个形式(80字以内)
+- examples: 1~2条例句,每条{"jp":"日语例句","cn":"中文翻译"}
+
+输出JSON: {"items":[{"head":"...","sub":"...","note":"...","examples":[{"jp":"...","cn":"..."}]}]}` : `知识点: ${topicName}${keyword ? `(补充说明: ${keyword})` : ""}
+学习者水平: ${stageBenchmark}(中文母语,已过N4,目标N1)
+
+请列出 ${count} 条属于这个知识点、当前阶段会高频用到的具体条目。优先给常用、实用的内容,不要为了凑够数量硬编一些生僻、罕见甚至不存在的用法。
+${avoidLine}
+
+每条给:
+- head: 该条目的标题(比如一对自他动词"開く/開ける"、一个助词"に"、一对授受动词"あげる/くれる")
+- sub: 该条目所属的小分类标签(比如"自动词/他动词"、"方向格助词"、"授受-自分→目上",同一类条目请用完全一致的标签文字,用于分组展示)
+- note: 简明用法说明,中文为主,点出和易混淆对象的区别(80字以内)
+- examples: 1~2条例句,每条{"jp":"日语例句","cn":"中文翻译"}
+
+输出JSON: {"items":[{"head":"...","sub":"...","note":"...","examples":[{"jp":"...","cn":"..."}]}]}`;
+  const r = await callAI(sys, user, Math.min(6000, 400 * count + 800));
+  if (!Array.isArray(r.items) || !r.items.length) throw new Error("bad confusion items");
+  return r.items;
+}
+
+/* 从知识范围表里挑出的一批条目(调用方已经用 pickConfusionQuizItems 做完"薄弱倾斜+避开最近用过"
+   的筛选/抽样)现场出题。"动词变形"固定出中译日、句子要能自然逼出目标变形;其余小项题型
+   (辨析/搭配/造句/翻译)由 AI 根据每条内容自行判断合适的形式,不用代码规定死映射关系。 */
+async function genConfusionQuiz(topicName, items, stageBenchmark, kind = "generic") {
+  const sys = `あなたは日本語教師です。请针对给定的知识点条目各出一道练习题。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const list = items.map((it, i) => `${i + 1}. ${it.head}(${it.sub}):${it.note}`).join("\n");
+  const user = kind === "verbform" ? `知识点: 动词变形
+学习者水平: ${stageBenchmark}
+
+请依次为下面这 ${items.length} 条条目各出一道"中译日"练习题,顺序必须和列表一一对应,不要跳过、不要合并、不要调换顺序:
+${list}
+
+出题要求:
+- 每题给一句自然的中文,翻译成日语时必须自然地"逼出"该条目对应的目标变形——句子设计要让这个变形成为唯一合理的选择,而不是简单给动词原形让学生套公式。例如:"请不要在这里抽烟"会逼出て形+ない形结构,"我被老师批评了"会逼出被动形,"妈妈让我打扫房间"会逼出使役形
+- 涉及语境辨别层(sub是"语境辨别")的条目,中文句子里要自然带出对应的时态/语气线索(比如"已经"对应すでに/完了,"如果"对应もし/假定),让学生必须依据语境线索选对形式,不能靠死记硬背哪个词固定对应哪个形式
+
+输出JSON: {"items":[{"qtype":"翻译","task":"中文句子","hint":"可为空字符串"}]}` : `知识点: ${topicName}
+学习者水平: ${stageBenchmark}
+
+请依次为下面这 ${items.length} 条条目各出一道练习题,顺序必须和列表一一对应,不要跳过、不要合并、不要调换顺序:
+${list}
+
+题型不用统一,请根据每条内容自行选最合适的形式(比如两个易混词的辨析题、需要搭配助词/固定搭配的填空题、要求学习者用这个条目写一句话的造句/翻译题),让整批题目有一定变化,不要全是同一种类型。
+
+输出JSON: {"items":[{"qtype":"辨析|搭配|造句|翻译","task":"题目内容(中文,交代清楚要写什么)","hint":"可为空字符串,提示用哪个词/怎么用"}]}`;
+  const r = await callAI(sys, user, Math.min(6000, 500 * items.length + 800));
+  if (!Array.isArray(r.items) || r.items.length !== items.length) throw new Error("confusion quiz count mismatch");
+  return r.items.map((q, i) => ({ ...q, head: items[i].head, sub: items[i].sub }));
+}
+
+/* 判卷:知识辨析类题目经常不止一个语法上说得通的答案,要求AI说明为什么优选某个答案,
+   并保持前后判卷标准一致——这条容错原则是用户明确要求的,直接写进 prompt。
+   "动词变形"的核心考点是"变形选对没选对",要求判卷优先看这个、并且和其他小瑕疵分开说,
+   不能让无关小错掩盖了变形本身对不对这个核心反馈。 */
+async function gradeConfusionAnswer(topicName, item, question, answer, stageBenchmark, kind = "generic") {
+  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const head = `知识点: ${topicName}
+条目: ${item.head}(${item.sub})
+【用法说明】${item.note}
+题目(${question.qtype}): ${question.task}${question.hint ? " 提示:" + question.hint : ""}
+学生的答案: ${answer}
+学习者水平: ${stageBenchmark}
+`;
+  const user = kind === "verbform" ? head + `
+判定标准(核心考点是"动词变形选对没选对",判卷时第一优先级看这个):
+- formCorrect: 学生的答案是否用对了这道题要考的目标变形(true/false)
+- "correct": 变形选对,句子其他部分也没有问题(允许合理的敬体/简体等选择差异)
+- "partial": 变形选对,但句子其他部分(助词、用词选择等)有小瑕疵——变形本身没问题,不要因为这些无关小错把verdict拉到wrong,但要在讲解里把"变形对不对"和"其他小问题"分开说清楚
+- "wrong": 变形本身选错了(用错形式,或没有用该用的变形)
+- 允许多个合理答案(比如敬体/简体皆可,只要变形逻辑正确都算对),存在更优选择时说明为什么优选它
+- explanation 里必须先明确点出"变形对不对"这个核心结论,再谈其他方面
+
+输出JSON: {"verdict":"correct|partial|wrong","formCorrect":true|false,"reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,先说变形对不对,再说其他,中日混合,120字以内"}` : head + `
+判定标准:
+- 这类题目经常存在不止一个语法上都说得通的答案,不要因为学生的答案和你脑海里的"标准答案"字面不同就直接判错;只要语法正确、能自然表达题目要求的意思就判 correct
+- 如果学生的答案和你认为更优的答案都合理,请在讲解里说明你更推荐哪一个、为什么(比如更自然、更符合当前语境),但仍判 correct,不要因为"不是最优选"而降级
+- "correct": 语法正确,用法符合这个知识点
+- "partial": 大方向对但有小错误(助词、活用、搭配等)
+- "wrong": 用法明显错误,或没有用上这个知识点该有的结构
+- 同类错误前后判卷标准要一致,不要这次严那次松
+
+输出JSON: {"verdict":"correct|partial|wrong","reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,中日混合,120字以内,若存在更优答案请说明为什么优选它"}`;
+  const g = await callAI(sys, user);
+  if (!g.verdict) throw new Error("bad confusion grade");
+  return g;
+}
+
+/* 出题前从知识范围表里挑一批条目:纯本地逻辑,不调AI。
+   两条规则叠加、都不是硬性规则:①条目的 weak(轻量薄弱计数,答错升/答对降,只在練習帳内部读写,
+   不进错题本不进统计)越高,被抽中概率略微越高;②最近一批用过的条目(recentHeads)概率大幅降低
+   但不是完全排除,池子小的时候还是可能抽到。"动词变形"额外要求三层(基础/复杂/语境辨别)混抽,
+   不要连续多次集中在同一层。 */
+function pickConfusionQuizItems(items, recentHeads, count, kind = "generic") {
+  const weightOf = (it) => {
+    const base = 1 + Math.max(0, it.weak || 0) * 0.6;
+    const recentPenalty = recentHeads && recentHeads.includes(it.head) ? 0.15 : 1;
+    return base * recentPenalty;
+  };
+  const weightedPickFrom = (pool, n) => {
+    const picked = [];
+    const remain = [...pool];
+    for (let k = 0; k < n && remain.length; k++) {
+      const total = remain.reduce((s, it) => s + weightOf(it), 0);
+      let r = Math.random() * total;
+      let idx = 0;
+      for (; idx < remain.length - 1; idx++) {
+        r -= weightOf(remain[idx]);
+        if (r <= 0) break;
+      }
+      picked.push(remain[idx]);
+      remain.splice(idx, 1);
+    }
+    return picked;
+  };
+
+  const n = Math.min(count, items.length);
+  if (kind !== "verbform") return weightedPickFrom(items, n);
+
+  const layers = { basic: [], advanced: [], context: [] };
+  items.forEach((it) => { (layers[VERBFORM_LAYER_OF_SUB[it.sub]] || layers.basic).push(it); });
+  const activeLayers = Object.keys(layers).filter((k) => layers[k].length);
+  const quotas = activeLayers.map((_, i) => Math.floor(n / activeLayers.length) + (i < n % activeLayers.length ? 1 : 0));
+  let picked = [];
+  activeLayers.forEach((key, i) => { picked = picked.concat(weightedPickFrom(layers[key], quotas[i])); });
+  if (picked.length < n) {
+    const pickedHeads = new Set(picked.map((it) => it.head));
+    const rest = items.filter((it) => !pickedHeads.has(it.head));
+    picked = picked.concat(weightedPickFrom(rest, n - picked.length));
+  }
+  // 打散顺序,避免"基础层几道紧挨着、复杂层几道紧挨着"这样成块出现
+  for (let i = picked.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [picked[i], picked[j]] = [picked[j], picked[i]];
+  }
+  return picked;
+}
+
+/* ================= 練習帳 · 场景对话(自由练习) =================
+   开场白/续写对话直接复用现有的 genDialogueOpening / continueDialogue(App.jsx 上方,
+   本来就只依赖 scene.{background,userRole,aiRole,goal},和 SRS 排期毫无耦合)。
+   复盘单独写一个函数而不是复用 reviewDialogue:reviewDialogue 的"发现问题"完全靠
+   candidatePatterns(场景标注的目标句型候选)来定位,練習帳的场景不挂钩任何句型,
+   传空数组的话 AI 根本没法选、永远查不出问题;这里改成不依赖候选列表,直接现场判断
+   有没有明显的语法错误。 */
+async function reviewConfusionDialogue(scene, history, stageBenchmark) {
+  const sys = `あなたは丁寧で親切な日本語教師です。针对学习者刚完成的一场角色扮演对话给出复盘点评,讲解以中文为主、适当夹杂日语术语。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const user = `场景背景: ${scene.background}
+对话目标: ${scene.goal}
+学习者扮演: ${scene.userRole},对方扮演: ${scene.aiRole}
+学习者水平: ${stageBenchmark}
+
+完整对话记录:
+${formatDialogueHistory(scene, history)}
+
+请对学习者(${scene.userRole}那些发言)做整体复盘:
+1. summary: 简短总结整体表现和用到的表达(中日混合,100字以内)
+2. issues: 指出哪些地方表达生硬、不够地道,或敬体简体混用不一致,没有就写"没有明显问题"
+3. suggestions: 给出1~2个更地道的说法建议,没有就留空字符串""
+4. grammarMistakes: 如果学习者的发言里存在明显的语法/句型使用错误(不是"不够地道"这种风格问题,而是确实用错了),列出来,每条{"quote":"学习者当时说的那句话","issue":"错在哪(中文)","suggestion":"更正确的说法"};没有就给空数组[]
+
+输出JSON: {"summary":"...","issues":"...","suggestions":"...","grammarMistakes":[{"quote":"...","issue":"...","suggestion":"..."}]}`;
+  const r = await callAI(sys, user);
+  if (!r.summary) throw new Error("bad dialogue review");
+  r.grammarMistakes = Array.isArray(r.grammarMistakes) ? r.grammarMistakes : [];
+  return r;
+}
+
+/* ================= 練習帳 · 书面邮件(自由练习) =================
+   和场景对话的多轮口语往返不同:一次性产出一整篇结构化长文,练"怎么把一件事按
+   日语商务邮件规范写完整"。判卷不看字数,只看结构完整度(称呼/寒暄/自报身份/
+   正文主旨/敬语一致性/语气/结尾/署名 共8项),外加一条独立的语法错误检查
+   (礼仪问题不算,只有真正用错语法才计入错题本,和另外两个分区规则一致)。 */
+async function genEmailScenario(topicName, avoidLast, stageBenchmark) {
+  const sys = `あなたは日本語のビジネスメール指導教師です。请为给定的邮件情境类型现场编一个具体的写作命题。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const user = `邮件情境类型: ${topicName}
+学习者水平: ${stageBenchmark}(中文母语,已过N4,目标N1;水平越高,命题涉及的商务场景可以越复杂、措辞要求越委婉高级,比如更复杂的商务谈判、更委婉的拒绝表达)
+${avoidLast ? "刚练过的上一个命题(不要出雷同的场景/关系): " + avoidLast : ""}
+
+请编一个具体、单一、信息完整的写作命题,不要空泛,要让学习者提笔就知道该写什么:
+- recipient.org: 收件人所在公司/部门(具体名称,虚构即可)
+- recipient.name: 收件人姓名+称谓(比如"田中様")
+- recipient.relation: 和学习者的关系,从"初次联系客户/长期合作客户/上司/同事/下属"里选一个最贴合情境的
+- situation: 为什么要写这封邮件(中文说明,50字以内)
+- points: 正文必须交代清楚的信息点,3~5条,中文短语列表,让学习者写作时有明确目标、不用靠堆字数填充
+
+输出JSON: {"recipient":{"org":"...","name":"...","relation":"..."},"situation":"...","points":["...","..."]}`;
+  const r = await callAI(sys, user);
+  if (!r.recipient || !r.situation || !Array.isArray(r.points) || !r.points.length) throw new Error("bad email scenario");
+  return r;
+}
+
+async function gradeConfusionEmail(topicName, scenario, emailText, stageBenchmark) {
+  const sys = `あなたは丁寧で厳しい日本語ビジネスメール指導教師です。请按结构完整度批改学习者写的商务邮件,不以字数长短评分。讲解以中文为主、适当夹杂日语术语。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const user = `邮件情境类型: ${topicName}
+收件人: ${scenario.recipient.org} ${scenario.recipient.name}(关系: ${scenario.recipient.relation})
+写信原因: ${scenario.situation}
+正文必须交代的信息点: ${scenario.points.join("、")}
+学习者水平: ${stageBenchmark}
+
+学习者写的邮件全文:
+${emailText}
+
+请逐项检查以下 8 个维度,每项给 {"label":"维度名","ok":true|false,"note":"具体说明哪里有问题/为什么有问题,ok时可以留空或简短肯定,中日混合,60字以内"},维度和顺序固定为:
+1. 称呼:对方公司/部门/姓名+敬称是否规范
+2. 开头问候语:是否有符合关系远近的固定寒暄(如「お世話になっております」),初次联系与长期合作对象的开头用语应有区别
+3. 自报身份:如果是初次联系或对方可能不确定发件人身份,是否做了自我介绍
+4. 正文主旨:上面列出的信息点是否都交代清楚,行文顺序是否符合日语商务邮件的行文习惯
+5. 敬语等级一致性:全篇敬体/敬语层级是否统一,有无前后不一致
+6. 语气得体度:提出请求或传达负面消息时,是否有必要的缓冲/委婉表达
+7. 结尾寒暄+定型句:是否有恰当的结尾套语(如「よろしくお願いいたします」)
+8. 署名:是否完整
+
+grammarMistakes: 如果邮件里存在明显的句型使用错误(活用错误、助词用错、时态不对等,不是礼仪/措辞选择问题),列出来,每条{"quote":"原文里的错误片段","issue":"错在哪(中文)","suggestion":"更正确的写法"};没有就给空数组[]。
+
+输出JSON: {"dims":[{"label":"称呼","ok":true|false,"note":"..."}, ...共8条,顺序如上],"overallNote":"总体简短点评,30字以内","grammarMistakes":[{"quote":"...","issue":"...","suggestion":"..."}]}`;
+  const r = await callAI(sys, user, 3500);
+  if (!Array.isArray(r.dims) || r.dims.length !== 8) throw new Error("bad email grading");
+  r.grammarMistakes = Array.isArray(r.grammarMistakes) ? r.grammarMistakes : [];
+  return r;
+}
+
 /* ================= 生词点选提示组件 =================
    words 没传入(还没加载好/加载失败)时,原样显示纯文本,不可点击——不能阻塞主流程。
    words 传入后,按词切分成可点击的片段:第一次点显示假名读音(ruby注音),
@@ -744,6 +1019,49 @@ function AppInner() {
   const preGenRef = useRef({}); // 批量出题的结果缓存,key是题目在当前队列里的下标
   const sessionGenRef = useRef(0); // 每次开始新的一组题就递增,防止上一轮延迟返回的批量结果写错地方
   const dialogueRecentRef = useRef([]); // 最近几天用过的情景对话场景id,避免连续撞同一个
+
+  /* ================= 練習帳(知识辨析/场景对话/书面邮件,自由练习) =================
+     和上面 SRS 那一整套 state 完全独立:不复用 queue/cur/phase,免得两套逻辑纠缠到一起。 */
+  const [confusionSub, setConfusionSub] = useState("list"); // list | topicDetail | quiz | dialogue | email
+  const [confusionTopics, setConfusionTopics] = useState(null); // null = 还没读档
+  const [confusionItemsCache, setConfusionItemsCache] = useState({}); // topicId -> items[](懒加载)
+  const [cfActiveTopic, setCfActiveTopic] = useState(null);
+  const [cfTopicBusy, setCfTopicBusy] = useState(false);
+  const [cfTopicErr, setCfTopicErr] = useState("");
+  const [cfNewTopicName, setCfNewTopicName] = useState("");
+  const [cfNewTopicKeyword, setCfNewTopicKeyword] = useState("");
+  const [cfNewTopicBusy, setCfNewTopicBusy] = useState(false);
+  const [cfNewTopicErr, setCfNewTopicErr] = useState("");
+
+  const [cfQuiz, setCfQuiz] = useState(null); // {topic, items, questions}
+  const [cfQuizIdx, setCfQuizIdx] = useState(0);
+  const [cfQuizPhase, setCfQuizPhase] = useState("question"); // loading|question|grading|result|done|error
+  const [cfAnswer, setCfAnswer] = useState("");
+  const [cfResult, setCfResult] = useState(null);
+  const [cfQuizStats, setCfQuizStats] = useState({ ok: 0, partial: 0, wrong: 0 });
+  const [cfErrMsg, setCfErrMsg] = useState("");
+  const cfQuizRecentRef = useRef({}); // topicId -> 最近一批用过的 head[],只用来"轻度避开",不持久化
+
+  const [cfScene, setCfScene] = useState(null);
+  const [cfDialogueHistory, setCfDialogueHistory] = useState([]);
+  const [cfDialoguePhase, setCfDialoguePhase] = useState("chatting"); // chatting|reviewing|reviewed
+  const [cfDialogueReview, setCfDialogueReview] = useState(null);
+  const [cfDialogueInput, setCfDialogueInput] = useState("");
+  const [cfDialogueBusy, setCfDialogueBusy] = useState(false);
+  const [cfDialogueErr, setCfDialogueErr] = useState("");
+
+  const [cfEmailTopic, setCfEmailTopic] = useState(null);
+  const [cfEmailScenario, setCfEmailScenario] = useState(null);
+  const [cfEmailPhase, setCfEmailPhase] = useState("loading"); // loading|write|grading|result|error
+  const [cfEmailText, setCfEmailText] = useState("");
+  const [cfEmailResult, setCfEmailResult] = useState(null);
+  const [cfEmailErr, setCfEmailErr] = useState("");
+  const cfEmailRecentRef = useRef({}); // topicId -> 上一次生成的情境摘要,避免下次雷同,不持久化
+
+  useEffect(() => {
+    if (view === "confusion" && confusionTopics === null) loadConfusionTopics();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
 
   /* --- 读档 --- */
   useEffect(() => {
@@ -981,6 +1299,9 @@ function AppInner() {
     const mistakeItems = [];
     for (const m of db.mistakes) {
       if (mistakeItems.length >= 9) break;
+      // 練習帳(source==="confusion")来的错题不挂钩具体句型,没有 pid,不能塞进作业题位——
+      // 練習帳本来就是"不计入每日/每周任务"的自由练习,这里跳过正是这条规则的体现
+      if (m.pid === undefined) continue;
       if (m.pid2 !== undefined) mistakeItems.push({ sub: "combo", p1: PATTERNS[m.pid], p2: PATTERNS[m.pid2], mistakeId: m.id });
       else if (compCount <= transCount) { mistakeItems.push({ p: PATTERNS[m.pid], hw: "comp", mistakeId: m.id }); compCount++; }
       else { mistakeItems.push({ p: PATTERNS[m.pid], hw: "trans", mistakeId: m.id }); transCount++; }
@@ -1020,7 +1341,8 @@ function AppInner() {
     const combos = Array.from({ length: 5 }, pickPair);
     const cutoff = recentCutoff;
     const counts = {};
-    db.mistakes.forEach((m) => { if (m.date >= cutoff) counts[m.pid] = (counts[m.pid] || 0) + 1; });
+    // 練習帳来的错题没有 pid,不参与"弱点句型"统计(它们本来就不挂钩具体句型)
+    db.mistakes.forEach((m) => { if (m.pid !== undefined && m.date >= cutoff) counts[m.pid] = (counts[m.pid] || 0) + 1; });
     let weakPids = Object.keys(counts).map(Number).sort((a, b) => counts[b] - counts[a]).slice(0, 3);
     if (weakPids.length === 0) {
       weakPids = [...learnedPatterns].sort((a, b) => db.prog[a.id].lv - db.prog[b.id].lv).slice(0, 3).map((p) => p.id);
@@ -1394,6 +1716,342 @@ function AppInner() {
       else if (result === null && answer.trim()) submit();
       else loadQuestion(item.p, ft);
     }
+  };
+
+  /* ================= 練習帳:通用 ================= */
+
+  /* 三个分区共用的错题本写入口:只碰 db.mistakes,不碰 prog/stats/meta/studyTime——
+     練習帳不参与排期和任务统计,但用户明确要求"发现明显的句型使用错误要计入错题本"。
+     没有 pid(不挂钩具体句型),錯題本视图靠 m.label 兜底展示,靠 m.source==="confusion" 识别。 */
+  const addConfusionMistake = (entry) => {
+    setDb((d) => {
+      const nd = { ...d, mistakes: [{ ...entry, source: "confusion", date: t, needsReview: false, id: newId() }, ...d.mistakes] };
+      nd.mistakes = nd.mistakes.slice(0, 100);
+      return nd;
+    });
+  };
+
+  const loadConfusionTopics = async () => {
+    let saved = [];
+    try {
+      const r = await window.storage.get("confusion_topics_v1");
+      const parsed = JSON.parse(r.value);
+      if (Array.isArray(parsed)) saved = parsed;
+    } catch { /* 第一次用,还没存过 */ }
+    // 以后代码里新增内置小项(比如这次新加的"动词变形")时,老存档里没有它,这里负责补齐
+    const missing = CONFUSION_BUILTIN_TOPICS.filter((bt) => !saved.some((s) => s.id === bt.id));
+    const merged = [...saved, ...missing];
+    if (missing.length) window.storage.set("confusion_topics_v1", JSON.stringify(merged));
+    setConfusionTopics(merged);
+  };
+
+  const loadConfusionItems = async (topicId) => {
+    let items = [];
+    try {
+      const r = await window.storage.get("confusion_items_" + topicId);
+      const parsed = JSON.parse(r.value);
+      if (Array.isArray(parsed)) items = parsed;
+    } catch { /* 还没生成过范围表 */ }
+    setConfusionItemsCache((c) => ({ ...c, [topicId]: items }));
+  };
+
+  const saveConfusionItems = (topicId, items) => {
+    setConfusionItemsCache((c) => ({ ...c, [topicId]: items }));
+    window.storage.set("confusion_items_" + topicId, JSON.stringify(items));
+  };
+
+  const openConfusionTopic = (topic) => {
+    setCfActiveTopic(topic);
+    setConfusionSub("topicDetail");
+    setCfTopicErr("");
+    if (!confusionItemsCache[topic.id]) loadConfusionItems(topic.id);
+  };
+
+  /* isAppend=false 用于"生成范围表"(首次/空表);true 用于"再补充一批"(追加,避开已有 head) */
+  const generateConfusionItems = async (topic, isAppend) => {
+    setCfTopicBusy(true);
+    setCfTopicErr("");
+    try {
+      const existing = confusionItemsCache[topic.id] || [];
+      const avoidHeads = existing.map((it) => it.head);
+      const stage = confusionStageBenchmark(db);
+      const raw = await genConfusionItems(topic.name, topic.keyword, avoidHeads, stage, 15, topic.kind);
+      const withMeta = raw.map((it) => ({ ...it, id: newId(), weak: 0 }));
+      const merged = isAppend ? [...existing, ...withMeta] : withMeta;
+      saveConfusionItems(topic.id, merged);
+      setConfusionTopics((list) => {
+        const next = (list || []).map((tp) => (tp.id === topic.id ? { ...tp, itemCount: merged.length } : tp));
+        window.storage.set("confusion_topics_v1", JSON.stringify(next));
+        return next;
+      });
+    } catch (e) {
+      setCfTopicErr("生成失败:" + (e && e.message ? e.message : String(e)));
+    } finally {
+      setCfTopicBusy(false);
+    }
+  };
+
+  const createConfusionTopic = async () => {
+    const name = cfNewTopicName.trim();
+    if (!name || cfNewTopicBusy) return;
+    setCfNewTopicBusy(true);
+    setCfNewTopicErr("");
+    try {
+      const keyword = cfNewTopicKeyword.trim();
+      const stage = confusionStageBenchmark(db);
+      const raw = await genConfusionItems(name, keyword, [], stage, 15, "generic");
+      const items = raw.map((it) => ({ ...it, id: newId(), weak: 0 }));
+      const topic = { id: newId(), name, keyword, kind: "generic", builtin: false, itemCount: items.length };
+      const nextTopics = [...(confusionTopics || []), topic];
+      setConfusionTopics(nextTopics);
+      window.storage.set("confusion_topics_v1", JSON.stringify(nextTopics));
+      saveConfusionItems(topic.id, items);
+      setCfNewTopicName("");
+      setCfNewTopicKeyword("");
+      openConfusionTopic(topic);
+    } catch (e) {
+      setCfNewTopicErr("新建失败:" + (e && e.message ? e.message : String(e)));
+    } finally {
+      setCfNewTopicBusy(false);
+    }
+  };
+
+  const applyConfusionItemWeak = (topicId, itemId, verdict) => {
+    const delta = verdict === "correct" ? -1 : verdict === "partial" ? 1 : 2;
+    setConfusionItemsCache((c) => {
+      const items = c[topicId] || [];
+      const next = items.map((it) => (it.id === itemId ? { ...it, weak: Math.max(0, Math.min(10, (it.weak || 0) + delta)) } : it));
+      window.storage.set("confusion_items_" + topicId, JSON.stringify(next));
+      return { ...c, [topicId]: next };
+    });
+  };
+
+  /* ================= 練習帳:知识辨析 · 做题 ================= */
+
+  const startConfusionQuiz = async (topic) => {
+    const items = confusionItemsCache[topic.id] || [];
+    if (!items.length) return;
+    setConfusionSub("quiz");
+    setCfQuizPhase("loading");
+    setCfErrMsg("");
+    setCfQuizStats({ ok: 0, partial: 0, wrong: 0 });
+    setCfQuizIdx(0);
+    setCfAnswer("");
+    setCfResult(null);
+    try {
+      const recent = cfQuizRecentRef.current[topic.id] || [];
+      const picked = pickConfusionQuizItems(items, recent, 6, topic.kind);
+      const stage = confusionStageBenchmark(db);
+      const questions = await genConfusionQuiz(topic.name, picked, stage, topic.kind);
+      cfQuizRecentRef.current[topic.id] = picked.map((it) => it.head);
+      setCfQuiz({ topic, items: picked, questions });
+      setCfQuizPhase("question");
+    } catch (e) {
+      setCfErrMsg("出题失败:" + (e && e.message ? e.message : String(e)));
+      setCfQuizPhase("error");
+    }
+  };
+
+  const submitConfusionAnswer = async () => {
+    if (!cfAnswer.trim() || !cfQuiz) return;
+    setCfQuizPhase("grading");
+    try {
+      const item = cfQuiz.items[cfQuizIdx];
+      const question = cfQuiz.questions[cfQuizIdx];
+      const stage = confusionStageBenchmark(db);
+      const g = await gradeConfusionAnswer(cfQuiz.topic.name, item, question, cfAnswer.trim(), stage, cfQuiz.topic.kind);
+      setCfResult(g);
+      setCfQuizStats((s) => ({ ...s, [g.verdict === "correct" ? "ok" : g.verdict]: s[g.verdict === "correct" ? "ok" : g.verdict] + 1 }));
+      applyConfusionItemWeak(cfQuiz.topic.id, item.id, g.verdict);
+      if (g.verdict !== "correct") {
+        addConfusionMistake({
+          cfType: "quiz",
+          label: cfQuiz.topic.name + " · " + item.head,
+          task: question.task + (question.hint ? "(提示: " + question.hint + ")" : ""),
+          ans: cfAnswer.trim(),
+          ref: g.reference,
+          exp: g.explanation,
+        });
+      }
+      setCfQuizPhase("result");
+    } catch (e) {
+      setCfErrMsg("判卷失败:" + (e && e.message ? e.message : String(e)));
+      setCfQuizPhase("error");
+    }
+  };
+
+  const giveUpConfusionAnswer = async () => {
+    if (!cfQuiz) return;
+    setCfQuizPhase("grading");
+    try {
+      const item = cfQuiz.items[cfQuizIdx];
+      const question = cfQuiz.questions[cfQuizIdx];
+      const stage = confusionStageBenchmark(db);
+      const g = await gradeConfusionAnswer(cfQuiz.topic.name, item, question, "(学生表示不会写,请给出参考答案和这个条目的关键讲解)", stage, cfQuiz.topic.kind);
+      const r = { ...g, verdict: "wrong" };
+      setCfResult(r);
+      setCfQuizStats((s) => ({ ...s, wrong: s.wrong + 1 }));
+      applyConfusionItemWeak(cfQuiz.topic.id, item.id, "wrong");
+      setCfQuizPhase("result");
+    } catch (e) {
+      setCfErrMsg("获取答案失败:" + (e && e.message ? e.message : String(e)));
+      setCfQuizPhase("error");
+    }
+  };
+
+  const nextConfusionQuestion = () => {
+    if (cfQuizIdx + 1 < cfQuiz.questions.length) {
+      setCfQuizIdx((i) => i + 1);
+      setCfAnswer("");
+      setCfResult(null);
+      setCfQuizPhase("question");
+    } else {
+      setCfQuizPhase("done");
+    }
+  };
+
+  const retryConfusionQuiz = () => {
+    if (cfQuiz) startConfusionQuiz(cfQuiz.topic);
+  };
+
+  const exitConfusionQuiz = () => {
+    setCfQuiz(null);
+    setConfusionSub("topicDetail");
+  };
+
+  /* ================= 練習帳:场景对话 =================
+     流程和 SRS 那边的情景对话(beginDialogueItem/sendDialogueTurn/finishDialogue)几乎一样,
+     但状态、复盘函数、错题写入方式都是独立的一套,互不影响。 */
+  const CF_DIALOGUE_MAX_TURNS = 8;
+
+  const startConfusionDialogue = (scene) => {
+    setCfScene(scene);
+    setCfDialogueHistory([]);
+    setCfDialogueReview(null);
+    setCfDialogueInput("");
+    setCfDialoguePhase("chatting");
+    setCfDialogueErr("");
+    setConfusionSub("dialogue");
+    if (scene.initiator === "ai") {
+      setCfDialogueBusy(true);
+      genDialogueOpening(scene)
+        .then((text) => setCfDialogueHistory([{ role: "ai", text }]))
+        .catch((e) => setCfDialogueErr("对话开场失败:" + (e && e.message ? e.message : String(e))))
+        .finally(() => setCfDialogueBusy(false));
+    }
+  };
+
+  const sendConfusionDialogueTurn = () => {
+    const text = cfDialogueInput.trim();
+    if (!text || cfDialogueBusy || !cfScene) return;
+    const historyBeforeReply = [...cfDialogueHistory, { role: "user", text }];
+    setCfDialogueHistory(historyBeforeReply);
+    setCfDialogueInput("");
+    setCfDialogueBusy(true);
+    const userTurns = historyBeforeReply.filter((h) => h.role === "user").length;
+    continueDialogue(cfScene, cfDialogueHistory, text)
+      .then((r) => {
+        const historyAfterReply = [
+          ...historyBeforeReply.slice(0, -1),
+          { ...historyBeforeReply[historyBeforeReply.length - 1], tag: r.tag },
+          { role: "ai", text: r.reply },
+        ];
+        setCfDialogueHistory(historyAfterReply);
+        if (r.done || userTurns >= CF_DIALOGUE_MAX_TURNS) finishConfusionDialogue(historyAfterReply);
+        else setCfDialogueBusy(false);
+      })
+      .catch((e) => {
+        setCfDialogueBusy(false);
+        setCfDialogueErr("对话失败:" + (e && e.message ? e.message : String(e)));
+      });
+  };
+
+  const finishConfusionDialogue = (finalHistory) => {
+    const scene = cfScene;
+    setCfDialoguePhase("reviewing");
+    const stage = confusionStageBenchmark(db);
+    reviewConfusionDialogue(scene, finalHistory, stage)
+      .then((review) => {
+        setCfDialogueReview(review);
+        setCfDialoguePhase("reviewed");
+        setCfDialogueBusy(false);
+        review.grammarMistakes.forEach((gm) => {
+          addConfusionMistake({
+            cfType: "dialogue",
+            label: "💬 " + scene.background,
+            task: "💬 场景对话 · " + scene.background,
+            ans: gm.quote,
+            ref: gm.suggestion,
+            exp: gm.issue,
+          });
+        });
+      })
+      .catch((e) => {
+        setCfDialogueBusy(false);
+        setCfDialogueErr("对话复盘失败:" + (e && e.message ? e.message : String(e)));
+      });
+  };
+
+  const exitConfusionDialogue = () => {
+    setCfScene(null);
+    setConfusionSub("list");
+  };
+
+  /* ================= 練習帳:书面邮件 ================= */
+
+  const startConfusionEmail = (topic) => {
+    setCfEmailTopic(topic);
+    setCfEmailScenario(null);
+    setCfEmailText("");
+    setCfEmailResult(null);
+    setCfEmailErr("");
+    setCfEmailPhase("loading");
+    setConfusionSub("email");
+    const avoidLast = cfEmailRecentRef.current[topic.id] || "";
+    const stage = confusionStageBenchmark(db);
+    genEmailScenario(topic.name, avoidLast, stage)
+      .then((sc) => {
+        setCfEmailScenario(sc);
+        cfEmailRecentRef.current[topic.id] = sc.situation;
+        setCfEmailPhase("write");
+      })
+      .catch((e) => {
+        setCfEmailErr("命题生成失败:" + (e && e.message ? e.message : String(e)));
+        setCfEmailPhase("error");
+      });
+  };
+
+  const submitConfusionEmail = async () => {
+    if (!cfEmailText.trim() || !cfEmailScenario || !cfEmailTopic) return;
+    setCfEmailPhase("grading");
+    try {
+      const stage = confusionStageBenchmark(db);
+      const g = await gradeConfusionEmail(cfEmailTopic.name, cfEmailScenario, cfEmailText.trim(), stage);
+      setCfEmailResult(g);
+      g.grammarMistakes.forEach((gm) => {
+        addConfusionMistake({
+          cfType: "email",
+          label: "✉️ " + cfEmailTopic.name,
+          task: "✉️ 邮件写作 · " + cfEmailTopic.name,
+          ans: gm.quote,
+          ref: gm.suggestion,
+          exp: gm.issue,
+        });
+      });
+      setCfEmailPhase("result");
+    } catch (e) {
+      setCfEmailErr("批改失败:" + (e && e.message ? e.message : String(e)));
+      setCfEmailPhase("error");
+    }
+  };
+
+  const retryConfusionEmail = () => {
+    if (cfEmailTopic) startConfusionEmail(cfEmailTopic);
+  };
+
+  const exitConfusionEmail = () => {
+    setCfEmailTopic(null);
+    setConfusionSub("list");
   };
 
   /* ================= 渲染 ================= */
@@ -1817,6 +2475,372 @@ function AppInner() {
         </main>
       )}
 
+      {/* ---------- 練習帳(知识辨析 / 场景对话 / 书面邮件,自由练习) ---------- */}
+      {view === "confusion" && confusionSub === "list" && (
+        <main className="page">
+          <h2 className="page-title serif">練習帳</h2>
+          <div className="cf-note">自由练习:不进复习排期,不计入每日/每周任务统计。发现明显的语法错误会记到錯題本里,但不影响任何排期。</div>
+
+          <section className="cf-section">
+            <div className="cf-section-title">知识辨析</div>
+            {confusionTopics === null && <div className="cf-loading">加载中…</div>}
+            {confusionTopics && (
+              <div className="cf-topic-grid">
+                {confusionTopics.map((tp) => (
+                  <button key={tp.id} className="cf-topic-card" onClick={() => openConfusionTopic(tp)}>
+                    <div className="cf-topic-name serif">{tp.name}</div>
+                    <div className="cf-topic-count">{tp.itemCount ? tp.itemCount + " 条" : "还没生成范围表"}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="cf-new-topic">
+              <input
+                className="cf-input"
+                placeholder="新建小项名称,比如「补助动词」"
+                value={cfNewTopicName}
+                onChange={(e) => setCfNewTopicName(e.target.value)}
+              />
+              <input
+                className="cf-input"
+                placeholder="补充关键词(选填)"
+                value={cfNewTopicKeyword}
+                onChange={(e) => setCfNewTopicKeyword(e.target.value)}
+              />
+              <button className="btn-outline" disabled={!cfNewTopicName.trim() || cfNewTopicBusy} onClick={createConfusionTopic}>
+                {cfNewTopicBusy ? "生成中…" : "+ 新建小项"}
+              </button>
+              {cfNewTopicErr && <div className="cf-err">{cfNewTopicErr}</div>}
+            </div>
+          </section>
+
+          <section className="cf-section">
+            <div className="cf-section-title">场景对话</div>
+            <div className="cf-scene-group-title">生活场景</div>
+            <div className="cf-scene-grid">
+              {CONFUSION_SCENES.filter((s) => s.category === "life").map((s) => (
+                <button key={s.id} className="cf-scene-btn" onClick={() => startConfusionDialogue(s)}>
+                  <span className="cf-scene-roles">{s.userRole} ↔ {s.aiRole}</span>
+                  <span className="cf-scene-bg">{s.background}</span>
+                </button>
+              ))}
+            </div>
+            <div className="cf-scene-group-title">职场与办事场景</div>
+            <div className="cf-scene-grid">
+              {CONFUSION_SCENES.filter((s) => s.category === "work").map((s) => (
+                <button key={s.id} className="cf-scene-btn" onClick={() => startConfusionDialogue(s)}>
+                  <span className="cf-scene-roles">{s.userRole} ↔ {s.aiRole}</span>
+                  <span className="cf-scene-bg">{s.background}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <section className="cf-section">
+            <div className="cf-section-title">书面邮件</div>
+            <div className="cf-scene-grid">
+              {CONFUSION_EMAIL_TOPICS.map((tp) => (
+                <button key={tp.id} className="cf-scene-btn cf-email-topic-btn" onClick={() => startConfusionEmail(tp)}>{tp.name}</button>
+              ))}
+            </div>
+          </section>
+        </main>
+      )}
+
+      {view === "confusion" && confusionSub === "topicDetail" && cfActiveTopic && (
+        <main className="page">
+          <button className="quit-link cf-back" onClick={() => { setConfusionSub("list"); setCfActiveTopic(null); }}>← 返回練習帳</button>
+          <h2 className="page-title serif">{cfActiveTopic.name}</h2>
+          {confusionItemsCache[cfActiveTopic.id] === undefined ? (
+            <div className="cf-loading">加载中…</div>
+          ) : confusionItemsCache[cfActiveTopic.id].length === 0 ? (
+            <div className="cf-empty">
+              <div>还没有知识范围表,先生成一批吧</div>
+              <button className="btn-main" disabled={cfTopicBusy} onClick={() => generateConfusionItems(cfActiveTopic, false)}>
+                {cfTopicBusy ? "生成中…" : "生成知识范围表"}
+              </button>
+            </div>
+          ) : (
+            <>
+              {Object.entries(
+                confusionItemsCache[cfActiveTopic.id].reduce((groups, it) => {
+                  (groups[it.sub] = groups[it.sub] || []).push(it);
+                  return groups;
+                }, {})
+              ).map(([sub, its]) => (
+                <div key={sub} className="cf-item-group">
+                  <div className="cf-item-group-title">{sub}</div>
+                  {its.map((it) => (
+                    <div key={it.id} className="cf-item-row">
+                      <div className="cf-item-head serif">{it.head}</div>
+                      <div className="cf-item-note">{it.note}</div>
+                      {it.examples && it.examples.map((ex, i) => (
+                        <div key={i} className="cf-item-example">
+                          <span className="serif">{ex.jp}</span>
+                          <span className="cf-item-example-cn">{ex.cn}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              ))}
+              <div className="btn-row cf-topic-actions">
+                <button className="btn-outline" disabled={cfTopicBusy} onClick={() => generateConfusionItems(cfActiveTopic, true)}>{cfTopicBusy ? "生成中…" : "再补充一批"}</button>
+                <button className="btn-main" onClick={() => startConfusionQuiz(cfActiveTopic)}>开始练习</button>
+              </div>
+            </>
+          )}
+          {cfTopicErr && <div className="cf-err">{cfTopicErr}</div>}
+        </main>
+      )}
+
+      {view === "confusion" && confusionSub === "quiz" && (
+        <main className="page">
+          {cfQuizPhase !== "done" && cfQuiz && (
+            <div className="progress-row">
+              <div className="progress-bar"><div className="progress-fill" style={{ width: `${((cfQuizIdx + 1) / cfQuiz.questions.length) * 100}%` }} /></div>
+              <span className="progress-text">{cfQuizIdx + 1} / {cfQuiz.questions.length}</span>
+            </div>
+          )}
+          {cfQuizPhase !== "done" && cfQuiz && (
+            <div className="pattern-head">
+              <span className="tag tag-cf">練習帳 · {cfQuiz.topic.name}</span>
+            </div>
+          )}
+
+          {cfQuizPhase === "loading" && (
+            <section className="card loading-card">
+              <div className="dots"><span /><span /><span /></div>
+              <div className="loading-text">先生が問題を作っています…</div>
+            </section>
+          )}
+
+          {cfQuizPhase === "error" && (
+            <section className="card">
+              {/rate|limit|429|overload|529/i.test(cfErrMsg) ? (
+                <p className="err-hint">当前账号的 AI 用量暂时达到上限,稍等几分钟再重试即可。</p>
+              ) : null}
+              <p className="err-text">{cfErrMsg}</p>
+              <button className="btn-main" onClick={retryConfusionQuiz}>重试</button>
+            </section>
+          )}
+
+          {(cfQuizPhase === "question" || cfQuizPhase === "grading" || cfQuizPhase === "result") && cfQuiz && (
+            <section className="card">
+              <div className="q-type">{cfQuiz.questions[cfQuizIdx].qtype} · {cfQuiz.items[cfQuizIdx].head}</div>
+              <div className="q-task serif">{cfQuiz.questions[cfQuizIdx].task}</div>
+              {cfQuiz.questions[cfQuizIdx].hint && <div className="q-hint">ヒント: {cfQuiz.questions[cfQuizIdx].hint}</div>}
+
+              {cfQuizPhase === "grading" && <div className="loading-text cf-grading">先生が採点しています…</div>}
+
+              {cfQuizPhase === "question" && (
+                <>
+                  <textarea
+                    className="answer-box serif"
+                    value={cfAnswer}
+                    onChange={(e) => setCfAnswer(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (cfAnswer.trim()) submitConfusionAnswer(); } }}
+                    placeholder="ここに日本語で書いてください…(Enter 提交 / Shift+Enter 换行)"
+                    rows={3}
+                    autoFocus
+                  />
+                  <div className="btn-row">
+                    <button className="btn-ghost" onClick={giveUpConfusionAnswer}>不会写,看答案</button>
+                    <button className="btn-main" disabled={!cfAnswer.trim()} onClick={submitConfusionAnswer}>提交 · 採点する</button>
+                  </div>
+                </>
+              )}
+
+              {cfQuizPhase === "result" && cfResult && (
+                <div className="result-wrap">
+                  <Stamp verdict={cfResult.verdict} />
+                  {cfAnswer.trim() && <div className="your-ans"><label>你的答案</label><div className="serif">{cfAnswer}</div></div>}
+                  <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{furiganaify(cfResult.reference)}</div></div>
+                  <div className="exp-block"><label>先生の講評</label><div>{cfResult.explanation}</div></div>
+                  <button className="btn-main" onClick={nextConfusionQuestion}>{cfQuizIdx + 1 < cfQuiz.questions.length ? "次へ →" : "完成本组练习"}</button>
+                </div>
+              )}
+            </section>
+          )}
+
+          {cfQuizPhase === "done" && cfQuiz && (
+            <section className="card done-card">
+              <div className="done-title serif">お疲れさまでした</div>
+              <div className="done-stats">
+                <span className="d-ok">◎ {cfQuizStats.ok}</span>
+                <span className="d-pt">△ {cfQuizStats.partial}</span>
+                <span className="d-ng">✗ {cfQuizStats.wrong}</span>
+              </div>
+              <p className="done-note">自由练习,不影响任何排期和统计。明显的语法错误已经记到錯題本里了。</p>
+              <button className="btn-main" onClick={exitConfusionQuiz}>返回小项</button>
+            </section>
+          )}
+
+          {cfQuizPhase !== "done" && (
+            <button className="quit-link" onClick={exitConfusionQuiz}>中断,返回小项</button>
+          )}
+        </main>
+      )}
+
+      {view === "confusion" && confusionSub === "dialogue" && cfScene && (
+        <main className="page">
+          <div className="pattern-head">
+            <span className="tag tag-cf">練習帳 · 场景对话</span>
+            <span className="pattern-name serif">{cfScene.userRole} ↔ {cfScene.aiRole}</span>
+          </div>
+          <section className="card dialogue-card">
+            <div className="dlg-scene-card">
+              <div className="dlg-scene-bg">{cfScene.background}</div>
+              <div className="dlg-scene-roles">你演 {cfScene.userRole} · AI演 {cfScene.aiRole}</div>
+              <div className="dlg-scene-goal">目标:{cfScene.goal}</div>
+            </div>
+
+            {cfDialogueErr && <div className="cf-err">{cfDialogueErr}</div>}
+
+            {cfDialoguePhase !== "reviewed" && (
+              <>
+                <div className="dlg-bubbles">
+                  {cfDialogueHistory.map((h, i) => (
+                    <div key={i} className={"dlg-bubble serif " + (h.role === "user" ? "dlg-user" : "dlg-ai")}>
+                      <div className="dlg-bubble-text">{h.text}</div>
+                      {h.tag === "natural" && <div className="dlg-tag dlg-tag-good">✓ 很自然</div>}
+                      {h.tag === "stiff" && <div className="dlg-tag dlg-tag-soso">可以更地道</div>}
+                    </div>
+                  ))}
+                  {cfDialogueBusy && cfDialoguePhase === "chatting" && (
+                    <div className="dlg-bubble dlg-ai dlg-typing"><span /><span /><span /></div>
+                  )}
+                </div>
+
+                {cfDialoguePhase === "chatting" && (
+                  <>
+                    <textarea
+                      className="answer-box serif"
+                      value={cfDialogueInput}
+                      onChange={(e) => setCfDialogueInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendConfusionDialogueTurn(); } }}
+                      placeholder="ここに日本語で書いてください…(Enter 提交 / Shift+Enter 换行)"
+                      rows={2}
+                      disabled={cfDialogueBusy}
+                      autoFocus
+                    />
+                    <div className="btn-row">
+                      <button className="btn-ghost" disabled={cfDialogueBusy || cfDialogueHistory.length === 0} onClick={() => finishConfusionDialogue(cfDialogueHistory)}>結束対話</button>
+                      <button className="btn-main" disabled={cfDialogueBusy || !cfDialogueInput.trim()} onClick={sendConfusionDialogueTurn}>送信</button>
+                    </div>
+                  </>
+                )}
+                {cfDialoguePhase === "reviewing" && (
+                  <div className="dlg-reviewing">
+                    <div className="dots"><span /><span /><span /></div>
+                    <div className="loading-text">先生が講評をまとめています…</div>
+                  </div>
+                )}
+              </>
+            )}
+
+            {cfDialoguePhase === "reviewed" && cfDialogueReview && (
+              <div className="result-wrap">
+                <Stamp verdict={cfDialogueReview.grammarMistakes.length ? "partial" : "correct"} />
+                <div className="exp-block"><label>本场对话</label><div>{cfDialogueReview.summary}</div></div>
+                <div className="exp-block"><label>可以改进的地方</label><div>{cfDialogueReview.issues}</div></div>
+                {cfDialogueReview.suggestions && <div className="exp-block"><label>更地道的说法</label><div>{cfDialogueReview.suggestions}</div></div>}
+                <button className="btn-main" onClick={exitConfusionDialogue}>返回練習帳</button>
+              </div>
+            )}
+          </section>
+          {cfDialoguePhase !== "reviewed" && (
+            <button className="quit-link" onClick={exitConfusionDialogue}>中断,返回練習帳</button>
+          )}
+        </main>
+      )}
+
+      {view === "confusion" && confusionSub === "email" && cfEmailTopic && (
+        <main className="page">
+          <div className="pattern-head">
+            <span className="tag tag-cf">練習帳 · 书面邮件</span>
+            <span className="pattern-name serif">{cfEmailTopic.name}</span>
+          </div>
+
+          {cfEmailPhase === "loading" && (
+            <section className="card loading-card">
+              <div className="dots"><span /><span /><span /></div>
+              <div className="loading-text">先生が命題を考えています…</div>
+            </section>
+          )}
+
+          {cfEmailPhase === "error" && (
+            <section className="card">
+              <p className="err-text">{cfEmailErr}</p>
+              <button className="btn-main" onClick={retryConfusionEmail}>重试</button>
+            </section>
+          )}
+
+          {cfEmailScenario && (cfEmailPhase === "write" || cfEmailPhase === "grading" || cfEmailPhase === "result") && (
+            <>
+              <section className="card cf-email-brief">
+                <div className="cf-email-field">
+                  <label>收件人</label>
+                  <div>{cfEmailScenario.recipient.org} {cfEmailScenario.recipient.name}<span className="cf-email-relation">({cfEmailScenario.recipient.relation})</span></div>
+                </div>
+                <div className="cf-email-field">
+                  <label>写信原因</label>
+                  <div>{cfEmailScenario.situation}</div>
+                </div>
+                <div className="cf-email-field">
+                  <label>正文必须交代</label>
+                  <ul className="cf-email-points">{cfEmailScenario.points.map((pt, i) => <li key={i}>{pt}</li>)}</ul>
+                </div>
+              </section>
+
+              {cfEmailPhase === "write" && (
+                <section className="card">
+                  <textarea
+                    className="answer-box serif cf-email-box"
+                    value={cfEmailText}
+                    onChange={(e) => setCfEmailText(e.target.value)}
+                    placeholder="在这里完整写一封邮件…"
+                    rows={12}
+                    autoFocus
+                  />
+                  <div className="btn-row">
+                    <button className="btn-main" disabled={!cfEmailText.trim()} onClick={submitConfusionEmail}>提交 · 請批改</button>
+                  </div>
+                </section>
+              )}
+
+              {cfEmailPhase === "grading" && (
+                <section className="card loading-card">
+                  <div className="dots"><span /><span /><span /></div>
+                  <div className="loading-text">先生が添削しています…</div>
+                </section>
+              )}
+
+              {cfEmailPhase === "result" && cfEmailResult && (
+                <section className="card">
+                  <Stamp verdict={cfEmailResult.dims.every((d) => d.ok) ? "correct" : cfEmailResult.dims.filter((d) => !d.ok).length <= 2 ? "partial" : "wrong"} />
+                  {cfEmailResult.overallNote && <div className="exp-block"><label>总体点评</label><div>{cfEmailResult.overallNote}</div></div>}
+                  <div className="cf-email-dims">
+                    {cfEmailResult.dims.map((d, i) => (
+                      <div key={i} className={"cf-email-dim" + (d.ok ? " ok" : " ng")}>
+                        <span className="cf-email-dim-mark">{d.ok ? "✓" : "⚠"}</span>
+                        <span className="cf-email-dim-label">{d.label}</span>
+                        {d.note && <span className="cf-email-dim-note">{d.note}</span>}
+                      </div>
+                    ))}
+                  </div>
+                  <button className="btn-main" onClick={exitConfusionEmail}>返回練習帳</button>
+                </section>
+              )}
+            </>
+          )}
+
+          {cfEmailPhase !== "result" && (
+            <button className="quit-link" onClick={exitConfusionEmail}>中断,返回練習帳</button>
+          )}
+        </main>
+      )}
+
       {/* ---------- 错题本 ---------- */}
       {view === "mistakes" && (
         <main className="page">
@@ -1828,13 +2852,16 @@ function AppInner() {
             </div>
           )}
           {db.mistakes.map((m, i) => {
-            const p = PATTERNS[m.pid];
-            const p2 = m.pid2 !== undefined ? PATTERNS[m.pid2] : null;
+            // 練習帳(知识辨析/场景对话/书面邮件)来的错题不挂钩具体句型,没有 pid,
+            // 用 m.label 兜底展示,也不提供"重练"按钮(每次都是现场重新生成,没有可以精确重放的原题)。
+            const isConfusion = m.source === "confusion";
+            const p = isConfusion ? null : PATTERNS[m.pid];
+            const p2 = !isConfusion && m.pid2 !== undefined ? PATTERNS[m.pid2] : null;
             return (
               <div key={m.id || i} className="card mistake-card">
                 <div className="mk-head">
                   <span className="mk-head-left">
-                    <span className="serif">{p.pattern}{p2 && <> ＋ {p2.pattern}</>}</span>
+                    <span className="serif">{isConfusion ? m.label : <>{p.pattern}{p2 && <> ＋ {p2.pattern}</>}</>}</span>
                     {m.needsReview && <span className="badge badge-review">⚠️ 建议复核</span>}
                   </span>
                   <span className="mk-date">{m.date}</span>
@@ -1845,7 +2872,7 @@ function AppInner() {
                 <div className="mk-exp">{m.exp}</div>
                 <BreakdownBlock breakdown={m.breakdown} />
                 <div className="btn-row">
-                  <button className="btn-mini" onClick={() => (p2 ? startComboFree(p, p2, m.id) : m.type === "listening" ? startListenFree(p, m.id) : startFree(p, m.id))}>{p2 ? "重练这组合" : m.type === "listening" ? "重新听一次" : "重练这个句型"}</button>
+                  {!isConfusion && <button className="btn-mini" onClick={() => (p2 ? startComboFree(p, p2, m.id) : m.type === "listening" ? startListenFree(p, m.id) : startFree(p, m.id))}>{p2 ? "重练这组合" : m.type === "listening" ? "重新听一次" : "重练这个句型"}</button>}
                   {m.needsReview && <button className="btn-mini" onClick={() => setDb((d) => ({ ...d, mistakes: d.mistakes.filter((x, j) => (m.id ? x.id !== m.id : j !== i)) }))}>✓ 确认无误</button>}
                   <button className="btn-mini ghost" onClick={() => setDb((d) => ({ ...d, mistakes: d.mistakes.filter((x, j) => (m.id ? x.id !== m.id : j !== i)) }))}>移除</button>
                 </div>
@@ -1857,7 +2884,7 @@ function AppInner() {
 
       {/* ---------- 底部导航 ---------- */}
       <nav className="nav">
-        {[["home", "今日"], ["library", "句型库"], ["mistakes", "錯題本"]].map(([v, label]) => (
+        {[["home", "今日"], ["library", "句型库"], ["confusion", "練習帳"], ["mistakes", "錯題本"]].map(([v, label]) => (
           <button key={v} className={view === v ? "nav-btn on" : "nav-btn"} onClick={() => setView(v)}>{label}</button>
         ))}
       </nav>
@@ -2085,6 +3112,56 @@ function Style() {
 .mk-line label{display:inline-block;margin-right:8px;margin-bottom:0}
 .shu{color:var(--shu)}
 .mk-exp{font-size:13px;color:var(--ink-soft);line-height:1.7;margin-top:6px}
+
+/* ---- 練習帳(知识辨析/场景对话/书面邮件) ---- */
+.tag-cf{background:#EAF0F9;color:var(--ai)}
+.cf-note{font-size:12px;color:var(--ink-soft);line-height:1.6;margin-bottom:18px}
+.cf-section{margin-bottom:26px}
+.cf-section-title{font-size:15px;font-weight:700;color:var(--ai-deep);margin-bottom:10px;letter-spacing:1px}
+.cf-loading{font-size:13px;color:var(--ink-soft);padding:12px 0}
+.cf-topic-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-bottom:12px}
+.cf-topic-card{text-align:left;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;cursor:pointer}
+.cf-topic-card:hover{border-color:var(--ai)}
+.cf-topic-name{font-size:15px;color:var(--ai-deep)}
+.cf-topic-count{font-size:11px;color:var(--ink-soft);margin-top:4px}
+.cf-new-topic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.cf-input{flex:1;min-width:140px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:13px;background:var(--card);color:var(--ink)}
+.cf-err{font-size:12px;color:var(--shu);margin-top:8px;width:100%}
+.cf-scene-group-title{font-size:12px;color:var(--ink-soft);letter-spacing:1px;margin:12px 0 8px}
+.cf-scene-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.cf-scene-btn{text-align:left;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:3px}
+.cf-scene-btn:hover{border-color:var(--ai)}
+.cf-scene-roles{font-size:13px;font-weight:700;color:var(--ai-deep)}
+.cf-scene-bg{font-size:11px;color:var(--ink-soft);line-height:1.5}
+.cf-email-topic-btn{justify-content:center;align-items:center}
+.cf-back{display:block;margin:0 0 10px;text-align:left}
+.cf-empty{text-align:center;padding:30px 10px;color:var(--ink-soft);font-size:13px}
+.cf-empty .btn-main{margin-top:14px}
+.cf-item-group{margin-bottom:18px}
+.cf-item-group-title{font-size:12px;color:var(--ai);letter-spacing:1px;margin-bottom:8px;font-weight:700}
+.cf-item-row{padding:10px 0;border-bottom:1px dashed var(--line)}
+.cf-item-row:last-child{border-bottom:none}
+.cf-item-head{font-size:15px;color:var(--ai-deep)}
+.cf-item-note{font-size:12px;color:var(--ink-soft);margin-top:3px;line-height:1.6}
+.cf-item-example{font-size:13px;margin-top:4px;display:flex;flex-wrap:wrap;gap:6px}
+.cf-item-example-cn{font-size:12px;color:var(--ink-soft)}
+.cf-topic-actions{margin-top:6px}
+.cf-grading{margin:10px 0}
+.cf-email-brief{position:sticky;top:8px;z-index:1;margin-bottom:14px;background:#FAF4EC}
+.cf-email-field{margin-bottom:10px}
+.cf-email-field:last-child{margin-bottom:0}
+.cf-email-field label{display:block;font-size:11px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:3px}
+.cf-email-relation{font-size:12px;color:var(--ink-soft);margin-left:4px}
+.cf-email-points{margin:0;padding-left:18px;font-size:13px;line-height:1.8}
+.cf-email-box{min-height:220px}
+.cf-email-dims{margin:14px 0}
+.cf-email-dim{display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px dashed var(--line);font-size:13px}
+.cf-email-dim:last-child{border-bottom:none}
+.cf-email-dim-mark{flex:0 0 auto}
+.cf-email-dim.ok .cf-email-dim-mark{color:#2E7D5B}
+.cf-email-dim.ng .cf-email-dim-mark{color:var(--shu)}
+.cf-email-dim-label{flex:0 0 auto;font-weight:700;color:var(--ai-deep)}
+.cf-email-dim-note{color:var(--ink-soft);flex:1 1 auto}
 
 .nav{position:sticky;bottom:0;margin-top:auto;display:flex;flex:0 0 auto;
   background:var(--card);border-top:1px solid var(--line);padding:6px 0 max(6px, env(safe-area-inset-bottom))}

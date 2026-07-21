@@ -1028,10 +1028,6 @@ function AppInner() {
   const [cfActiveTopic, setCfActiveTopic] = useState(null);
   const [cfTopicBusy, setCfTopicBusy] = useState(false);
   const [cfTopicErr, setCfTopicErr] = useState("");
-  const [cfNewTopicName, setCfNewTopicName] = useState("");
-  const [cfNewTopicKeyword, setCfNewTopicKeyword] = useState("");
-  const [cfNewTopicBusy, setCfNewTopicBusy] = useState(false);
-  const [cfNewTopicErr, setCfNewTopicErr] = useState("");
   const [cfOpenSection, setCfOpenSection] = useState(null); // null | "knowledge" | "dialogue" | "email",練習帳首页三大区手风琴式折叠
 
   const [cfQuiz, setCfQuiz] = useState(null); // {topic, items, questions}
@@ -1792,31 +1788,6 @@ function AppInner() {
     }
   };
 
-  const createConfusionTopic = async () => {
-    const name = cfNewTopicName.trim();
-    if (!name || cfNewTopicBusy) return;
-    setCfNewTopicBusy(true);
-    setCfNewTopicErr("");
-    try {
-      const keyword = cfNewTopicKeyword.trim();
-      const stage = confusionStageBenchmark(db);
-      const raw = await genConfusionItems(name, keyword, [], stage, 15, "generic");
-      const items = raw.map((it) => ({ ...it, id: newId(), weak: 0 }));
-      const topic = { id: newId(), name, keyword, kind: "generic", builtin: false, itemCount: items.length };
-      const nextTopics = [...(confusionTopics || []), topic];
-      setConfusionTopics(nextTopics);
-      window.storage.set("confusion_topics_v1", JSON.stringify(nextTopics));
-      saveConfusionItems(topic.id, items);
-      setCfNewTopicName("");
-      setCfNewTopicKeyword("");
-      openConfusionTopic(topic);
-    } catch (e) {
-      setCfNewTopicErr("新建失败:" + (e && e.message ? e.message : String(e)));
-    } finally {
-      setCfNewTopicBusy(false);
-    }
-  };
-
   const applyConfusionItemWeak = (topicId, itemId, verdict) => {
     const delta = verdict === "correct" ? -1 : verdict === "partial" ? 1 : 2;
     setConfusionItemsCache((c) => {
@@ -2501,25 +2472,6 @@ function AppInner() {
                     ))}
                   </div>
                 )}
-                <div className="cf-new-topic-hint">新建一个知识点名称(比如「补助动词」),AI 会围绕它现场生成一批专属的知识范围表;补充关键词是选填的,能帮 AI 更精准理解你想练的具体范围。</div>
-                <div className="cf-new-topic">
-                  <input
-                    className="cf-input"
-                    placeholder="新建小项名称,比如「补助动词」"
-                    value={cfNewTopicName}
-                    onChange={(e) => setCfNewTopicName(e.target.value)}
-                  />
-                  <input
-                    className="cf-input"
-                    placeholder="补充关键词(选填)"
-                    value={cfNewTopicKeyword}
-                    onChange={(e) => setCfNewTopicKeyword(e.target.value)}
-                  />
-                  <button className="btn-outline" disabled={!cfNewTopicName.trim() || cfNewTopicBusy} onClick={createConfusionTopic}>
-                    {cfNewTopicBusy ? "生成中…" : "+ 新建小项"}
-                  </button>
-                  {cfNewTopicErr && <div className="cf-err">{cfNewTopicErr}</div>}
-                </div>
               </div>
             )}
           </section>
@@ -3149,15 +3101,12 @@ function Style() {
 .cf-section-meta{margin-left:auto;font-size:12px;color:var(--ink-soft)}
 .cf-section-arrow{font-size:16px;color:var(--ink-soft);width:16px;text-align:center}
 .cf-section-body{padding:14px 2px 4px}
-.cf-new-topic-hint{font-size:11px;color:var(--ink-soft);line-height:1.6;margin-bottom:8px}
 .cf-loading{font-size:13px;color:var(--ink-soft);padding:12px 0}
 .cf-topic-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-bottom:12px}
 .cf-topic-card{text-align:left;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;cursor:pointer}
 .cf-topic-card:hover{border-color:var(--ai)}
 .cf-topic-name{font-size:15px;color:var(--ai-deep)}
 .cf-topic-count{font-size:11px;color:var(--ink-soft);margin-top:4px}
-.cf-new-topic{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-.cf-input{flex:1;min-width:140px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;font-size:13px;background:var(--card);color:var(--ink)}
 .cf-err{font-size:12px;color:var(--shu);margin-top:8px;width:100%}
 .cf-scene-group-title{font-size:12px;color:var(--ink-soft);letter-spacing:1px;margin:12px 0 8px}
 .cf-scene-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}

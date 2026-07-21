@@ -1032,6 +1032,7 @@ function AppInner() {
   const [cfNewTopicKeyword, setCfNewTopicKeyword] = useState("");
   const [cfNewTopicBusy, setCfNewTopicBusy] = useState(false);
   const [cfNewTopicErr, setCfNewTopicErr] = useState("");
+  const [cfOpenSection, setCfOpenSection] = useState(null); // null | "knowledge" | "dialogue" | "email",練習帳首页三大区手风琴式折叠
 
   const [cfQuiz, setCfQuiz] = useState(null); // {topic, items, questions}
   const [cfQuizIdx, setCfQuizIdx] = useState(0);
@@ -2482,67 +2483,92 @@ function AppInner() {
           <div className="cf-note">自由练习:不进复习排期,不计入每日/每周任务统计。发现明显的语法错误会记到錯題本里,但不影响任何排期。</div>
 
           <section className="cf-section">
-            <div className="cf-section-title">知识辨析</div>
-            {confusionTopics === null && <div className="cf-loading">加载中…</div>}
-            {confusionTopics && (
-              <div className="cf-topic-grid">
-                {confusionTopics.map((tp) => (
-                  <button key={tp.id} className="cf-topic-card" onClick={() => openConfusionTopic(tp)}>
-                    <div className="cf-topic-name serif">{tp.name}</div>
-                    <div className="cf-topic-count">{tp.itemCount ? tp.itemCount + " 条" : "还没生成范围表"}</div>
+            <button className="cf-section-head" onClick={() => setCfOpenSection((s) => (s === "knowledge" ? null : "knowledge"))}>
+              <span className="cf-section-title">知识辨析</span>
+              <span className="cf-section-meta">{confusionTopics ? confusionTopics.length + " 个小项" : "…"}</span>
+              <span className="cf-section-arrow">{cfOpenSection === "knowledge" ? "−" : "+"}</span>
+            </button>
+            {cfOpenSection === "knowledge" && (
+              <div className="cf-section-body">
+                {confusionTopics === null && <div className="cf-loading">加载中…</div>}
+                {confusionTopics && (
+                  <div className="cf-topic-grid">
+                    {confusionTopics.map((tp) => (
+                      <button key={tp.id} className="cf-topic-card" onClick={() => openConfusionTopic(tp)}>
+                        <div className="cf-topic-name serif">{tp.name}</div>
+                        <div className="cf-topic-count">{tp.itemCount ? tp.itemCount + " 条" : "还没生成范围表"}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="cf-new-topic-hint">新建一个知识点名称(比如「补助动词」),AI 会围绕它现场生成一批专属的知识范围表;补充关键词是选填的,能帮 AI 更精准理解你想练的具体范围。</div>
+                <div className="cf-new-topic">
+                  <input
+                    className="cf-input"
+                    placeholder="新建小项名称,比如「补助动词」"
+                    value={cfNewTopicName}
+                    onChange={(e) => setCfNewTopicName(e.target.value)}
+                  />
+                  <input
+                    className="cf-input"
+                    placeholder="补充关键词(选填)"
+                    value={cfNewTopicKeyword}
+                    onChange={(e) => setCfNewTopicKeyword(e.target.value)}
+                  />
+                  <button className="btn-outline" disabled={!cfNewTopicName.trim() || cfNewTopicBusy} onClick={createConfusionTopic}>
+                    {cfNewTopicBusy ? "生成中…" : "+ 新建小项"}
                   </button>
-                ))}
+                  {cfNewTopicErr && <div className="cf-err">{cfNewTopicErr}</div>}
+                </div>
               </div>
             )}
-            <div className="cf-new-topic">
-              <input
-                className="cf-input"
-                placeholder="新建小项名称,比如「补助动词」"
-                value={cfNewTopicName}
-                onChange={(e) => setCfNewTopicName(e.target.value)}
-              />
-              <input
-                className="cf-input"
-                placeholder="补充关键词(选填)"
-                value={cfNewTopicKeyword}
-                onChange={(e) => setCfNewTopicKeyword(e.target.value)}
-              />
-              <button className="btn-outline" disabled={!cfNewTopicName.trim() || cfNewTopicBusy} onClick={createConfusionTopic}>
-                {cfNewTopicBusy ? "生成中…" : "+ 新建小项"}
-              </button>
-              {cfNewTopicErr && <div className="cf-err">{cfNewTopicErr}</div>}
-            </div>
           </section>
 
           <section className="cf-section">
-            <div className="cf-section-title">场景对话</div>
-            <div className="cf-scene-group-title">生活场景</div>
-            <div className="cf-scene-grid">
-              {CONFUSION_SCENES.filter((s) => s.category === "life").map((s) => (
-                <button key={s.id} className="cf-scene-btn" onClick={() => startConfusionDialogue(s)}>
-                  <span className="cf-scene-roles">{s.userRole} ↔ {s.aiRole}</span>
-                  <span className="cf-scene-bg">{s.background}</span>
-                </button>
-              ))}
-            </div>
-            <div className="cf-scene-group-title">职场与办事场景</div>
-            <div className="cf-scene-grid">
-              {CONFUSION_SCENES.filter((s) => s.category === "work").map((s) => (
-                <button key={s.id} className="cf-scene-btn" onClick={() => startConfusionDialogue(s)}>
-                  <span className="cf-scene-roles">{s.userRole} ↔ {s.aiRole}</span>
-                  <span className="cf-scene-bg">{s.background}</span>
-                </button>
-              ))}
-            </div>
+            <button className="cf-section-head" onClick={() => setCfOpenSection((s) => (s === "dialogue" ? null : "dialogue"))}>
+              <span className="cf-section-title">场景对话</span>
+              <span className="cf-section-meta">{CONFUSION_SCENES.length} 个场景</span>
+              <span className="cf-section-arrow">{cfOpenSection === "dialogue" ? "−" : "+"}</span>
+            </button>
+            {cfOpenSection === "dialogue" && (
+              <div className="cf-section-body">
+                <div className="cf-scene-group-title">生活场景</div>
+                <div className="cf-scene-grid">
+                  {CONFUSION_SCENES.filter((s) => s.category === "life").map((s) => (
+                    <button key={s.id} className="cf-scene-btn" onClick={() => startConfusionDialogue(s)}>
+                      <span className="cf-scene-roles">{s.userRole} ↔ {s.aiRole}</span>
+                      <span className="cf-scene-bg">{s.background}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="cf-scene-group-title">职场与办事场景</div>
+                <div className="cf-scene-grid">
+                  {CONFUSION_SCENES.filter((s) => s.category === "work").map((s) => (
+                    <button key={s.id} className="cf-scene-btn" onClick={() => startConfusionDialogue(s)}>
+                      <span className="cf-scene-roles">{s.userRole} ↔ {s.aiRole}</span>
+                      <span className="cf-scene-bg">{s.background}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
 
           <section className="cf-section">
-            <div className="cf-section-title">书面邮件</div>
-            <div className="cf-scene-grid">
-              {CONFUSION_EMAIL_TOPICS.map((tp) => (
-                <button key={tp.id} className="cf-scene-btn cf-email-topic-btn" onClick={() => startConfusionEmail(tp)}>{tp.name}</button>
-              ))}
-            </div>
+            <button className="cf-section-head" onClick={() => setCfOpenSection((s) => (s === "email" ? null : "email"))}>
+              <span className="cf-section-title">书面邮件</span>
+              <span className="cf-section-meta">{CONFUSION_EMAIL_TOPICS.length} 类情境</span>
+              <span className="cf-section-arrow">{cfOpenSection === "email" ? "−" : "+"}</span>
+            </button>
+            {cfOpenSection === "email" && (
+              <div className="cf-section-body">
+                <div className="cf-scene-grid">
+                  {CONFUSION_EMAIL_TOPICS.map((tp) => (
+                    <button key={tp.id} className="cf-scene-btn cf-email-topic-btn" onClick={() => startConfusionEmail(tp)}>{tp.name}</button>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
         </main>
       )}
@@ -3116,8 +3142,14 @@ function Style() {
 /* ---- 練習帳(知识辨析/场景对话/书面邮件) ---- */
 .tag-cf{background:#EAF0F9;color:var(--ai)}
 .cf-note{font-size:12px;color:var(--ink-soft);line-height:1.6;margin-bottom:18px}
-.cf-section{margin-bottom:26px}
-.cf-section-title{font-size:15px;font-weight:700;color:var(--ai-deep);margin-bottom:10px;letter-spacing:1px}
+.cf-section{margin-bottom:14px}
+.cf-section-head{width:100%;display:flex;align-items:center;gap:8px;padding:14px 16px;background:var(--card);
+  border:1px solid var(--line);border-radius:12px;cursor:pointer;text-align:left}
+.cf-section-title{font-size:15px;font-weight:700;color:var(--ai-deep);letter-spacing:1px}
+.cf-section-meta{margin-left:auto;font-size:12px;color:var(--ink-soft)}
+.cf-section-arrow{font-size:16px;color:var(--ink-soft);width:16px;text-align:center}
+.cf-section-body{padding:14px 2px 4px}
+.cf-new-topic-hint{font-size:11px;color:var(--ink-soft);line-height:1.6;margin-bottom:8px}
 .cf-loading{font-size:13px;color:var(--ink-soft);padding:12px 0}
 .cf-topic-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-bottom:12px}
 .cf-topic-card{text-align:left;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;cursor:pointer}

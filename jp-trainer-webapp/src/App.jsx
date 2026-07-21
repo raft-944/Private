@@ -546,8 +546,11 @@ verdict 是 "correct" 时,breakdown 设为 null。` : ""}
 /* ================= 生词点选提示组件 =================
    words 没传入(还没加载好/加载失败)时,原样显示纯文本,不可点击——不能阻塞主流程。
    words 传入后,按词切分成可点击的片段:第一次点显示假名读音(ruby注音),
-   第二次点在后面追加显示中文释义,第三次点收起,循环。 */
-function WordHintText({ text, words, onHintWord, className }) {
+   第二次点在后面追加显示中文释义,第三次点收起,循环。
+   sep: 词与词之间的分隔符,仅在渲染独立的提示词列表(如造句题hint)时传入,
+   避免多个不相关的单词挤在一起;渲染连续例句(逐词加注音)时不传,不能引入
+   原句里没有的空白。 */
+function WordHintText({ text, words, onHintWord, className, sep }) {
   const [clicks, setClicks] = useState({});
   if (!words || !words.length) return <span className={className}>{text}</span>;
   return (
@@ -556,6 +559,7 @@ function WordHintText({ text, words, onHintWord, className }) {
         const st = clicks[i] || 0;
         return (
           <span key={i}>
+            {i > 0 && sep}
             <ruby
               className={"wh-word" + (st > 0 ? " wh-hinted" : "")}
               onClick={() => {
@@ -1716,7 +1720,7 @@ function AppInner() {
               )}
               {q.hint && (
                 <div className="q-hint">
-                  ヒント: <WordHintText text={q.hint} words={(q.hintWords && q.hintWords.length ? q.hintWords : hintWordsFallback)} onHintWord={markHinted} />
+                  ヒント: <WordHintText text={q.hint} words={(q.hintWords && q.hintWords.length ? q.hintWords : hintWordsFallback)} onHintWord={markHinted} sep="、" />
                 </div>
               )}
 

@@ -617,6 +617,26 @@ verdict 是 "correct" 时,breakdown 设为 null。` : ""}
   return g;
 }
 
+/* 判卷结果出来之后,针对"这道题"的追问——不是漫无边际地聊,contextSummary 把这道题的
+   句型/题目/学生答案/参考答案/讲解都打包进去,history 是这道题下面已经问过的追问记录
+   (同一道题可以连续追问好几轮,换题后由调用方清空,不带过去)。 */
+async function askFollowUp(contextSummary, history, question) {
+  const sys = `あなたは丁寧で親切な日本語教師です。学习者刚做完一道题,现在针对这道题追问,请紧扣这道题的内容作答,不要跑题到无关内容。讲解以中文为主,可以夹杂日语术语/例句。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const historyText = history && history.length
+    ? "\n\n这道题下面之前的追问记录:\n" + history.map((h) => `学习者问: ${h.q}\n你答: ${h.a}`).join("\n")
+    : "";
+  const user = `这道题的完整内容:
+${contextSummary}${historyText}
+
+学习者现在追问: ${question}
+
+请针对这道题紧扣着回答,不要泛泛而谈无关内容,中日混合,150字以内。
+输出JSON: {"answer":"..."}`;
+  const r = await callAI(sys, user, 1200);
+  if (!r.answer) throw new Error("bad follow-up answer");
+  return r.answer;
+}
+
 /* ================= 練習帳 · 知识辨析(自由练习,不进排期/不进统计/不进错题本) =================
    这三个函数只服务「練習帳」的知识辨析小项(自他动词/授受动词/助词辨析等),
    和 SRS 那一整套 db.prog/db.stats/db.mistakes 完全无关,调用方也绝不会把结果写回那些字段。 */
@@ -995,6 +1015,61 @@ function BreakdownBlock({ breakdown }) {
   );
 }
 
+/* ================= 追问框(针对这道题的结果继续问) =================
+   contextSummary 由调用方按各自的题目结构拼好(句型/题目/答案/参考/讲解),这个组件
+   自己不关心题目具体长什么样。父组件在换题时给这个组件传一个新的 key(比如题目文本),
+   靠 React 换 key 会整个重新挂载组件的机制自动清空上一题的追问记录,不用手动重置状态。 */
+function FollowUpAsk({ contextSummary }) {
+  const [open, setOpen] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const send = () => {
+    const question = input.trim();
+    if (!question || busy) return;
+    setBusy(true);
+    setErr("");
+    setInput("");
+    askFollowUp(contextSummary, history, question)
+      .then((answer) => setHistory((h) => [...h, { q: question, a: answer }]))
+      .catch((e) => setErr("回答失败:" + (e && e.message ? e.message : String(e))))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div className="followup-block">
+      <button className="followup-toggle" onClick={() => setOpen((o) => !o)}>
+        {open ? "− 收起追问" : "+ 没听懂?针对这道题追问"}
+      </button>
+      {open && (
+        <div className="followup-body">
+          {history.map((h, i) => (
+            <div key={i} className="followup-qa">
+              <div className="followup-q">我:{h.q}</div>
+              <div className="followup-a">先生:{h.a}</div>
+            </div>
+          ))}
+          {busy && <div className="followup-loading">先生が考えています…</div>}
+          {err && <div className="cf-err">{err}</div>}
+          <div className="followup-input-row">
+            <input
+              className="followup-input"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+              placeholder="针对这道题追问,比如「这个助词为什么不能用另一个」…"
+              disabled={busy}
+            />
+            <button className="btn-mini" disabled={busy || !input.trim()} onClick={send}>问</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ================= 印章组件(签名元素) ================= */
 function Stamp({ verdict }) {
   const cfg = {
@@ -1149,6 +1224,18 @@ function AppInner() {
   const [homeworkMode, setHomeworkMode] = useState(false);
   const [weeklyMode, setWeeklyMode] = useState(false);
   const [listenMode, setListenMode] = useState(false);
+  /* 判卷结果出来后"针对这道题追问"要用的上下文摘要,按题型把句型/题目/答案/参考/讲解拼一份
+     给 askFollowUp。item 是 queue[idx](即 cur),g 是判卷结果(result)。 */
+  const buildFollowUpContext = (item, question, ans, g) => {
+    if (!item || !question || !g) return "";
+    if (question.type === "listening") {
+      return `听力题\n原文: ${question.jp}\n学生听写的答案: ${ans}\n先生的讲评: ${g.explanation}`;
+    }
+    if (item.sub === "combo") {
+      return `複合作文题(同时练习两个句型)\n句型A: ${item.p1.pattern}(${item.p1.conn} / ${item.p1.meaning})\n句型B: ${item.p2.pattern}(${item.p2.conn} / ${item.p2.meaning})\n题目: ${question.task}\n学生的答案: ${ans}\n参考答案: ${g.reference}\n先生的讲评: ${g.explanation}`;
+    }
+    return `句型: ${item.p.pattern}(${item.p.conn} / ${item.p.meaning})\n题目(${question.type === "translation" ? "翻译题" : "造句题"}): ${question.task}\n学生的答案: ${ans}\n参考答案: ${g.reference}\n先生的讲评: ${g.explanation}`;
+  };
   const [weeklyFormal, setWeeklyFormal] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -2688,6 +2775,7 @@ function AppInner() {
                   <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{furiganaify(result.reference)}</div></div>
                   <div className="exp-block"><label>先生の講評</label><div>{result.explanation}</div></div>
                   <BreakdownBlock breakdown={result.breakdown} />
+                  <FollowUpAsk key={idx} contextSummary={buildFollowUpContext(cur, q, answer, result)} />
                   <button className="btn-main" onClick={next}>{idx + 1 < queue.length ? "次へ →" : "完成今日学習"}</button>
                 </div>
               )}
@@ -2946,6 +3034,10 @@ function AppInner() {
                   {cfAnswer.trim() && <div className="your-ans"><label>你的答案</label><div className="serif">{cfAnswer}</div></div>}
                   <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{furiganaify(cfResult.reference)}</div></div>
                   <div className="exp-block"><label>先生の講評</label><div>{cfResult.explanation}</div></div>
+                  <FollowUpAsk
+                    key={cfQuizIdx}
+                    contextSummary={`知识点: ${cfQuiz.topic.name}\n条目: ${cfQuiz.items[cfQuizIdx].head}(${cfQuiz.items[cfQuizIdx].sub})\n题目: ${cfQuiz.questions[cfQuizIdx].task}\n学生的答案: ${cfAnswer}\n参考答案: ${cfResult.reference}\n先生的讲评: ${cfResult.explanation}`}
+                  />
                   <button className="btn-main" onClick={nextConfusionQuestion}>{cfQuizIdx + 1 < cfQuiz.questions.length ? "次へ →" : "完成本组练习"}</button>
                 </div>
               )}
@@ -3403,6 +3495,18 @@ function Style() {
 .card .btn-main{margin-top:16px}
 .review-flag{margin:8px 0 4px;padding:8px 12px;background:var(--tint-red2-bg);border:1px solid var(--tint-red2-border);border-radius:10px;
   font-size:12px;color:var(--shu);line-height:1.6}
+
+.followup-block{margin-top:14px}
+.followup-toggle{background:none;border:1px dashed var(--line);border-radius:10px;padding:8px 12px;font-size:12px;color:var(--ai);cursor:pointer;width:100%;text-align:left}
+.followup-body{margin-top:8px;padding:12px;background:var(--tint-panel);border-radius:10px}
+.followup-qa{margin-bottom:10px;font-size:13px;line-height:1.7}
+.followup-qa:last-child{margin-bottom:0}
+.followup-q{color:var(--ink-soft)}
+.followup-a{color:var(--ink);margin-top:2px}
+.followup-loading{font-size:12px;color:var(--ink-soft);margin:6px 0}
+.followup-input-row{display:flex;gap:8px;margin-top:10px}
+.followup-input{flex:1;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:var(--tint-input-bg);color:var(--ink)}
+.followup-input-row .btn-mini{margin-top:0;flex:0 0 auto}
 
 .stamp{position:absolute;top:-22px;right:2px;margin:0;width:150px;height:150px;border:3px solid var(--shu);border-radius:50%;
   display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--shu);background:transparent;

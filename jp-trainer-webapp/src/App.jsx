@@ -2235,10 +2235,7 @@ function AppInner() {
             ) : (
               <div className="all-done serif">今日の分は終わりました 🎌<br /><span className="all-done-sub">今天的任务已全部完成,明天见</span></div>
             )}
-          </section>
-
-          <section className="study-time-card">
-            <div className="stc-row">
+            <div className="stc-row stc-row-inline">
               <div className="stc-block"><div className="stc-num">{fmtMinutes(todaySec)}</div><div className="stc-label">今天</div></div>
               <div className="stc-block"><div className="stc-num">{fmtMinutes(avg7Sec)}</div><div className="stc-label">近7天日均</div></div>
               <div className="stc-block"><div className="stc-num">{fmtMinutes(avg30Sec)}</div><div className="stc-label">近30天日均</div></div>
@@ -2252,39 +2249,41 @@ function AppInner() {
             )}
           </section>
 
-          <section className="hw-card">
-            <div className="hw-top">
-              <div>
-                <div className="hw-title serif">毎日の宿題</div>
-                <div className="hw-sub">从已学句型抽 4 造句 + 5 翻译 + 1 情景对话(优先混入当前错题),统一批改讲解</div>
+          <div className="hw-grid">
+            <section className="hw-card hw-card-compact">
+              <div className="hw-top">
+                <div>
+                  <div className="hw-title serif">毎日の宿題</div>
+                  <div className="hw-sub">从已学句型抽 4 造句 + 5 翻译 + 1 情景对话(优先混入当前错题),统一批改讲解</div>
+                </div>
+                {db.meta.hwDate === t && <span className="hw-done">✓ 今日已完成</span>}
               </div>
-              {db.meta.hwDate === t && <span className="hw-done">✓ 今日已完成</span>}
-            </div>
-            {learnedIds.length === 0 ? (
-              <div className="hw-empty">先学几个句型,再来做作业吧</div>
-            ) : (
-              <button className="btn-outline" onClick={startHomework}>
-                {db.meta.hwDate === t ? "再练一组作业" : "開始 · 今日の宿題"}
-              </button>
-            )}
-          </section>
+              {learnedIds.length === 0 ? (
+                <div className="hw-empty">先学几个句型,再来做作业吧</div>
+              ) : (
+                <button className="btn-outline" onClick={startHomework}>
+                  {db.meta.hwDate === t ? "再练一组作业" : "開始 · 今日の宿題"}
+                </button>
+              )}
+            </section>
 
-          <section className="hw-card wk-card">
-            <div className="hw-top">
-              <div>
-                <div className="hw-title serif">週間チャレンジ</div>
-                <div className="hw-sub">5道複合作文(一句话用两个句型)+ 3道本周弱点重测</div>
+            <section className="hw-card wk-card hw-card-compact">
+              <div className="hw-top">
+                <div>
+                  <div className="hw-title serif">週間チャレンジ</div>
+                  <div className="hw-sub">5道複合作文(一句话用两个句型)+ 3道本周弱点重测</div>
+                </div>
+                {weekDone && <span className="hw-done">✓ 本周已完成</span>}
               </div>
-              {weekDone && <span className="hw-done">✓ 本周已完成</span>}
-            </div>
-            {!weekReady ? (
-              <div className="hw-empty">至少学会 2 个句型后解锁</div>
-            ) : (
-              <button className="btn-outline" onClick={startWeekly}>
-                {weekDone ? "再来一组" : "開始 · 今週のチャレンジ"}
-              </button>
-            )}
-          </section>
+              {!weekReady ? (
+                <div className="hw-empty">至少学会 2 个句型后解锁</div>
+              ) : (
+                <button className="btn-outline" onClick={startWeekly}>
+                  {weekDone ? "再来一组" : "開始 · 今週のチャレンジ"}
+                </button>
+              )}
+            </section>
+          </div>
 
           <section className="hw-card ls-card">
             <div className="hw-top">
@@ -3106,8 +3105,8 @@ function Style() {
 .num-total{font-size:15px;color:var(--ink-soft);font-weight:400}
 .num-label{font-size:12px;color:var(--ink-soft);margin-top:4px;letter-spacing:2px}
 
-.study-time-card{margin-top:12px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px 22px}
 .stc-row{display:flex;justify-content:space-around}
+.stc-row-inline{margin-top:16px;padding-top:14px;border-top:1px dashed var(--line)}
 .stc-block{text-align:center}
 .stc-num{font-size:18px;font-weight:700;color:var(--ai-deep)}
 .stc-label{font-size:11px;color:var(--ink-soft);margin-top:3px;letter-spacing:1px}
@@ -3131,6 +3130,15 @@ function Style() {
 .hw-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px}
 .hw-title{font-size:17px;color:var(--ai-deep)}
 .hw-sub{font-size:12px;color:var(--ink-soft);margin-top:4px;line-height:1.6}
+/* 每日の宿题/週間チャレンジ 结构简单(标题+说明+一个按钮),挤成两栏能省不少竖向空间;
+   聴解練習 多一行语音选择器,结构不一样,留在下面单独一整行,不塞进这个网格。 */
+.hw-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px}
+.hw-card-compact{margin-top:0;padding:14px}
+.hw-card-compact .hw-title{font-size:15px}
+.hw-card-compact .hw-sub{font-size:11px;margin-top:3px;
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
+.hw-card-compact .btn-outline{font-size:13px;padding:10px}
+.hw-card-compact .hw-done{font-size:10px;padding:2px 6px}
 .hw-done{flex:0 0 auto;font-size:11px;color:var(--shu);background:var(--tint-red-bg);padding:3px 8px;border-radius:6px;white-space:nowrap}
 .ls-tier{color:var(--tint-green-fg);background:var(--tint-green-bg)}
 .ls-progress{font-size:12px;color:var(--ink-soft);margin-bottom:12px}

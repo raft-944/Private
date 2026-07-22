@@ -257,7 +257,7 @@ async function genComboQuestion(p1, p2, avoid) {
 句型B: ${p2.pattern}(${p2.conn} / ${p2.meaning})
 请给出一个中文情境提示(30字以内),说明想表达的内容,让学习者据此写出同时包含这两个句型的日语句子或简短对话。
 ${avoid && avoid.length ? "避免与这些情境雷同: " + avoid.join(" / ") : ""}${personInstruction([p1, p2])}
-输出JSON格式: {"task":"情境提示(中文)","hint":""}`;
+输出JSON格式: {"task":"情境提示(中文)"}`;
   const q = await callAI(sys, user);
   if (!q.task) throw new Error("bad question");
   return { ...q, type: "combo", label: "複合作文 · 请在一句话/一段小对话里同时用上下面两个句型" };
@@ -293,6 +293,47 @@ function setCachedWords(text, words) {
     if (keys.length > 400) delete store[keys[0]]; // 简单限制缓存条数,避免无限增长
     localStorage.setItem(WORD_CACHE_KEY, JSON.stringify(store));
   } catch { /* 缓存失败不影响功能,忽略即可 */ }
+}
+
+/* 题面(翻译题/造句题/複合作文的中文题干)的逐词查词结果,和上面的日语例句缓存分开存一份,
+   避免中/日两种文本万一撞了同一个字符串键。 */
+const TASK_WORD_CACHE_KEY = "jp_task_word_cache_v1";
+function getCachedTaskWords(text) {
+  try {
+    const store = JSON.parse(localStorage.getItem(TASK_WORD_CACHE_KEY) || "{}");
+    return store[text] || null;
+  } catch { return null; }
+}
+function setCachedTaskWords(text, words) {
+  try {
+    const store = JSON.parse(localStorage.getItem(TASK_WORD_CACHE_KEY) || "{}");
+    store[text] = words;
+    const keys = Object.keys(store);
+    if (keys.length > 400) delete store[keys[0]];
+    localStorage.setItem(TASK_WORD_CACHE_KEY, JSON.stringify(store));
+  } catch { /* 缓存失败不影响功能,忽略即可 */ }
+}
+
+/* 题面(中文)逐词切词+配日语说法,取代原来"AI主观挑1~2个词给提示"的旧机制——
+   那套机制经常挑得不准(提示学习者早就会的词,真正生词反而没提示),现在整句题干每个词
+   都能点开查,该查哪个词由学习者自己判断,不用AI猜。
+   targetDesc 是"这道题正在考什么"的简短描述,只用来告诉AI哪部分不能剧透:和目标语法点
+   直接对应的中文成分(比如"必须"对应的なければなりません)绝对不能给出日语说法,
+   因为那正是这道题要考的东西,查得到就等于抄答案。 */
+async function annotateChineseTask(taskText, targetDesc) {
+  const sys = `あなたは日本語教師です。请把这句中文按适合点查的自然单位切分,并给每个部分标出对应的日语说法,帮助学习者随时点开不认识的词看日语怎么说。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const user = `这道题正在考的语法点: ${targetDesc || "(无特定语法点)"}
+中文题面: ${taskText}
+
+请把上面这句中文切分成自然的查词单位(不用切得过细),覆盖整句、不要遗漏:
+- 所有切分片段按顺序拼接起来必须和原句一字不差,不能有遗漏、增补或改动
+- 和目标语法点直接对应的那部分中文(比如表达"必须/了/能不能/被"这类正好对应目标语法点具体形式的成分),这部分的 jp 字段必须留空字符串"",绝对不能写出该语法点对应的具体日语写法——写出来就是把这道题的答案剧透了
+- 其余普通词汇(名词、动词、形容词等)正常给出常见的日语说法(基本形/词典形即可,不用管敬体简体活用变化),帮助学习者查生词
+
+输出JSON: {"words":[{"surface":"中文片段原文","jp":"对应的日语说法,需要保密的部分给空字符串"}]}`;
+  const r = await callAI(sys, user);
+  if (!Array.isArray(r.words) || !r.words.length) throw new Error("bad task word annotation");
+  return r.words;
 }
 
 /* 生词点选提示:课本例句是静态数据,不是每次都跟着出题一起生成的,
@@ -395,15 +436,12 @@ async function genQuestion(p, avoid, forceType) {
 题目类型: ${type === "translation" ? "翻译题——给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用上述句型" : `造句题——请按以下要求出题:
 1. 场景(中文,25字以内)只能表达一个清晰、单一的意思,不能同时塞入两件不相关的信息(例如不要把"喜欢什么"和"东西放在哪里"混在同一个场景里)
 2. 场景要让人一眼就能看出应该表达什么内容、用什么结构回答,不能有歧义,不能让人猜"到底要写哪一层意思"
-3. 场景里包含的信息必须刚好等于、也只等于目标句型所需要表达的内容——不多给、也不少给
-4. 提示词(1~2个日语单词,不是整句)必须直接服务于这唯一的意思,不能引向别的方向`}
+3. 场景里包含的信息必须刚好等于、也只等于目标句型所需要表达的内容——不多给、也不少给`}
 话题方向: ${topic}
-${avoid && avoid.length ? "避免与这些题目雷同: " + avoid.join(" / ") : ""}
-${type === "composition" ? "重要:hint里给的每一个日语提示词,都必须在hintWords数组里对应给出一条{surface,yomi,meaning},一个都不能漏、不能只写空数组。" : "重要:hint只能用来提示题目里生僻词汇的日语写法/读音(比如学习者可能不会写的名词),绝对不能透露目标句型本身应该变成的具体形式(比如活用形、时态、敬体简体、否定形等)——那正是这道题要考的东西,写出来就等于剧透了答案。没有需要提示的生词时,hint留空字符串\"\"。"}${personInstruction(p)}
-输出JSON格式: {"type":"${type}","task":"题目内容(中文)","hint":"提示(可为空字符串,如提示词或注意点)","hintWords":[{"surface":"提示词原文","yomi":"该语境下的假名读音","meaning":"简明中文释义(3~8字)"}]${type === "composition" ? "(hint里的每个日语提示词都要在这里给一条,不能空)" : "(翻译题给空数组[])"}}`;
+${avoid && avoid.length ? "避免与这些题目雷同: " + avoid.join(" / ") : ""}${personInstruction(p)}
+输出JSON格式: {"type":"${type}","task":"题目内容(中文)"}`;
   const q = await callAI(sys, user);
   if (!q.task) throw new Error("bad question");
-  q.hintWords = Array.isArray(q.hintWords) ? q.hintWords : [];
   return q;
 }
 
@@ -418,14 +456,14 @@ async function genQuestionBatch(items) {
 ${list}
 
 出题要求:
-- "翻译题":给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型;hintWords给空数组[]。hint只能用来提示生僻词汇的日语写法/读音,绝对不能透露目标句型本身应该变成的具体形式(活用形、时态、敬体简体、否定形等)——那正是这道题要考的东西,写出来就等于剧透了答案;没有需要提示的生词时hint留空字符串""
-- "造句题":场景(中文,25字以内)只能表达一个清晰、单一的意思,不能同时塞入两件不相关的信息,不多给也不少给信息;配1~2个日语提示词(单词,不是整句)写进hint里,并且hint里的每一个提示词都必须在hintWords数组里对应给出一条{surface,yomi,meaning}(该语境下的假名读音+简明中文释义),一个都不能漏、不能只写空数组
+- "翻译题":给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型
+- "造句题":场景(中文,25字以内)只能表达一个清晰、单一的意思,不能同时塞入两件不相关的信息,不多给也不少给信息
 - 各题之间内容不要相似雷同
 
-按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"task":"题目内容(中文)","hint":"提示(可为空字符串)","hintWords":[{"surface":"提示词原文","yomi":"...","meaning":"..."}]}`;
+按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"task":"题目内容(中文)"}`;
   const arr = await callAIArray(sys, user, items.length);
   if (arr.length !== items.length) throw new Error("批量出题数量(" + arr.length + ")与预期(" + items.length + ")不符");
-  return arr.map((q, i) => ({ type: items[i].type, task: q.task, hint: q.hint || "", hintWords: Array.isArray(q.hintWords) ? q.hintWords : [] }));
+  return arr.map((q, i) => ({ type: items[i].type, task: q.task }));
 }
 
 /* 批量版(纯翻译题):专门给"每日作业"里那些必须是翻译题的题位用,
@@ -438,12 +476,11 @@ async function genTranslationBatch(patterns) {
 ${list}
 
 每一题:给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型。各题之间内容不要相似雷同。
-hint只能用来提示生僻词汇的日语写法/读音,绝对不能透露目标句型本身应该变成的具体形式(活用形、时态、敬体简体、否定形等)——那正是这道题要考的东西,写出来就等于剧透了答案;没有需要提示的生词时hint留空字符串""。
 
-按顺序输出一个JSON数组,长度必须正好是 ${patterns.length},每个元素格式: {"task":"题目内容(中文)","hint":"提示(可为空字符串)"}`;
+按顺序输出一个JSON数组,长度必须正好是 ${patterns.length},每个元素格式: {"task":"题目内容(中文)"}`;
   const arr = await callAIArray(sys, user, patterns.length);
   if (arr.length !== patterns.length) throw new Error("批量出题数量(" + arr.length + ")与预期(" + patterns.length + ")不符");
-  return arr.map((q) => ({ type: "translation", task: q.task, hint: q.hint || "" }));
+  return arr.map((q) => ({ type: "translation", task: q.task }));
 }
 
 /* ================= 情景对话:多轮AI调用 ================= */
@@ -526,7 +563,7 @@ async function gradeAnswer(p, q, answer, hintedWords) {
   const user = `句型: ${p.pattern}(${p.conn} / ${p.meaning})
 【教材解释】${explainText(p)}
 【易混淆点】${contrastsText(p)}
-题目(${q.type === "translation" ? "翻译题" : "造句题"}): ${q.task} ${q.hint ? "提示:" + q.hint : ""}
+题目(${q.type === "translation" ? "翻译题" : "造句题"}): ${q.task}
 学生的答案: ${answer}
 ${hintedWords && hintedWords.length ? `学生在做题过程中主动点开查看过读音/释义的生词(说明这些词单纯是词汇量不够,不代表句型没掌握): ${hintedWords.join("、")}` : ""}
 
@@ -633,7 +670,7 @@ ${list}
 - 每题给一句自然的中文,翻译成日语时必须自然地"逼出"该条目对应的目标变形——句子设计要让这个变形成为唯一合理的选择,而不是简单给动词原形让学生套公式。例如:"请不要在这里抽烟"会逼出て形+ない形结构,"我被老师批评了"会逼出被动形,"妈妈让我打扫房间"会逼出使役形
 - 涉及语境辨别层(sub是"语境辨别")的条目,中文句子里要自然带出对应的时态/语气线索(比如"已经"对应すでに/完了,"如果"对应もし/假定),让学生必须依据语境线索选对形式,不能靠死记硬背哪个词固定对应哪个形式
 
-输出JSON: {"items":[{"qtype":"翻译","task":"中文句子","hint":"可为空字符串"}]}` : `知识点: ${topicName}
+输出JSON: {"items":[{"qtype":"翻译","task":"中文句子"}]}` : `知识点: ${topicName}
 学习者水平: ${stageBenchmark}
 
 请依次为下面这 ${items.length} 条条目各出一道练习题,顺序必须和列表一一对应,不要跳过、不要合并、不要调换顺序:
@@ -641,7 +678,7 @@ ${list}
 
 题型不用统一,请根据每条内容自行选最合适的形式(比如两个易混词的辨析题、需要搭配助词/固定搭配的填空题、要求学习者用这个条目写一句话的造句/翻译题),让整批题目有一定变化,不要全是同一种类型。
 
-输出JSON: {"items":[{"qtype":"辨析|搭配|造句|翻译","task":"题目内容(中文,交代清楚要写什么)","hint":"可为空字符串,提示用哪个词/怎么用"}]}`;
+输出JSON: {"items":[{"qtype":"辨析|搭配|造句|翻译","task":"题目内容(中文,交代清楚要写什么)"}]}`;
   const r = await callAI(sys, user, Math.min(6000, 500 * items.length + 800));
   if (!Array.isArray(r.items) || r.items.length !== items.length) throw new Error("confusion quiz count mismatch");
   return r.items.map((q, i) => ({ ...q, head: items[i].head, sub: items[i].sub }));
@@ -656,7 +693,7 @@ async function gradeConfusionAnswer(topicName, item, question, answer, stageBenc
   const head = `知识点: ${topicName}
 条目: ${item.head}(${item.sub})
 【用法说明】${item.note}
-题目(${question.qtype}): ${question.task}${question.hint ? " 提示:" + question.hint : ""}
+题目(${question.qtype}): ${question.task}
 学生的答案: ${answer}
 学习者水平: ${stageBenchmark}
 `;
@@ -853,6 +890,38 @@ function WordHintText({ text, words, onHintWord, className, sep }) {
   );
 }
 
+/* ================= 中文题面逐词点查组件 =================
+   和上面 WordHintText 反过来:底层文字是中文题面,点开某个词直接显示它对应的日语说法
+   (只有开/关两个状态,不需要"读音→释义"两段式)。整句题面里的每个词都能点——
+   不再由AI提前挑1~2个"该提示的词",该点哪个由学习者自己判断,覆盖不到的生词也不会漏。
+   words 为 null(还没加载好/加载失败)时原样显示纯文本;jp 是空字符串的词
+   (和目标语法点直接对应、AI故意不给说法的那部分)渲染成普通文字,不带下划线、不可点。 */
+function ChineseTaskText({ text, words, onReveal, className }) {
+  const [shown, setShown] = useState({});
+  if (!words || !words.length) return <span className={className}>{text}</span>;
+  return (
+    <span className={className}>
+      {words.map((w, i) => {
+        if (!w.jp) return <span key={i}>{w.surface}</span>;
+        const isOpen = !!shown[i];
+        return (
+          <ruby
+            key={i}
+            className={"cw-word" + (isOpen ? " cw-open" : "")}
+            onClick={() => {
+              setShown((s) => ({ ...s, [i]: !s[i] }));
+              onReveal && onReveal(w.jp);
+            }}
+          >
+            {w.surface}
+            {isOpen && <rt>{w.jp}</rt>}
+          </ruby>
+        );
+      })}
+    </span>
+  );
+}
+
 /* 答错(wrong/partial)时的结构化语法讲解:句型骨架/动词变形推导/助词选择理由/修饰关系,
    由 gradeAnswer/gradeCombo 在判卷同一次调用里一起生成,breakdown 为 null 时(比如判对了)不渲染。 */
 function BreakdownBlock({ breakdown }) {
@@ -986,21 +1055,26 @@ function AppInner() {
     return () => { cancelled = true; };
   }, [phase, idx, queue]);
 
-  /* 出题时如果AI漏给了hintWords(批量出题时偶尔会漏),这里兜底现调一次补上,
-     同样走 localStorage 缓存,不会每次都调 AI。只对造句题生效——翻译题的hint是
-     AI自由发挥写的中文说明文字,不是词汇列表,不该被当日语句子去切词。 */
-  const [hintWordsFallback, setHintWordsFallback] = useState(null);
+  /* 翻译/造句/複合作文题的中文题面逐词查词:整句都能点开看日语说法,不再由AI提前挑
+     1~2个词判断"该提示哪个"。听力题没有中文题面、"自由造句"那条硬编码的日语提示句
+     (q.jpTask)本来就不是中文,都跳过。优先走本地缓存,拿不到就静默放弃,不能因为
+     这个锦上添花的功能挂了卡住正常做题流程。 */
+  const [taskWords, setTaskWords] = useState(null);
   useEffect(() => {
-    setHintWordsFallback(null);
-    if (!q || q.type !== "composition" || !q.hint || (q.hintWords && q.hintWords.length)) return;
-    const cached = getCachedWords(q.hint);
-    if (cached) { setHintWordsFallback(cached); return; }
+    setTaskWords(null);
+    if (!q || q.type === "listening" || q.jpTask || !q.task) return;
+    const cached = getCachedTaskWords(q.task);
+    if (cached) { setTaskWords(cached); return; }
     let cancelled = false;
-    annotateWords(q.hint)
-      .then((words) => { if (!cancelled) { setCachedWords(q.hint, words); setHintWordsFallback(words); } })
+    const item = queue[idx];
+    const targetDesc = item && item.p ? `${item.p.pattern}(${item.p.conn} / ${item.p.meaning})`
+      : item && item.p1 ? `${item.p1.pattern}(${item.p1.meaning}) + ${item.p2.pattern}(${item.p2.meaning})`
+      : "";
+    annotateChineseTask(q.task, targetDesc)
+      .then((words) => { if (!cancelled) { setCachedTaskWords(q.task, words); setTaskWords(words); } })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [q]);
+  }, [q, queue, idx]);
   const [freeMode, setFreeMode] = useState(false);
   const [homeworkMode, setHomeworkMode] = useState(false);
   const [weeklyMode, setWeeklyMode] = useState(false);
@@ -1037,7 +1111,25 @@ function AppInner() {
   const [cfResult, setCfResult] = useState(null);
   const [cfQuizStats, setCfQuizStats] = useState({ ok: 0, partial: 0, wrong: 0 });
   const [cfErrMsg, setCfErrMsg] = useState("");
+  const [cfTaskWords, setCfTaskWords] = useState(null); // 当前這题中文题面逐词点查的结果
   const cfQuizRecentRef = useRef({}); // topicId -> 最近一批用过的 head[],只用来"轻度避开",不持久化
+
+  /* 練習帳知识辨析quiz的中文题面逐词点查,和主线复习那份是同一套机制/同一个缓存。 */
+  useEffect(() => {
+    setCfTaskWords(null);
+    if (!cfQuiz) return;
+    const question = cfQuiz.questions[cfQuizIdx];
+    if (!question || !question.task) return;
+    const cached = getCachedTaskWords(question.task);
+    if (cached) { setCfTaskWords(cached); return; }
+    let cancelled = false;
+    const item = cfQuiz.items[cfQuizIdx];
+    const targetDesc = `${item.head}(${item.sub}): ${item.note}`;
+    annotateChineseTask(question.task, targetDesc)
+      .then((words) => { if (!cancelled) { setCachedTaskWords(question.task, words); setCfTaskWords(words); } })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [cfQuiz, cfQuizIdx]);
 
   const [cfScene, setCfScene] = useState(null);
   const [cfDialogueHistory, setCfDialogueHistory] = useState([]);
@@ -1379,7 +1471,7 @@ function AppInner() {
       const tier = listenTier(db.listenStats.ok);
       const s = await genListeningSentence(p, avoid, tier);
       recentTasks.current[key] = [...avoid, s.jp].slice(-4);
-      setQ({ type: "listening", jp: s.jp, yomi: s.yomi || s.jp, cnRef: s.cn, task: "", hint: "", label: `聴解(聴き取り・${tier.name}) · 只听声音,写出你听到的日语(仮名でもOK)` });
+      setQ({ type: "listening", jp: s.jp, yomi: s.yomi || s.jp, cnRef: s.cn, task: "", label: `聴解(聴き取り・${tier.name}) · 只听声音,写出你听到的日语(仮名でもOK)` });
       setPhase("question");
     } catch (e) {
       setErrMsg("出题失败:" + (e && e.message ? e.message : String(e))); setPhase("error");
@@ -1477,7 +1569,7 @@ function AppInner() {
     } else if (item.sub === "combo") {
       loadComboQuestion(item.p1, item.p2);
     } else if (item.hw === "comp") {
-      setQ({ type: "composition", task: `この文型「${item.p.pattern}」を使って、自由に文を作ってください。`, hint: "", label: "作文 · 请用该句型自由造句(无场景限定)" });
+      setQ({ type: "composition", task: `この文型「${item.p.pattern}」を使って、自由に文を作ってください。`, jpTask: true, label: "作文 · 请用该句型自由造句(无场景限定)" });
       setPhase("question");
     } else {
       const cached = qIdx != null ? preGenRef.current[qIdx] : null;
@@ -1839,7 +1931,7 @@ function AppInner() {
         addConfusionMistake({
           cfType: "quiz",
           label: cfQuiz.topic.name + " · " + item.head,
-          task: question.task + (question.hint ? "(提示: " + question.hint + ")" : ""),
+          task: question.task,
           ans: cfAnswer.trim(),
           ref: g.reference,
           exp: g.explanation,
@@ -2346,11 +2438,8 @@ function AppInner() {
                   <button className="btn-listen ghost" onClick={() => speakJa(q.yomi || q.jp, 0.65, db.settings.voiceURI)}>🐢 慢速</button>
                 </div>
               ) : (
-                <div className="q-task serif">{q.task}</div>
-              )}
-              {q.hint && (
-                <div className="q-hint">
-                  ヒント: <WordHintText text={q.hint} words={(q.hintWords && q.hintWords.length ? q.hintWords : hintWordsFallback)} onHintWord={markHinted} sep="、" />
+                <div className="q-task serif">
+                  <ChineseTaskText text={q.task} words={taskWords} onReveal={markHinted} />
                 </div>
               )}
 
@@ -2606,8 +2695,9 @@ function AppInner() {
           {(cfQuizPhase === "question" || cfQuizPhase === "grading" || cfQuizPhase === "result") && cfQuiz && (
             <section className="card">
               <div className="q-type">{cfQuiz.questions[cfQuizIdx].qtype} · {cfQuiz.items[cfQuizIdx].head}</div>
-              <div className="q-task serif">{cfQuiz.questions[cfQuizIdx].task}</div>
-              {cfQuiz.questions[cfQuizIdx].hint && <div className="q-hint">ヒント: {cfQuiz.questions[cfQuizIdx].hint}</div>}
+              <div className="q-task serif">
+                <ChineseTaskText text={cfQuiz.questions[cfQuizIdx].task} words={cfTaskWords} />
+              </div>
 
               {cfQuizPhase === "grading" && <div className="loading-text cf-grading">先生が採点しています…</div>}
 
@@ -3003,11 +3093,13 @@ function Style() {
 .listen-box{display:flex;gap:10px;margin-bottom:8px;padding:14px 0}
 .btn-listen{padding:14px 20px;background:var(--ai);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:600;cursor:pointer}
 .btn-listen.ghost{background:none;border:1.5px solid var(--ai);color:var(--ai)}
-.q-hint{font-size:13px;color:var(--ink-soft);margin-bottom:8px}
 .wh-word{cursor:pointer;border-bottom:1.5px dotted var(--ai);ruby-align:center}
 .wh-word.wh-hinted{border-bottom-style:solid;color:var(--ai-deep)}
 .wh-word rt{font-size:10px;color:var(--ai);user-select:none}
 .wh-meaning{font-size:12px;color:var(--ink-soft)}
+.cw-word{cursor:pointer;border-bottom:2px solid var(--ai);ruby-align:center}
+.cw-word.cw-open{color:var(--ai-deep);border-bottom-color:var(--ai-deep)}
+.cw-word rt{font-size:11px;color:var(--ai-deep);user-select:none}
 .name-ruby{ruby-align:center}
 .name-ruby rt{font-size:10px;color:var(--ink-soft);user-select:none}
 .wh-tip-note{font-size:11px;color:var(--ink-soft);margin:-6px 0 10px}

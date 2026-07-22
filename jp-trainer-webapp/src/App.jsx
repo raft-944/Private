@@ -232,7 +232,8 @@ async function callAI(system, user, maxTokens = 3000) {
 
 /* 批量版:一次调用要多道题,maxTokens按题数放大一些,避免写到一半被截断 */
 async function callAIArray(system, user, itemCount) {
-  const text = await callAIRaw(system, user, Math.min(6000, 700 * Math.max(itemCount, 1) + 500));
+  // 每条题目现在还要顺带出 taskWords(逐词切分+日语说法),比之前占的篇幅更大,预算相应调高
+  const text = await callAIRaw(system, user, Math.min(8000, 900 * Math.max(itemCount, 1) + 700));
   const jsonStr = extractFirstJsonArray(text);
   if (!jsonStr) throw new Error("返回内容不含完整JSON数组:" + text.slice(0, 80));
   const parsed = JSON.parse(jsonStr);
@@ -262,8 +263,9 @@ async function genComboQuestion(p1, p2, avoid) {
 句型B: ${p2.pattern}(${p2.conn} / ${p2.meaning})
 请给出一个中文情境提示(30字以内),说明想表达的内容,让学习者据此写出同时包含这两个句型的日语句子或简短对话。
 ${avoid && avoid.length ? "避免与这些情境雷同: " + avoid.join(" / ") : ""}${personInstruction([p1, p2])}
-输出JSON格式: {"task":"情境提示(中文)"}`;
-  const q = await callAI(sys, user);
+${TASK_WORDS_RULE}
+输出JSON格式: {"task":"情境提示(中文)",${TASK_WORDS_FIELD}}`;
+  const q = await callAI(sys, user, 3500);
   if (!q.task) throw new Error("bad question");
   return { ...q, type: "combo", label: "複合作文 · 请在一句话/一段小对话里同时用上下面两个句型" };
 }
@@ -318,6 +320,14 @@ function setCachedTaskWords(text, words) {
     localStorage.setItem(TASK_WORD_CACHE_KEY, JSON.stringify(store));
   } catch { /* 缓存失败不影响功能,忽略即可 */ }
 }
+
+/* 出题的同时顺便让AI把题面逐词切好、配上日语说法一起返回,而不是"先出题、题面显示出来了
+   再单独调一次annotateChineseTask去切词"——两次调用之间还隔着全局限流(MIN_CALL_GAP_MS
+   3.5秒)加上各自的生成耗时,叠加起来经常要等七八秒甚至十秒用户才能看到题面上的查词下划线。
+   合并成一次调用后,题面一出现下划线基本就跟着到位了。AI这次漏给taskWords时(数组不存在
+   或为空)前端会退回单独调用 annotateChineseTask 兜底,不影响正常做题,只是慢一点。 */
+const TASK_WORDS_FIELD = `"taskWords":[{"surface":"中文题面切分片段原文","jp":"对应的日语说法,和目标句型直接对应的部分留空字符串"}]`;
+const TASK_WORDS_RULE = `同时把 task 按适合点查的自然单位切分好(不用切太细),给每个片段配上日语说法放进 taskWords,方便学习者点开生词看日语怎么说:切分片段按顺序拼接起来必须和 task 原文一字不差,不能有遗漏、增补或改动;和目标句型直接对应的那部分中文(比如表达"必须/了/能不能/被"这类正好对应目标句型具体形式的成分),对应的日语说法留空字符串"",绝对不能写出来——那正是这道题要考的东西,写出来就是剧透答案;其余普通词汇(名词、动词、形容词等)正常给出常见的日语说法(基本形/词典形即可,不用管敬体简体活用变化)。`;
 
 /* 题面(中文)逐词切词+配日语说法,取代原来"AI主观挑1~2个词给提示"的旧机制——
    那套机制经常挑得不准(提示学习者早就会的词,真正生词反而没提示),现在整句题干每个词
@@ -444,8 +454,9 @@ async function genQuestion(p, avoid, forceType) {
 3. 场景里包含的信息必须刚好等于、也只等于目标句型所需要表达的内容——不多给、也不少给`}
 话题方向: ${topic}
 ${avoid && avoid.length ? "避免与这些题目雷同: " + avoid.join(" / ") : ""}${personInstruction(p)}
-输出JSON格式: {"type":"${type}","task":"题目内容(中文)"}`;
-  const q = await callAI(sys, user);
+${TASK_WORDS_RULE}
+输出JSON格式: {"type":"${type}","task":"题目内容(中文)",${TASK_WORDS_FIELD}}`;
+  const q = await callAI(sys, user, 3500);
   if (!q.task) throw new Error("bad question");
   return q;
 }
@@ -464,11 +475,12 @@ ${list}
 - "翻译题":给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型
 - "造句题":场景(中文,25字以内)只能表达一个清晰、单一的意思,不能同时塞入两件不相关的信息,不多给也不少给信息
 - 各题之间内容不要相似雷同
+- ${TASK_WORDS_RULE}
 
-按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"task":"题目内容(中文)"}`;
+按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"task":"题目内容(中文)",${TASK_WORDS_FIELD}}`;
   const arr = await callAIArray(sys, user, items.length);
   if (arr.length !== items.length) throw new Error("批量出题数量(" + arr.length + ")与预期(" + items.length + ")不符");
-  return arr.map((q, i) => ({ type: items[i].type, task: q.task }));
+  return arr.map((q, i) => ({ type: items[i].type, task: q.task, taskWords: Array.isArray(q.taskWords) ? q.taskWords : null }));
 }
 
 /* 批量版(纯翻译题):专门给"每日作业"里那些必须是翻译题的题位用,
@@ -481,11 +493,12 @@ async function genTranslationBatch(patterns) {
 ${list}
 
 每一题:给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型。各题之间内容不要相似雷同。
+${TASK_WORDS_RULE}
 
-按顺序输出一个JSON数组,长度必须正好是 ${patterns.length},每个元素格式: {"task":"题目内容(中文)"}`;
+按顺序输出一个JSON数组,长度必须正好是 ${patterns.length},每个元素格式: {"task":"题目内容(中文)",${TASK_WORDS_FIELD}}`;
   const arr = await callAIArray(sys, user, patterns.length);
   if (arr.length !== patterns.length) throw new Error("批量出题数量(" + arr.length + ")与预期(" + patterns.length + ")不符");
-  return arr.map((q) => ({ type: "translation", task: q.task }));
+  return arr.map((q) => ({ type: "translation", task: q.task, taskWords: Array.isArray(q.taskWords) ? q.taskWords : null }));
 }
 
 /* ================= 情景对话:多轮AI调用 ================= */
@@ -674,8 +687,9 @@ ${list}
 出题要求:
 - 每题给一句自然的中文,翻译成日语时必须自然地"逼出"该条目对应的目标变形——句子设计要让这个变形成为唯一合理的选择,而不是简单给动词原形让学生套公式。例如:"请不要在这里抽烟"会逼出て形+ない形结构,"我被老师批评了"会逼出被动形,"妈妈让我打扫房间"会逼出使役形
 - 涉及语境辨别层(sub是"语境辨别")的条目,中文句子里要自然带出对应的时态/语气线索(比如"已经"对应すでに/完了,"如果"对应もし/假定),让学生必须依据语境线索选对形式,不能靠死记硬背哪个词固定对应哪个形式
+- ${TASK_WORDS_RULE.replaceAll("目标句型", "该条目对应的目标变形")}
 
-输出JSON: {"items":[{"qtype":"翻译","task":"中文句子"}]}` : `知识点: ${topicName}
+输出JSON: {"items":[{"qtype":"翻译","task":"中文句子",${TASK_WORDS_FIELD}}]}` : `知识点: ${topicName}
 学习者水平: ${stageBenchmark}
 
 请依次为下面这 ${items.length} 条条目各出一道练习题,顺序必须和列表一一对应,不要跳过、不要合并、不要调换顺序:
@@ -687,11 +701,12 @@ ${list}
 - 辨析题不要拆多个空,改成"请用「残る」和「残す」各写一句完整的例句,体现两者的区别"这种一次性写完、答案本身就能体现对比的问法
 - 搭配题直接问"...应该用哪个助词/形式,写出完整的句子"
 - 造句/翻译题本来就是完整句子,不受影响
+- ${TASK_WORDS_RULE.replaceAll("目标句型", "该条目")}
 
-输出JSON: {"items":[{"qtype":"辨析|搭配|造句|翻译","task":"题目内容(中文,交代清楚要写什么,必须能在一个文本框里一次性写完整答案)"}]}`;
-  const r = await callAI(sys, user, Math.min(6000, 500 * items.length + 800));
+输出JSON: {"items":[{"qtype":"辨析|搭配|造句|翻译","task":"题目内容(中文,交代清楚要写什么,必须能在一个文本框里一次性写完整答案)",${TASK_WORDS_FIELD}}]}`;
+  const r = await callAI(sys, user, Math.min(8000, 700 * items.length + 800));
   if (!Array.isArray(r.items) || r.items.length !== items.length) throw new Error("confusion quiz count mismatch");
-  return r.items.map((q, i) => ({ ...q, head: items[i].head, sub: items[i].sub }));
+  return r.items.map((q, i) => ({ ...q, head: items[i].head, sub: items[i].sub, taskWords: Array.isArray(q.taskWords) ? q.taskWords : null }));
 }
 
 /* 判卷:知识辨析类题目经常不止一个语法上说得通的答案,要求AI说明为什么优选某个答案,
@@ -1084,12 +1099,14 @@ function AppInner() {
 
   /* 翻译/造句/複合作文题的中文题面逐词查词:整句都能点开看日语说法,不再由AI提前挑
      1~2个词判断"该提示哪个"。听力题没有中文题面、"自由造句"那条硬编码的日语提示句
-     (q.jpTask)本来就不是中文,都跳过。优先走本地缓存,拿不到就静默放弃,不能因为
-     这个锦上添花的功能挂了卡住正常做题流程。 */
+     (q.jpTask)本来就不是中文,都跳过。出题时AI已经顺带把taskWords一起生成好了,
+     这里优先直接用;只有AI这次漏给(数组为空/不存在)才退回单独调一次AI兜底,
+     兜底不了就静默放弃,不能因为这个锦上添花的功能挂了卡住正常做题流程。 */
   const [taskWords, setTaskWords] = useState(null);
   useEffect(() => {
     setTaskWords(null);
     if (!q || q.type === "listening" || q.jpTask || !q.task) return;
+    if (Array.isArray(q.taskWords) && q.taskWords.length) { setTaskWords(q.taskWords); setCachedTaskWords(q.task, q.taskWords); return; }
     const cached = getCachedTaskWords(q.task);
     if (cached) { setTaskWords(cached); return; }
     let cancelled = false;
@@ -1142,12 +1159,18 @@ function AppInner() {
   const [cfTaskWords, setCfTaskWords] = useState(null); // 当前這题中文题面逐词点查的结果
   const cfQuizRecentRef = useRef({}); // topicId -> 最近一批用过的 head[],只用来"轻度避开",不持久化
 
-  /* 練習帳知识辨析quiz的中文题面逐词点查,和主线复习那份是同一套机制/同一个缓存。 */
+  /* 練習帳知识辨析quiz的中文题面逐词点查,和主线复习那份是同一套机制/同一个缓存。
+     出题时AI已经顺带生成好taskWords了,优先直接用;漏给了才退回单独调一次AI兜底。 */
   useEffect(() => {
     setCfTaskWords(null);
     if (!cfQuiz) return;
     const question = cfQuiz.questions[cfQuizIdx];
     if (!question || !question.task) return;
+    if (Array.isArray(question.taskWords) && question.taskWords.length) {
+      setCfTaskWords(question.taskWords);
+      setCachedTaskWords(question.task, question.taskWords);
+      return;
+    }
     const cached = getCachedTaskWords(question.task);
     if (cached) { setCfTaskWords(cached); return; }
     let cancelled = false;

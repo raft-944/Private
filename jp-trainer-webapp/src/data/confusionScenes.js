@@ -4,6 +4,10 @@
  * 这里的场景不挂钩任何句型,纯粹练口语/场景反应,复盘时 candidatePatterns 恒传空数组,
  * 不产生 flaggedIssues,不写错题本,不影响任何排期/统计。
  * category: "life"(生活场景) | "work"(职场与办事场景),用于练习册里分组展示。
+ * register: 可选,"casual" 表示这场对话双方关系亲近(朋友/熟悉的平级同事),
+ * 应该用简体(タメ口)而不是です・ます敬体——AI开场白/续对话/复盘时都会按这个来。
+ * 不写这个字段的场景一律按原来的行为走(默认自然语域,通常偏敬体),
+ * 后续新增场景时按人物关系自行判断要不要加这个字段。
  */
 export const CONFUSION_SCENES = [
   // ---------------- 生活场景 ----------------
@@ -87,6 +91,7 @@ export const CONFUSION_SCENES = [
     aiRole: "朋友",
     initiator: "ai",
     goal: "礼貌婉拒并提出别的时间",
+    register: "casual",
   },
   {
     id: "cf_complaint_return",
@@ -116,6 +121,7 @@ export const CONFUSION_SCENES = [
     aiRole: "同事",
     initiator: "ai",
     goal: "完成一段自然的职场闲聊",
+    register: "casual",
   },
   {
     id: "cf_report_to_boss",

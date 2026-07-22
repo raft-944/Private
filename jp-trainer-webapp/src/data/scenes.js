@@ -3,6 +3,11 @@
  * 运行时靠 resolveScenePatterns() 精确匹配出对应的 PATTERNS 条目(带真实 id),
  * 复盘判卷时只从这份"解析成功的候选列表"里挑句型,不做任何模糊文本匹配——
  * 这样错题本落库时才能稳定拿到一个真实存在的 pid,不会挂空。
+ *
+ * register: 可选,"casual" 表示这场对话双方关系亲近(朋友/熟悉的平级同事),
+ * 应该用简体(タメ口)而不是です・ます敬体——AI开场白/续对话/复盘时都会按这个来。
+ * 不写这个字段的场景一律按原来的行为走(默认自然语域,通常偏敬体),
+ * 后续新增场景时按人物关系自行判断要不要加这个字段。
  */
 import { PATTERNS } from "../patternsData.js";
 
@@ -69,6 +74,7 @@ export const SCENES = [
     initiator: "ai",
     targetPatterns: ["い形／な形容詞です", "あまり〜ません"],
     goal: "完成一段自然的寒暄闲聊",
+    register: "casual",
   },
   {
     id: "reschedule_apology",
@@ -78,6 +84,7 @@ export const SCENES = [
     initiator: "user",
     targetPatterns: ["〜て、すみません", "〜たらどうですか"],
     goal: "道歉说明情况并商定新的时间",
+    register: "casual",
   },
   {
     id: "borrow_something",

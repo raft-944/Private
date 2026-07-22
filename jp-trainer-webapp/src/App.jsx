@@ -69,6 +69,11 @@ const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2
 
 const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, session: null, studyTime: {} };
 
+/* 错题要连续答对这么多次才从错题本移除,而不是蒙对一次就当作掌握了——每条错题的
+   streak 字段记录"目前连续答对了几次",答错/被判需要复核会清零,只有连续攒够这个
+   数才真正移除。所有错题清除逻辑(SRS的重练、練習帳的重练)都共用这一个阈值。 */
+const MISTAKE_CLEAR_STREAK = 3;
+
 /* 安全地合并存档:旧版本存下来的数据可能缺少新版本才有的字段(比如后来才加的 voiceURI、listenStats),
    如果直接用 {...DEFAULT_DB, ...saved} 这种浅合并,saved.settings 会把整个 settings 对象替换掉、
    新加的子字段就没了。这里对几个嵌套对象逐层补齐,保证老存档导进来也不会缺字段。 */
@@ -1161,6 +1166,7 @@ function AppInner() {
   const [cfDialogueInput, setCfDialogueInput] = useState("");
   const [cfDialogueBusy, setCfDialogueBusy] = useState(false);
   const [cfDialogueErr, setCfDialogueErr] = useState("");
+  const [cfDialogueRetryId, setCfDialogueRetryId] = useState(null); // 从错题本发起重练时,记着在重练哪条
 
   const [cfEmailTopic, setCfEmailTopic] = useState(null);
   const [cfEmailScenario, setCfEmailScenario] = useState(null);
@@ -1168,6 +1174,7 @@ function AppInner() {
   const [cfEmailText, setCfEmailText] = useState("");
   const [cfEmailResult, setCfEmailResult] = useState(null);
   const [cfEmailErr, setCfEmailErr] = useState("");
+  const [cfEmailRetryId, setCfEmailRetryId] = useState(null); // 从错题本发起重练时,记着在重练哪条
   const cfEmailRecentRef = useRef({}); // topicId -> 上一次生成的情境摘要,避免下次雷同,不持久化
 
   useEffect(() => {
@@ -1728,7 +1735,7 @@ function AppInner() {
         const base = {
           pid: f.pid, type: "dialogue", sceneId: scene.id,
           task: "💬 情景对话 · " + scene.background,
-          ans: f.quote, ref: f.suggestion, exp: f.note, date: t, needsReview: false,
+          ans: f.quote, ref: f.suggestion, exp: f.note, date: t, needsReview: false, streak: 0,
         };
         // 同一个场景之前已经因为同一个句型被标记过,就刷新那条,不重复叠加
         const pos = nd.mistakes.findIndex((m) => m.type === "dialogue" && m.pid === f.pid && m.sceneId === scene.id);
@@ -1801,7 +1808,8 @@ function AppInner() {
         if (isListening) nd.listenStats.ok += 1;
       }
       if (g.verdict !== "correct" || needsReview) {
-        const base = { task: q.task, type: q.type, ans: answer.trim() || "(未作答)", ref: g.reference, exp: g.explanation, breakdown: g.breakdown || null, date: t, needsReview };
+        // 答错/需要复核:连续答对计数清零,刷新这条错题的最新内容
+        const base = { task: q.task, type: q.type, ans: answer.trim() || "(未作答)", ref: g.reference, exp: g.explanation, breakdown: g.breakdown || null, date: t, needsReview, streak: 0 };
         const idPart = isCombo ? { pid: item.p1.id, pid2: item.p2.id } : { pid: item.p.id };
         if (item.mistakeId) {
           // 重练了还是不对/仍需复核:刷新原来那条记录,而不是再叠加一条新的
@@ -1813,8 +1821,14 @@ function AppInner() {
         }
         nd.mistakes = nd.mistakes.slice(0, 100);
       } else if (item.mistakeId) {
-        // verdict correct 且 selfCheck 通过:这道题真正过关了,从错题本移除
-        nd.mistakes = nd.mistakes.filter((m) => m.id !== item.mistakeId);
+        // verdict correct 且 selfCheck 通过:累计连续答对次数,蒙对一次不算——
+        // 攒够 MISTAKE_CLEAR_STREAK 次才真正判定掌握、从错题本移除
+        const pos = nd.mistakes.findIndex((m) => m.id === item.mistakeId);
+        if (pos !== -1) {
+          const streak = (nd.mistakes[pos].streak || 0) + 1;
+          if (streak >= MISTAKE_CLEAR_STREAK) nd.mistakes = nd.mistakes.filter((m) => m.id !== item.mistakeId);
+          else nd.mistakes[pos] = { ...nd.mistakes[pos], streak };
+        }
       }
       // 注意:复合题(combo)的 item 只有 p1/p2、没有 p。目前所有 combo 路径都是 freeMode(不影响排期),
       // 所以走不到这里;但加一道 item.p 的保险,免得将来改动时漏设 freeMode 直接崩掉。
@@ -1886,8 +1900,44 @@ function AppInner() {
      没有 pid(不挂钩具体句型),錯題本视图靠 m.label 兜底展示,靠 m.source==="confusion" 识别。 */
   const addConfusionMistake = (entry) => {
     setDb((d) => {
-      const nd = { ...d, mistakes: [{ ...entry, source: "confusion", date: t, needsReview: false, id: newId() }, ...d.mistakes] };
+      const nd = { ...d, mistakes: [{ ...entry, source: "confusion", date: t, needsReview: false, streak: 0, id: newId() }, ...d.mistakes] };
       nd.mistakes = nd.mistakes.slice(0, 100);
+      return nd;
+    });
+  };
+
+  /* 練習帳错题的"重练":按 cfType 分派到对应的重新练习入口,能不能清除这条错题
+     全看重练那次表现好不好(quiz是当次判定,对话/邮件是当次有没有再被挑出语法问题),
+     和主线错题一样,连续攒够 MISTAKE_CLEAR_STREAK 次才真正移除,单次蒙对不算。 */
+  const retryConfusionMistake = (m) => {
+    setView("confusion"); // 错题本发起重练时 view 还是"mistakes",需要先切过去练習帳的視圖
+    if (m.cfType === "quiz") {
+      const item = { id: newId(), head: m.itemHead, sub: m.itemSub, note: m.itemNote, examples: m.itemExamples || [], weak: 0 };
+      const topic = { id: m.topicId, name: m.topicName, kind: m.topicKind };
+      startConfusionQuizRetry(topic, item, m.id);
+    } else if (m.cfType === "dialogue") {
+      const scene = CONFUSION_SCENES.find((s) => s.id === m.sceneId);
+      if (scene) startConfusionDialogue(scene, m.id);
+    } else if (m.cfType === "email") {
+      const topic = CONFUSION_EMAIL_TOPICS.find((tp) => tp.id === m.emailTopicId);
+      if (topic) startConfusionEmail(topic, m.id);
+    }
+  };
+
+  /* 命中/没命中"连续答对 MISTAKE_CLEAR_STREAK 次"这条线之后,统一在这里更新那条错题记录——
+     所有三种練習帳重练入口(quiz/dialogue/email)共用同一份逻辑。 */
+  const bumpConfusionMistakeStreak = (mistakeId, resolved, refreshEntry) => {
+    setDb((d) => {
+      const pos = d.mistakes.findIndex((m) => m.id === mistakeId);
+      if (pos === -1) return d;
+      const nd = { ...d, mistakes: [...d.mistakes] };
+      if (!resolved) {
+        nd.mistakes[pos] = { ...nd.mistakes[pos], ...(refreshEntry || {}), streak: 0 };
+        return nd;
+      }
+      const streak = (nd.mistakes[pos].streak || 0) + 1;
+      if (streak >= MISTAKE_CLEAR_STREAK) nd.mistakes = nd.mistakes.filter((m) => m.id !== mistakeId);
+      else nd.mistakes[pos] = { ...nd.mistakes[pos], streak };
       return nd;
     });
   };
@@ -1989,6 +2039,28 @@ function AppInner() {
     }
   };
 
+  /* 从错题本发起的"重练":只出这一条条目的题,cfQuiz.retryMistakeId 标记着这是在
+     重练哪条错题,submitConfusionAnswer/giveUpConfusionAnswer 看到这个字段就走
+     "连续答对计次"那条分支,而不是"答错就再记一条新错题"的正常练习分支。 */
+  const startConfusionQuizRetry = async (topic, item, mistakeId) => {
+    setConfusionSub("quiz");
+    setCfQuizPhase("loading");
+    setCfErrMsg("");
+    setCfQuizStats({ ok: 0, partial: 0, wrong: 0 });
+    setCfQuizIdx(0);
+    setCfAnswer("");
+    setCfResult(null);
+    try {
+      const stage = confusionStageBenchmark(db);
+      const questions = await genConfusionQuiz(topic.name, [item], stage, topic.kind);
+      setCfQuiz({ topic, items: [item], questions, retryMistakeId: mistakeId });
+      setCfQuizPhase("question");
+    } catch (e) {
+      setCfErrMsg("出题失败:" + (e && e.message ? e.message : String(e)));
+      setCfQuizPhase("error");
+    }
+  };
+
   const submitConfusionAnswer = async () => {
     if (!cfAnswer.trim() || !cfQuiz) return;
     setCfQuizPhase("grading");
@@ -2000,7 +2072,11 @@ function AppInner() {
       setCfResult(g);
       setCfQuizStats((s) => ({ ...s, [g.verdict === "correct" ? "ok" : g.verdict]: s[g.verdict === "correct" ? "ok" : g.verdict] + 1 }));
       applyConfusionItemWeak(cfQuiz.topic.id, item.id, g.verdict);
-      if (g.verdict !== "correct") {
+      if (cfQuiz.retryMistakeId) {
+        bumpConfusionMistakeStreak(cfQuiz.retryMistakeId, g.verdict === "correct", {
+          task: question.task, ans: cfAnswer.trim(), ref: g.reference, exp: g.explanation,
+        });
+      } else if (g.verdict !== "correct") {
         addConfusionMistake({
           cfType: "quiz",
           label: cfQuiz.topic.name + " · " + item.head,
@@ -2008,6 +2084,13 @@ function AppInner() {
           ans: cfAnswer.trim(),
           ref: g.reference,
           exp: g.explanation,
+          topicId: cfQuiz.topic.id,
+          topicName: cfQuiz.topic.name,
+          topicKind: cfQuiz.topic.kind,
+          itemHead: item.head,
+          itemSub: item.sub,
+          itemNote: item.note,
+          itemExamples: item.examples,
         });
       }
       setCfQuizPhase("result");
@@ -2029,6 +2112,9 @@ function AppInner() {
       setCfResult(r);
       setCfQuizStats((s) => ({ ...s, wrong: s.wrong + 1 }));
       applyConfusionItemWeak(cfQuiz.topic.id, item.id, "wrong");
+      if (cfQuiz.retryMistakeId) {
+        bumpConfusionMistakeStreak(cfQuiz.retryMistakeId, false, { ref: g.reference, exp: g.explanation });
+      }
       setCfQuizPhase("result");
     } catch (e) {
       setCfErrMsg("获取答案失败:" + (e && e.message ? e.message : String(e)));
@@ -2048,12 +2134,16 @@ function AppInner() {
   };
 
   const retryConfusionQuiz = () => {
-    if (cfQuiz) startConfusionQuiz(cfQuiz.topic);
+    if (!cfQuiz) return;
+    if (cfQuiz.retryMistakeId) startConfusionQuizRetry(cfQuiz.topic, cfQuiz.items[0], cfQuiz.retryMistakeId);
+    else startConfusionQuiz(cfQuiz.topic);
   };
 
   const exitConfusionQuiz = () => {
+    const wasRetry = cfQuiz && cfQuiz.retryMistakeId;
     setCfQuiz(null);
-    setConfusionSub("topicDetail");
+    if (wasRetry) setView("mistakes");
+    else setConfusionSub("topicDetail");
   };
 
   /* ================= 練習帳:场景对话 =================
@@ -2061,13 +2151,14 @@ function AppInner() {
      但状态、复盘函数、错题写入方式都是独立的一套,互不影响。 */
   const CF_DIALOGUE_MAX_TURNS = 8;
 
-  const startConfusionDialogue = (scene) => {
+  const startConfusionDialogue = (scene, retryMistakeId) => {
     setCfScene(scene);
     setCfDialogueHistory([]);
     setCfDialogueReview(null);
     setCfDialogueInput("");
     setCfDialoguePhase("chatting");
     setCfDialogueErr("");
+    setCfDialogueRetryId(retryMistakeId || null);
     setConfusionSub("dialogue");
     if (scene.initiator === "ai") {
       setCfDialogueBusy(true);
@@ -2105,6 +2196,7 @@ function AppInner() {
 
   const finishConfusionDialogue = (finalHistory) => {
     const scene = cfScene;
+    const retryId = cfDialogueRetryId;
     setCfDialoguePhase("reviewing");
     const stage = confusionStageBenchmark(db);
     reviewConfusionDialogue(scene, finalHistory, stage)
@@ -2112,16 +2204,24 @@ function AppInner() {
         setCfDialogueReview(review);
         setCfDialoguePhase("reviewed");
         setCfDialogueBusy(false);
-        review.grammarMistakes.forEach((gm) => {
-          addConfusionMistake({
-            cfType: "dialogue",
-            label: "💬 " + scene.background,
-            task: "💬 场景对话 · " + scene.background,
-            ans: gm.quote,
-            ref: gm.suggestion,
-            exp: gm.issue,
+        if (retryId) {
+          // 重练:这次对话里还有没有被挑出语法问题,决定这条错题的连续答对计数往上走还是清零,
+          // 不额外新开错题记录
+          const gm = review.grammarMistakes[0];
+          bumpConfusionMistakeStreak(retryId, review.grammarMistakes.length === 0, gm ? { ans: gm.quote, ref: gm.suggestion, exp: gm.issue } : undefined);
+        } else {
+          review.grammarMistakes.forEach((gm) => {
+            addConfusionMistake({
+              cfType: "dialogue",
+              label: "💬 " + scene.background,
+              task: "💬 场景对话 · " + scene.background,
+              ans: gm.quote,
+              ref: gm.suggestion,
+              exp: gm.issue,
+              sceneId: scene.id,
+            });
           });
-        });
+        }
       })
       .catch((e) => {
         setCfDialogueBusy(false);
@@ -2130,18 +2230,22 @@ function AppInner() {
   };
 
   const exitConfusionDialogue = () => {
+    const wasRetry = !!cfDialogueRetryId;
     setCfScene(null);
-    setConfusionSub("list");
+    setCfDialogueRetryId(null);
+    if (wasRetry) setView("mistakes");
+    else setConfusionSub("list");
   };
 
   /* ================= 練習帳:书面邮件 ================= */
 
-  const startConfusionEmail = (topic) => {
+  const startConfusionEmail = (topic, retryMistakeId) => {
     setCfEmailTopic(topic);
     setCfEmailScenario(null);
     setCfEmailText("");
     setCfEmailResult(null);
     setCfEmailErr("");
+    setCfEmailRetryId(retryMistakeId || null);
     setCfEmailPhase("loading");
     setConfusionSub("email");
     const avoidLast = cfEmailRecentRef.current[topic.id] || "";
@@ -2165,16 +2269,23 @@ function AppInner() {
       const stage = confusionStageBenchmark(db);
       const g = await gradeConfusionEmail(cfEmailTopic.name, cfEmailScenario, cfEmailText.trim(), stage);
       setCfEmailResult(g);
-      g.grammarMistakes.forEach((gm) => {
-        addConfusionMistake({
-          cfType: "email",
-          label: "✉️ " + cfEmailTopic.name,
-          task: "✉️ 邮件写作 · " + cfEmailTopic.name,
-          ans: gm.quote,
-          ref: gm.suggestion,
-          exp: gm.issue,
+      if (cfEmailRetryId) {
+        // 重练:这次写的邮件还有没有被挑出语法问题,决定连续答对计数往上走还是清零,不额外新开错题记录
+        const gm = g.grammarMistakes[0];
+        bumpConfusionMistakeStreak(cfEmailRetryId, g.grammarMistakes.length === 0, gm ? { ans: gm.quote, ref: gm.suggestion, exp: gm.issue } : undefined);
+      } else {
+        g.grammarMistakes.forEach((gm) => {
+          addConfusionMistake({
+            cfType: "email",
+            label: "✉️ " + cfEmailTopic.name,
+            task: "✉️ 邮件写作 · " + cfEmailTopic.name,
+            ans: gm.quote,
+            ref: gm.suggestion,
+            exp: gm.issue,
+            emailTopicId: cfEmailTopic.id,
+          });
         });
-      });
+      }
       setCfEmailPhase("result");
     } catch (e) {
       setCfEmailErr("批改失败:" + (e && e.message ? e.message : String(e)));
@@ -2183,12 +2294,15 @@ function AppInner() {
   };
 
   const retryConfusionEmail = () => {
-    if (cfEmailTopic) startConfusionEmail(cfEmailTopic);
+    if (cfEmailTopic) startConfusionEmail(cfEmailTopic, cfEmailRetryId);
   };
 
   const exitConfusionEmail = () => {
+    const wasRetry = !!cfEmailRetryId;
     setCfEmailTopic(null);
-    setConfusionSub("list");
+    setCfEmailRetryId(null);
+    if (wasRetry) setView("mistakes");
+    else setConfusionSub("list");
   };
 
   /* ================= 渲染 ================= */
@@ -2997,17 +3111,24 @@ function AppInner() {
             </div>
           )}
           {db.mistakes.map((m, i) => {
-            // 練習帳(知识辨析/场景对话/书面邮件)来的错题不挂钩具体句型,没有 pid,
-            // 用 m.label 兜底展示,也不提供"重练"按钮(每次都是现场重新生成,没有可以精确重放的原题)。
+            // 練習帳(知识辨析/场景对话/书面邮件)来的错题不挂钩具体句型,没有 pid,用 m.label 兜底展示。
+            // 練習帳的"重练"需要当初存下来的上下文(topicId/sceneId/emailTopicId等)才能重新出题——
+            // 这次更新之前留下的老记录没存这些字段,判断一下缺不缺,缺了就不出"重练"按钮,只能手动移除。
             const isConfusion = m.source === "confusion";
             const p = isConfusion ? null : PATTERNS[m.pid];
             const p2 = !isConfusion && m.pid2 !== undefined ? PATTERNS[m.pid2] : null;
+            const canRetryConfusion = isConfusion && (
+              (m.cfType === "quiz" && m.topicId && m.itemHead) ||
+              (m.cfType === "dialogue" && m.sceneId) ||
+              (m.cfType === "email" && m.emailTopicId)
+            );
             return (
               <div key={m.id || i} className="card mistake-card">
                 <div className="mk-head">
                   <span className="mk-head-left">
                     <span className="serif">{isConfusion ? m.label : <>{p.pattern}{p2 && <> ＋ {p2.pattern}</>}</>}</span>
                     {m.needsReview && <span className="badge badge-review">⚠️ 建议复核</span>}
+                    {m.streak > 0 && <span className="badge badge-streak">连续答对 {m.streak}/{MISTAKE_CLEAR_STREAK}</span>}
                   </span>
                   <span className="mk-date">{m.date}</span>
                 </div>
@@ -3018,6 +3139,7 @@ function AppInner() {
                 <BreakdownBlock breakdown={m.breakdown} />
                 <div className="btn-row">
                   {!isConfusion && <button className="btn-mini" onClick={() => (p2 ? startComboFree(p, p2, m.id) : m.type === "listening" ? startListenFree(p, m.id) : startFree(p, m.id))}>{p2 ? "重练这组合" : m.type === "listening" ? "重新听一次" : "重练这个句型"}</button>}
+                  {canRetryConfusion && <button className="btn-mini" onClick={() => retryConfusionMistake(m)}>重练</button>}
                   {m.needsReview && <button className="btn-mini" onClick={() => setDb((d) => ({ ...d, mistakes: d.mistakes.filter((x, j) => (m.id ? x.id !== m.id : j !== i)) }))}>✓ 确认无误</button>}
                   <button className="btn-mini ghost" onClick={() => setDb((d) => ({ ...d, mistakes: d.mistakes.filter((x, j) => (m.id ? x.id !== m.id : j !== i)) }))}>移除</button>
                 </div>
@@ -3132,12 +3254,13 @@ function Style() {
 .hw-sub{font-size:12px;color:var(--ink-soft);margin-top:4px;line-height:1.6}
 /* 每日の宿题/週間チャレンジ 结构简单(标题+说明+一个按钮),挤成两栏能省不少竖向空间;
    聴解練習 多一行语音选择器,结构不一样,留在下面单独一整行,不塞进这个网格。 */
-.hw-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px}
-.hw-card-compact{margin-top:0;padding:14px}
+.hw-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px;align-items:stretch}
+.hw-card-compact{margin-top:0;padding:14px;display:flex;flex-direction:column}
 .hw-card-compact .hw-title{font-size:15px}
 .hw-card-compact .hw-sub{font-size:11px;margin-top:3px;
   display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
-.hw-card-compact .btn-outline{font-size:13px;padding:10px}
+.hw-card-compact .btn-outline{font-size:13px;padding:10px;margin-top:auto}
+.hw-card-compact .hw-empty{margin-top:auto}
 .hw-card-compact .hw-done{font-size:10px;padding:2px 6px}
 .hw-done{flex:0 0 auto;font-size:11px;color:var(--shu);background:var(--tint-red-bg);padding:3px 8px;border-radius:6px;white-space:nowrap}
 .ls-tier{color:var(--tint-green-fg);background:var(--tint-green-bg)}
@@ -3287,6 +3410,7 @@ function Style() {
 .mk-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:15px;font-weight:700;color:var(--ai-deep)}
 .mk-head-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .badge-review{background:var(--tint-red2-bg);color:var(--shu)}
+.badge-streak{background:var(--tint-green-bg);color:var(--tint-green-fg)}
 .mk-date{font-size:11px;color:var(--ink-soft);font-weight:400;white-space:nowrap}
 .mk-task{font-size:14px;margin:8px 0}
 .mk-line{margin:6px 0;font-size:14px}

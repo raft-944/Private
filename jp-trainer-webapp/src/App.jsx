@@ -676,9 +676,14 @@ ${list}
 请依次为下面这 ${items.length} 条条目各出一道练习题,顺序必须和列表一一对应,不要跳过、不要合并、不要调换顺序:
 ${list}
 
-题型不用统一,请根据每条内容自行选最合适的形式(比如两个易混词的辨析题、需要搭配助词/固定搭配的填空题、要求学习者用这个条目写一句话的造句/翻译题),让整批题目有一定变化,不要全是同一种类型。
+题型不用统一,请根据每条内容自行选最合适的形式(比如两个易混词的辨析题、需要搭配助词/固定搭配的题、要求学习者用这个条目写一句话的造句/翻译题),让整批题目有一定变化,不要全是同一种类型。
 
-输出JSON: {"items":[{"qtype":"辨析|搭配|造句|翻译","task":"题目内容(中文,交代清楚要写什么)"}]}`;
+重要——答题界面只有一个自由文本输入框,学生看到题目后直接在这一个框里写出完整答案,没有分栏/编号填空框,所以出题时绝对不能出现"①（　）②（　）"这种把一句话拆成多个空、要求分别填不同答案的完形填空格式,也不能写"请依次写出①②处的答案"这类需要分点作答的要求。正确的出法是把要考的点整合成一个能一次性、连贯写完的要求,比如:
+- 辨析题不要拆多个空,改成"请用「残る」和「残す」各写一句完整的例句,体现两者的区别"这种一次性写完、答案本身就能体现对比的问法
+- 搭配题直接问"...应该用哪个助词/形式,写出完整的句子"
+- 造句/翻译题本来就是完整句子,不受影响
+
+输出JSON: {"items":[{"qtype":"辨析|搭配|造句|翻译","task":"题目内容(中文,交代清楚要写什么,必须能在一个文本框里一次性写完整答案)"}]}`;
   const r = await callAI(sys, user, Math.min(6000, 500 * items.length + 800));
   if (!Array.isArray(r.items) || r.items.length !== items.length) throw new Error("confusion quiz count mismatch");
   return r.items.map((q, i) => ({ ...q, head: items[i].head, sub: items[i].sub }));
@@ -977,6 +982,27 @@ function AppInner() {
     window.speechSynthesis.onvoiceschanged = loadVoices; // 语音列表常常是异步加载的
     return () => { window.speechSynthesis.onvoiceschanged = null; };
   }, []);
+
+  /* 底部导航栏改用 position:fixed 后,靠 visualViewport 感知虚拟键盘弹出的高度,
+     动态把 --kb-inset 设成"被键盘挡住的那部分高度",导航栏的 bottom 用这个变量偏移——
+     iOS Safari 的 100dvh 不会因为键盘弹出而缩小,单纯用 dvh 算不出键盘挡了多少,
+     必须用 visualViewport 实测。没有 visualViewport 的浏览器(极少数)就保持 0,不做处理。 */
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const root = document.documentElement;
+    const update = () => {
+      const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      root.style.setProperty("--kb-inset", kb + "px");
+    };
+    update();
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    return () => {
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+    };
+  }, []);
   const [view, setView] = useState("home"); // home | session | library | mistakes
   const loaded = useRef(false);
 
@@ -1102,6 +1128,7 @@ function AppInner() {
   const [cfActiveTopic, setCfActiveTopic] = useState(null);
   const [cfTopicBusy, setCfTopicBusy] = useState(false);
   const [cfTopicErr, setCfTopicErr] = useState("");
+  const [cfOpenGroups, setCfOpenGroups] = useState({}); // sub -> bool,知识范围表按分组默认折叠
   const [cfOpenSection, setCfOpenSection] = useState(null); // null | "knowledge" | "dialogue" | "email",練習帳首页三大区手风琴式折叠
 
   const [cfQuiz, setCfQuiz] = useState(null); // {topic, items, questions}
@@ -1151,6 +1178,50 @@ function AppInner() {
     if (view === "confusion" && confusionTopics === null) loadConfusionTopics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
+
+  /* 屏幕左边缘右划返回:保存到桌面以PWA方式打开时没有浏览器的边缘返回手势,这里自己模拟一个。
+     goBackRef 每次渲染都刷新成"当前 view/confusionSub 对应的返回动作"(和可见的
+     返回/中断按钮做同一件事),但触摸监听器只挂载一次,靠 ref 避免每次状态变化都重新订阅。 */
+  const goBackRef = useRef(() => {});
+  useEffect(() => {
+    goBackRef.current = () => {
+      if (view === "confusion") {
+        if (confusionSub === "quiz") { exitConfusionQuiz(); return; }
+        if (confusionSub === "dialogue") { exitConfusionDialogue(); return; }
+        if (confusionSub === "email") { exitConfusionEmail(); return; }
+        if (confusionSub === "topicDetail") { setConfusionSub("list"); setCfActiveTopic(null); return; }
+        if (confusionSub === "list") { setView("home"); return; }
+        return;
+      }
+      if (view === "library" || view === "mistakes" || view === "session") { setView("home"); return; }
+    };
+  });
+
+  useEffect(() => {
+    const EDGE = 24; // 只认屏幕最左侧24px内开始的触摸,避免和正常滑动/点击冲突
+    const THRESHOLD = 70; // 至少要划这么远才算一次"返回"手势
+    let startX = null, startY = null, tracking = false;
+    const onStart = (e) => {
+      const t = e.touches[0];
+      if (!t || t.clientX > EDGE) { tracking = false; return; }
+      startX = t.clientX; startY = t.clientY; tracking = true;
+    };
+    const onEnd = (e) => {
+      if (!tracking || startX == null) { tracking = false; return; }
+      const t = e.changedTouches[0];
+      tracking = false;
+      if (!t) return;
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      if (dx > THRESHOLD && Math.abs(dy) < dx * 0.6) goBackRef.current();
+    };
+    document.addEventListener("touchstart", onStart, { passive: true });
+    document.addEventListener("touchend", onEnd, { passive: true });
+    return () => {
+      document.removeEventListener("touchstart", onStart);
+      document.removeEventListener("touchend", onEnd);
+    };
+  }, []);
 
   /* --- 读档 --- */
   useEffect(() => {
@@ -1268,7 +1339,12 @@ function AppInner() {
   const t = today();
   const learnedIds = Object.keys(db.prog).map(Number);
   const dueList = PATTERNS.filter((p) => db.prog[p.id] && db.prog[p.id].due <= t);
-  const unlearned = PATTERNS.filter((p) => !db.prog[p.id]);
+  // 新句型要按"句型库"里看到的课程顺序发,不能按 PATTERNS 数组本身的原始顺序——
+  // 补充句型(p.ext)大多是后来追加进数据文件的,在数组里排得靠后,如果直接按 PATTERNS
+  // 顺序发新句型,会导致"明明是第3课的补充句型,却要等第50+课都学完才轮到它",
+  // 表现出来就是句型库里某一课永远卡在"3/4已学"这种缺一个的状态。ORDERED 已经
+  // 按 lesson→id 重新排过,用它才会先发完第3课剩下那条,再发第4课。
+  const unlearned = ORDERED.filter((p) => !db.prog[p.id]);
   const newDoneToday = db.meta.date === t ? db.meta.newDone : 0;
   const newSlots = Math.max(0, db.settings.newPerDay - newDoneToday);
   const newList = unlearned.slice(0, newSlots);
@@ -1853,6 +1929,7 @@ function AppInner() {
     setCfActiveTopic(topic);
     setConfusionSub("topicDetail");
     setCfTopicErr("");
+    setCfOpenGroups({});
     if (!confusionItemsCache[topic.id]) loadConfusionItems(topic.id);
   };
 
@@ -2616,7 +2693,7 @@ function AppInner() {
 
       {view === "confusion" && confusionSub === "topicDetail" && cfActiveTopic && (
         <main className="page">
-          <button className="quit-link cf-back" onClick={() => { setConfusionSub("list"); setCfActiveTopic(null); }}>← 返回練習帳</button>
+          <button className="cf-back" onClick={() => { setConfusionSub("list"); setCfActiveTopic(null); }}>← 返回練習帳</button>
           <h2 className="page-title serif">{cfActiveTopic.name}</h2>
           {confusionItemsCache[cfActiveTopic.id] === undefined ? (
             <div className="cf-loading">加载中…</div>
@@ -2629,6 +2706,11 @@ function AppInner() {
             </div>
           ) : (
             <>
+              <div className="btn-row cf-topic-actions">
+                <button className="btn-main" onClick={() => startConfusionQuiz(cfActiveTopic)}>开始练习</button>
+                <button className="btn-outline" disabled={cfTopicBusy} onClick={() => generateConfusionItems(cfActiveTopic, true)}>{cfTopicBusy ? "生成中…" : "再补充一批"}</button>
+              </div>
+              <div className="cf-item-count">知识范围表 · 共 {confusionItemsCache[cfActiveTopic.id].length} 条,点开分组查看</div>
               {Object.entries(
                 confusionItemsCache[cfActiveTopic.id].reduce((groups, it) => {
                   (groups[it.sub] = groups[it.sub] || []).push(it);
@@ -2636,8 +2718,12 @@ function AppInner() {
                 }, {})
               ).map(([sub, its]) => (
                 <div key={sub} className="cf-item-group">
-                  <div className="cf-item-group-title">{sub}</div>
-                  {its.map((it) => (
+                  <button className="cf-item-group-head" onClick={() => setCfOpenGroups((g) => ({ ...g, [sub]: !g[sub] }))}>
+                    <span className="cf-item-group-title">{sub}</span>
+                    <span className="cf-item-group-count">{its.length}条</span>
+                    <span className="cf-section-arrow">{cfOpenGroups[sub] ? "−" : "+"}</span>
+                  </button>
+                  {cfOpenGroups[sub] && its.map((it) => (
                     <div key={it.id} className="cf-item-row">
                       <div className="cf-item-head serif">{it.head}</div>
                       <div className="cf-item-note">{it.note}</div>
@@ -2651,10 +2737,6 @@ function AppInner() {
                   ))}
                 </div>
               ))}
-              <div className="btn-row cf-topic-actions">
-                <button className="btn-outline" disabled={cfTopicBusy} onClick={() => generateConfusionItems(cfActiveTopic, true)}>{cfTopicBusy ? "生成中…" : "再补充一批"}</button>
-                <button className="btn-main" onClick={() => startConfusionQuiz(cfActiveTopic)}>开始练习</button>
-              </div>
             </>
           )}
           {cfTopicErr && <div className="cf-err">{cfTopicErr}</div>}
@@ -2967,8 +3049,33 @@ function Style() {
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
 
 :root{
+  color-scheme:light;
   --paper:#F5F3EC; --card:#FFFFFF; --ink:#2A2B30; --ink-soft:#6B6D76;
   --ai:#2E4A7D; --ai-deep:#223A5E; --shu:#C0392F; --line:#E4E0D4;
+  --kb-inset:0px;
+  --tint-red-bg:#FCEBE9; --tint-red2-bg:#FBEAEA; --tint-red2-border:#EAC5C5; --tint-red-onuser:#F6D6D1;
+  --tint-blue-bg:#EAF0F9; --tint-blue2-bg:#DCE6F4;
+  --tint-brown-bg:#F6ECE4; --tint-brown-fg:#9A6B3F;
+  --tint-purple-bg:#EFE6F5; --tint-purple-fg:#6B3F9A; --tint-purple-border:#D9C7E8; --tint-purple-panel:#F6F0FA;
+  --tint-green-bg:#E4F0EC; --tint-green-fg:#2E7D5B; --tint-green-border:#B7D9C9; --tint-green-onuser:#CFE8DC;
+  --tint-cream:#FAF4EC; --tint-amber-bg:#FDF6E9; --tint-amber-fg:#8A6A2A; --tint-amber-border:#E8D5A8;
+  --tint-panel:#F7F6F1; --tint-panel2:#F0F0EC; --tint-panel-blue:#EEF2F8; --tint-input-bg:#FDFCF9;
+  --tint-neutral-bg:#EFEDE5; --disabled-bg:#B9C2D2; --stat-partial:#B08830;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    color-scheme:dark;
+    --paper:#18181A; --card:#232326; --ink:#EDEAE2; --ink-soft:#A6A296;
+    --ai:#7FA3D9; --ai-deep:#A9C3E8; --shu:#E2685C; --line:#38383C;
+    --tint-red-bg:#3A2323; --tint-red2-bg:#3A2323; --tint-red2-border:#5A3434; --tint-red-onuser:#5A3434;
+    --tint-blue-bg:#20283A; --tint-blue2-bg:#243044;
+    --tint-brown-bg:#332A20; --tint-brown-fg:#D3A96E;
+    --tint-purple-bg:#2C2438; --tint-purple-fg:#BB9EDB; --tint-purple-border:#443A57; --tint-purple-panel:#291F33;
+    --tint-green-bg:#1F332B; --tint-green-fg:#6FBE97; --tint-green-border:#2F4A3D; --tint-green-onuser:#2F4A3D;
+    --tint-cream:#2B2721; --tint-amber-bg:#2E2A1D; --tint-amber-fg:#D8B978; --tint-amber-border:#4A4128;
+    --tint-panel:#242320; --tint-panel2:#2A2A2C; --tint-panel-blue:#20283A; --tint-input-bg:#1F1F21;
+    --tint-neutral-bg:#2C2C2E; --disabled-bg:#4A4E58; --stat-partial:#D8AE5C;
+  }
 }
 *{box-sizing:border-box;margin:0;padding:0}
 .app{min-height:100vh;min-height:100dvh;background:var(--paper);color:var(--ink);
@@ -2979,13 +3086,13 @@ function Style() {
 .top{padding:20px 20px 6px;display:flex;align-items:baseline;gap:10px}
 .brand{font-size:22px;font-weight:700;letter-spacing:2px;color:var(--ai-deep)}
 .brand-sub{font-size:11px;color:var(--ink-soft);letter-spacing:1px}
-.warn{margin:8px 20px;padding:8px 12px;background:#FCEBE9;color:var(--shu);font-size:12px;border-radius:8px}
+.warn{margin:8px 20px;padding:8px 12px;background:var(--tint-red-bg);color:var(--shu);font-size:12px;border-radius:8px}
 
-.page{padding:12px 20px 20px}
+.page{padding:12px 20px calc(66px + env(safe-area-inset-bottom))}
 .page-title{font-size:18px;margin:6px 0 14px;color:var(--ai-deep)}
 .date-line{font-size:12px;color:var(--ink-soft);margin-bottom:10px}
-.resume-card{background:#FDF6E9;border:1px solid #E8D5A8;border-radius:14px;padding:16px;margin-bottom:14px}
-.resume-text{font-size:14px;color:#8A6A2A;margin-bottom:10px;line-height:1.6}
+.resume-card{background:var(--tint-amber-bg);border:1px solid var(--tint-amber-border);border-radius:14px;padding:16px;margin-bottom:14px}
+.resume-text{font-size:14px;color:var(--tint-amber-fg);margin-bottom:10px;line-height:1.6}
 .resume-card .btn-row{margin-top:0}
 .resume-card .btn-main{flex:1}
 .resume-card .btn-ghost{flex:0 0 auto}
@@ -3013,7 +3120,7 @@ function Style() {
 .btn-main{display:block;width:100%;padding:14px;background:var(--ai);color:#fff;border:none;border-radius:12px;
   font-size:16px;font-weight:600;letter-spacing:2px;cursor:pointer;transition:background .15s}
 .btn-main:hover{background:var(--ai-deep)}
-.btn-main:disabled{background:#B9C2D2;cursor:not-allowed}
+.btn-main:disabled{background:var(--disabled-bg);cursor:not-allowed}
 .btn-ghost{padding:14px 16px;background:none;border:1px solid var(--line);border-radius:12px;color:var(--ink-soft);cursor:pointer;font-size:14px;white-space:nowrap}
 .btn-row{display:flex;gap:10px;margin-top:12px}
 .btn-row .btn-main{margin-top:0}
@@ -3028,24 +3135,24 @@ function Style() {
 .hw-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px}
 .hw-title{font-size:17px;color:var(--ai-deep)}
 .hw-sub{font-size:12px;color:var(--ink-soft);margin-top:4px;line-height:1.6}
-.hw-done{flex:0 0 auto;font-size:11px;color:var(--shu);background:#FCEBE9;padding:3px 8px;border-radius:6px;white-space:nowrap}
-.ls-tier{color:#2E7D5B;background:#E4F0EC}
+.hw-done{flex:0 0 auto;font-size:11px;color:var(--shu);background:var(--tint-red-bg);padding:3px 8px;border-radius:6px;white-space:nowrap}
+.ls-tier{color:var(--tint-green-fg);background:var(--tint-green-bg)}
 .ls-progress{font-size:12px;color:var(--ink-soft);margin-bottom:12px}
 .hw-empty{font-size:13px;color:var(--ink-soft);text-align:center;padding:8px 0}
 .btn-outline{display:block;width:100%;padding:12px;background:none;color:var(--ai);border:1.5px solid var(--ai);border-radius:12px;
   font-size:15px;font-weight:600;letter-spacing:1px;cursor:pointer}
-.btn-outline:hover{background:#EAF0F9}
-.tag-hw{background:#FCEBE9;color:var(--shu)}
-.tag-wk{background:#EFE6F5;color:#6B3F9A}
-.tag-ls{background:#E4F0EC;color:#2E7D5B}
+.btn-outline:hover{background:var(--tint-blue-bg)}
+.tag-hw{background:var(--tint-red-bg);color:var(--shu)}
+.tag-wk{background:var(--tint-purple-bg);color:var(--tint-purple-fg)}
+.tag-ls{background:var(--tint-green-bg);color:var(--tint-green-fg)}
 .combo-plus{font-size:18px;color:var(--ink-soft);margin:0 -2px}
-.wk-card{border-color:#D9C7E8}
-.ls-card{border-color:#B7D9C9}
+.wk-card{border-color:var(--tint-purple-border)}
+.ls-card{border-color:var(--tint-green-border)}
 .voice-picker{display:flex;gap:8px;margin-bottom:12px;align-items:center}
-.voice-picker select{flex:1;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:#FDFCF9;color:var(--ink)}
+.voice-picker select{flex:1;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:var(--tint-input-bg);color:var(--ink)}
 .voice-picker .btn-mini{margin-top:0;flex:0 0 auto;white-space:nowrap}
-.ls-btn{border-color:#2E7D5B;color:#2E7D5B}
-.ls-btn:hover{background:#E4F0EC}
+.ls-btn{border-color:var(--tint-green-fg);color:var(--tint-green-fg)}
+.ls-btn:hover{background:var(--tint-green-bg)}
 
 .settings-row{display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding:12px 16px;
   background:var(--card);border:1px solid var(--line);border-radius:12px;font-size:14px}
@@ -3059,7 +3166,7 @@ function Style() {
 .backup-card{margin-top:10px;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:12px}
 .backup-title{font-size:12px;color:var(--ink-soft);line-height:1.6;margin-bottom:8px}
 .backup-box{width:100%;height:90px;font-size:11px;padding:8px;border:1px solid var(--line);border-radius:8px;
-  background:#FDFCF9;color:var(--ink);resize:vertical;word-break:break-all}
+  background:var(--tint-input-bg);color:var(--ink);resize:vertical;word-break:break-all}
 .copy-msg{margin-top:8px;font-size:12px;color:var(--ai)}
 
 .progress-row{display:flex;align-items:center;gap:10px;margin-bottom:14px}
@@ -3071,8 +3178,8 @@ function Style() {
 .pattern-name{font-size:20px;font-weight:700;color:var(--ai-deep)}
 .pattern-lesson{font-size:12px;color:var(--ink-soft)}
 .tag{font-size:11px;padding:3px 8px;border-radius:6px;letter-spacing:1px}
-.tag-new{background:#EAF0F9;color:var(--ai)}
-.tag-rev{background:#F6ECE4;color:#9A6B3F}
+.tag-new{background:var(--tint-blue-bg);color:var(--ai)}
+.tag-rev{background:var(--tint-brown-bg);color:var(--tint-brown-fg)}
 
 .card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px;box-shadow:0 2px 10px rgba(34,58,94,.05)}
 .intro-row{display:flex;gap:14px;margin-bottom:14px;font-size:15px;line-height:1.7}
@@ -3086,7 +3193,7 @@ function Style() {
 @keyframes blink{0%,80%,100%{opacity:.2}40%{opacity:1}}
 .loading-text{margin-top:14px;font-size:13px;color:var(--ink-soft)}
 .err-text{color:var(--shu);margin-bottom:14px;font-size:13px;word-break:break-word;line-height:1.6}
-.err-hint{background:#FAF4EC;border-radius:10px;padding:12px;font-size:14px;line-height:1.7;color:#8A6A2A;margin-bottom:12px}
+.err-hint{background:var(--tint-cream);border-radius:10px;padding:12px;font-size:14px;line-height:1.7;color:var(--tint-amber-fg);margin-bottom:12px}
 
 .q-type{font-size:11px;letter-spacing:2px;color:var(--shu);margin-bottom:10px}
 .q-task{font-size:19px;line-height:1.7;margin-bottom:8px}
@@ -3103,41 +3210,41 @@ function Style() {
 .name-ruby{ruby-align:center}
 .name-ruby rt{font-size:10px;color:var(--ink-soft);user-select:none}
 .wh-tip-note{font-size:11px;color:var(--ink-soft);margin:-6px 0 10px}
-.dlg-scene-card{background:#FAF4EC;border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:13px;line-height:1.7}
+.dlg-scene-card{background:var(--tint-cream);border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:13px;line-height:1.7}
 .dlg-scene-bg{color:var(--ink);margin-bottom:4px}
 .dlg-scene-roles{color:var(--ai-deep);font-weight:600;margin-bottom:2px}
 .dlg-scene-goal{color:var(--ink-soft)}
 .dlg-bubbles{display:flex;flex-direction:column;gap:10px;margin-bottom:12px;max-height:50vh;overflow-y:auto}
 .dlg-bubble{max-width:82%;padding:10px 14px;border-radius:14px;font-size:15px;line-height:1.6}
-.dlg-ai{align-self:flex-start;background:#F0F0EC;border-bottom-left-radius:4px}
+.dlg-ai{align-self:flex-start;background:var(--tint-panel2);border-bottom-left-radius:4px}
 .dlg-user{align-self:flex-end;background:var(--ai);color:#fff;border-bottom-right-radius:4px}
 .dlg-bubble-text{white-space:pre-wrap;word-break:break-word}
 .dlg-tag{margin-top:4px;font-size:11px;opacity:.85}
-.dlg-tag-good{color:#2E7D5B}
-.dlg-user .dlg-tag-good{color:#CFE8DC}
-.dlg-tag-soso{color:#C0392F}
-.dlg-user .dlg-tag-soso{color:#F6D6D1}
-.dlg-typing{background:#F0F0EC;padding:12px 16px}
+.dlg-tag-good{color:var(--tint-green-fg)}
+.dlg-user .dlg-tag-good{color:var(--tint-green-onuser)}
+.dlg-tag-soso{color:var(--shu)}
+.dlg-user .dlg-tag-soso{color:var(--tint-red-onuser)}
+.dlg-typing{background:var(--tint-panel2);padding:12px 16px}
 .dlg-typing span{display:inline-block;width:6px;height:6px;margin:0 2px;border-radius:50%;background:var(--ink-soft);animation:blink 1.2s infinite}
 .dlg-typing span:nth-child(2){animation-delay:.2s}.dlg-typing span:nth-child(3){animation-delay:.4s}
 .dlg-reviewing{text-align:center;padding:24px 0}
 .answer-box{width:100%;margin-top:10px;padding:12px;font-size:17px;line-height:1.7;border:1.5px solid var(--line);
-  border-radius:12px;background:#FDFCF9;resize:vertical;color:var(--ink)}
+  border-radius:12px;background:var(--tint-input-bg);resize:vertical;color:var(--ink)}
 .answer-box:focus{outline:2px solid var(--ai);border-color:var(--ai)}
 
 .result-wrap{position:relative;margin-top:6px}
-.your-ans{margin-top:14px;padding:10px 12px;background:#F7F6F1;border-radius:10px;font-size:15px}
+.your-ans{margin-top:14px;padding:10px 12px;background:var(--tint-panel);border-radius:10px;font-size:15px}
 .your-ans label,.ref-block label,.exp-block label,.mk-line label{display:block;font-size:11px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:3px}
 .ref-block{margin-top:14px}
 .ref-jp{font-size:17px;color:var(--ai-deep)}
-.exp-block{margin-top:12px;font-size:14px;line-height:1.8;background:#FAF4EC;border-radius:10px;padding:12px}
+.exp-block{margin-top:12px;font-size:14px;line-height:1.8;background:var(--tint-cream);border-radius:10px;padding:12px}
 .exp-block label{margin-bottom:6px}
-.breakdown-block{margin-top:12px;font-size:13px;line-height:1.7;background:#EEF2F8;border-radius:10px;padding:12px}
+.breakdown-block{margin-top:12px;font-size:13px;line-height:1.7;background:var(--tint-panel-blue);border-radius:10px;padding:12px}
 .breakdown-block label{display:block;font-size:11px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:8px}
 .bd-row{display:flex;gap:8px;margin:6px 0;align-items:baseline}
-.bd-tag{flex:0 0 auto;font-size:11px;color:var(--ai);background:#DCE6F4;border-radius:6px;padding:2px 8px;white-space:nowrap}
+.bd-tag{flex:0 0 auto;font-size:11px;color:var(--ai);background:var(--tint-blue2-bg);border-radius:6px;padding:2px 8px;white-space:nowrap}
 .card .btn-main{margin-top:16px}
-.review-flag{margin:8px 0 4px;padding:8px 12px;background:#FBEAEA;border:1px solid #EAC5C5;border-radius:10px;
+.review-flag{margin:8px 0 4px;padding:8px 12px;background:var(--tint-red2-bg);border:1px solid var(--tint-red2-border);border-radius:10px;
   font-size:12px;color:var(--shu);line-height:1.6}
 
 .stamp{position:absolute;top:-22px;right:2px;margin:0;width:150px;height:150px;border:3px solid var(--shu);border-radius:50%;
@@ -3152,7 +3259,7 @@ function Style() {
 .done-card{text-align:center;padding:36px 24px}
 .done-title{font-size:24px;color:var(--ai-deep);margin-bottom:16px;letter-spacing:2px}
 .done-stats{display:flex;justify-content:center;gap:22px;font-size:18px;margin-bottom:14px}
-.d-ok{color:var(--shu);font-weight:700}.d-pt{color:#B08830}.d-ng{color:var(--ink-soft)}
+.d-ok{color:var(--shu);font-weight:700}.d-pt{color:var(--stat-partial)}.d-ng{color:var(--ink-soft)}
 .done-note{font-size:13px;color:var(--ink-soft);margin-bottom:8px}
 
 .lesson-block{margin-bottom:8px}
@@ -3162,20 +3269,20 @@ function Style() {
 .pattern-row{margin:8px 0 8px 10px;padding:12px 14px;background:var(--card);border-left:3px solid var(--ai);border-radius:0 12px 12px 0}
 .pr-top{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
 .pr-name{font-size:16px;font-weight:700;color:var(--ai-deep)}
-.badge{font-size:11px;padding:2px 8px;border-radius:6px;background:#EFEDE5;color:var(--ink-soft)}
-.badge-on{background:#EAF0F9;color:var(--ai)}
-.badge-ext{background:#F6ECE4;color:#9A6B3F}
+.badge{font-size:11px;padding:2px 8px;border-radius:6px;background:var(--tint-neutral-bg);color:var(--ink-soft)}
+.badge-on{background:var(--tint-blue-bg);color:var(--ai)}
+.badge-ext{background:var(--tint-brown-bg);color:var(--tint-brown-fg)}
 .pr-meaning{font-size:13px;color:var(--ink-soft);margin-top:4px}
 .pr-ex{font-size:14px;margin-top:4px}
 
-.drill-bar{margin-bottom:16px;padding:14px 16px;background:#F6F0FA;border:1px solid #D9C7E8;border-radius:12px}
-.drill-note{font-size:12px;color:#6B3F9A;margin-bottom:0;line-height:1.6}
-.drill-bar .btn-outline{border-color:#6B3F9A;color:#6B3F9A}
-.drill-bar .btn-outline:hover{background:#EFE6F5}
+.drill-bar{margin-bottom:16px;padding:14px 16px;background:var(--tint-purple-panel);border:1px solid var(--tint-purple-border);border-radius:12px}
+.drill-note{font-size:12px;color:var(--tint-purple-fg);margin-bottom:0;line-height:1.6}
+.drill-bar .btn-outline{border-color:var(--tint-purple-fg);color:var(--tint-purple-fg)}
+.drill-bar .btn-outline:hover{background:var(--tint-purple-bg)}
 .mistake-card{margin-bottom:12px;padding:16px}
 .mk-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:15px;font-weight:700;color:var(--ai-deep)}
 .mk-head-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.badge-review{background:#FBEAEA;color:var(--shu)}
+.badge-review{background:var(--tint-red2-bg);color:var(--shu)}
 .mk-date{font-size:11px;color:var(--ink-soft);font-weight:400;white-space:nowrap}
 .mk-task{font-size:14px;margin:8px 0}
 .mk-line{margin:6px 0;font-size:14px}
@@ -3184,7 +3291,7 @@ function Style() {
 .mk-exp{font-size:13px;color:var(--ink-soft);line-height:1.7;margin-top:6px}
 
 /* ---- 練習帳(知识辨析/场景对话/书面邮件) ---- */
-.tag-cf{background:#EAF0F9;color:var(--ai)}
+.tag-cf{background:var(--tint-blue-bg);color:var(--ai)}
 .cf-note{font-size:12px;color:var(--ink-soft);line-height:1.6;margin-bottom:18px}
 .cf-section{margin-bottom:14px}
 .cf-section-head{width:100%;display:flex;align-items:center;gap:8px;padding:14px 16px;background:var(--card);
@@ -3207,20 +3314,26 @@ function Style() {
 .cf-scene-roles{font-size:13px;font-weight:700;color:var(--ai-deep)}
 .cf-scene-bg{font-size:11px;color:var(--ink-soft);line-height:1.5}
 .cf-email-topic-btn{justify-content:center;align-items:center}
-.cf-back{display:block;margin:0 0 10px;text-align:left}
+.cf-back{display:flex;align-items:center;gap:4px;margin:0 0 14px;padding:8px 14px;
+  background:var(--card);border:1px solid var(--line);border-radius:10px;
+  font-size:14px;font-weight:600;color:var(--ai-deep);cursor:pointer}
 .cf-empty{text-align:center;padding:30px 10px;color:var(--ink-soft);font-size:13px}
 .cf-empty .btn-main{margin-top:14px}
-.cf-item-group{margin-bottom:18px}
-.cf-item-group-title{font-size:12px;color:var(--ai);letter-spacing:1px;margin-bottom:8px;font-weight:700}
-.cf-item-row{padding:10px 0;border-bottom:1px dashed var(--line)}
+.cf-item-count{font-size:12px;color:var(--ink-soft);margin:14px 0 10px}
+.cf-item-group{margin-bottom:10px}
+.cf-item-group-head{width:100%;display:flex;align-items:center;gap:8px;padding:10px 12px;
+  background:var(--card);border:1px solid var(--line);border-radius:10px;cursor:pointer;text-align:left}
+.cf-item-group-title{font-size:13px;color:var(--ai-deep);letter-spacing:1px;font-weight:700}
+.cf-item-group-count{margin-left:auto;font-size:11px;color:var(--ink-soft)}
+.cf-item-row{padding:10px 4px;border-bottom:1px dashed var(--line)}
 .cf-item-row:last-child{border-bottom:none}
 .cf-item-head{font-size:15px;color:var(--ai-deep)}
 .cf-item-note{font-size:12px;color:var(--ink-soft);margin-top:3px;line-height:1.6}
 .cf-item-example{font-size:13px;margin-top:4px;display:flex;flex-wrap:wrap;gap:6px}
 .cf-item-example-cn{font-size:12px;color:var(--ink-soft)}
-.cf-topic-actions{margin-top:6px}
+.cf-topic-actions{margin-top:6px;margin-bottom:6px}
 .cf-grading{margin:10px 0}
-.cf-email-brief{position:sticky;top:8px;z-index:1;margin-bottom:14px;background:#FAF4EC}
+.cf-email-brief{position:sticky;top:8px;z-index:1;margin-bottom:14px;background:var(--tint-cream)}
 .cf-email-field{margin-bottom:10px}
 .cf-email-field:last-child{margin-bottom:0}
 .cf-email-field label{display:block;font-size:11px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:3px}
@@ -3231,13 +3344,20 @@ function Style() {
 .cf-email-dim{display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px dashed var(--line);font-size:13px}
 .cf-email-dim:last-child{border-bottom:none}
 .cf-email-dim-mark{flex:0 0 auto}
-.cf-email-dim.ok .cf-email-dim-mark{color:#2E7D5B}
+.cf-email-dim.ok .cf-email-dim-mark{color:var(--tint-green-fg)}
 .cf-email-dim.ng .cf-email-dim-mark{color:var(--shu)}
 .cf-email-dim-label{flex:0 0 auto;font-weight:700;color:var(--ai-deep)}
 .cf-email-dim-note{color:var(--ink-soft);flex:1 1 auto}
 
-.nav{position:sticky;bottom:0;margin-top:auto;display:flex;flex:0 0 auto;
-  background:var(--card);border-top:1px solid var(--line);padding:6px 0 max(6px, env(safe-area-inset-bottom))}
+/* 用 position:fixed(而不是原来的 sticky+margin-top:auto flex 技巧)钉在视口底部:
+   sticky 在 .app 内容比屏幕高的时候会跟内容"脱节",出现下面还露出一截内容的错位;
+   fixed 直接锚定视口,不受 .app 实际高度影响。bottom 用 --kb-inset(JS通过
+   visualViewport算出来的键盘遮挡高度)动态偏移,键盘弹起时导航栏跟着提到键盘上方,
+   不会留出一大片空白。left/transform 是为了在宽屏上跟 .app 的居中对齐,
+   手机端视口本来就比640px窄,效果等同于占满宽度。 */
+.nav{position:fixed;left:50%;transform:translateX(-50%);bottom:var(--kb-inset,0px);
+  width:100%;max-width:640px;display:flex;flex:0 0 auto;
+  background:var(--card);border-top:1px solid var(--line);padding:6px 0 max(6px, env(safe-area-inset-bottom));z-index:10}
 .nav-btn{flex:1;padding:12px 0;background:none;border:none;font-size:14px;color:var(--ink-soft);cursor:pointer;letter-spacing:2px}
 .nav-btn.on{color:var(--ai-deep);font-weight:700}
 

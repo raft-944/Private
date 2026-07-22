@@ -3208,7 +3208,7 @@ function Style() {
 .wh-word.wh-hinted{border-bottom-style:solid;color:var(--ai-deep)}
 .wh-word rt{font-size:10px;color:var(--ai);user-select:none}
 .wh-meaning{font-size:12px;color:var(--ink-soft)}
-.cw-word{cursor:pointer;border-bottom:2px solid var(--ai);ruby-align:center}
+.cw-word{cursor:pointer;border-bottom:2px dashed var(--ai);ruby-align:center}
 .cw-word.cw-open{color:var(--ai-deep);border-bottom-color:var(--ai-deep)}
 .cw-word rt{font-size:11px;color:var(--ai-deep);user-select:none}
 .name-ruby{ruby-align:center}

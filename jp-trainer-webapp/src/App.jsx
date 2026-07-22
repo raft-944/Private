@@ -515,6 +515,14 @@ function formatDialogueHistory(scene, history) {
   return history.map((h) => `${h.role === "user" ? scene.userRole : scene.aiRole}: ${h.text}`).join("\n");
 }
 
+/* scene.register==="casual" 时统一插入的语域说明,让开场白/续对话/复盘三处口径一致。
+   不加这个字段的场景不受影响,行为和之前完全一样。 */
+function dialogueRegisterNote(scene) {
+  return scene.register === "casual"
+    ? "\n重要:这个场景里双方关系亲近(朋友/熟悉的平级同事),说话要用简体(タメ口/普通体),不要用です・ます这种敬体,像日本人朋友间真实聊天那样随意自然。"
+    : "";
+}
+
 /* AI先开口的场景,进对话前先要一句开场白(角色口吻,不含任何评价/元信息) */
 async function genDialogueOpening(scene) {
   const sys = `あなたは日本語教師です。请扮演场景里的「${scene.aiRole}」这个角色,用自然、符合该角色身份的口语说第一句话,不要出戏、不要加任何括号说明或旁白。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
@@ -522,7 +530,7 @@ async function genDialogueOpening(scene) {
 你扮演: ${scene.aiRole}
 对方(学习者)扮演: ${scene.userRole}
 对话目标: ${scene.goal}
-请说出这场对话里「${scene.aiRole}」要说的第一句话,简短自然,像日常口语,不要长篇大论。
+请说出这场对话里「${scene.aiRole}」要说的第一句话,简短自然,像日常口语,不要长篇大论。${dialogueRegisterNote(scene)}
 输出JSON: {"text":"第一句话(日语)"}`;
   const r = await callAI(sys, user);
   if (!r.text) throw new Error("bad dialogue opening");
@@ -532,6 +540,9 @@ async function genDialogueOpening(scene) {
 /* 续写对话:AI扮演角色回一句,同时暗中给学习者刚才那句话一个轻量标记,并判断是否可以自然收尾了 */
 async function continueDialogue(scene, history, userMessage) {
   const sys = `あなたは日本語教師です。请扮演场景里的「${scene.aiRole}」这个角色,和学习者(扮演「${scene.userRole}」)自然对话,不要出戏。同时你要暗中评估学习者刚才那句话说得自然不自然(这部分只体现在tag字段里,绝对不能在对话内容reply里评价或纠正对方,要像真人对话一样只管接话)。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const registerTagHint = scene.register === "casual"
+    ? "(这个场景该用简体,如果学习者习惯性地切回です・ます敬体,即使语法没错也算不够自然)"
+    : "";
   const user = `场景背景: ${scene.background}
 你扮演: ${scene.aiRole}
 对方(学习者)扮演: ${scene.userRole}
@@ -541,8 +552,8 @@ async function continueDialogue(scene, history, userMessage) {
 ${formatDialogueHistory(scene, history)}
 ${scene.userRole}: ${userMessage}
 
-请以「${scene.aiRole}」的身份自然地回应这最后一句话,简短口语化,像真实对话,不要长篇大论、不要一次性说完所有信息。
-tag字段:如果学习者刚才那句日语说得自然、地道,给"natural";如果有点生硬、不够地道但还能听懂,给"stiff";如果不确定或不需要特别评价,给null。
+请以「${scene.aiRole}」的身份自然地回应这最后一句话,简短口语化,像真实对话,不要长篇大论、不要一次性说完所有信息。${dialogueRegisterNote(scene)}
+tag字段:如果学习者刚才那句日语说得自然、地道${registerTagHint},给"natural";如果有点生硬、不够地道但还能听懂,给"stiff";如果不确定或不需要特别评价,给null。
 done字段:如果这句回复说完之后,对话目标已经达成(该问到的问到了、该确认的确认了),接下来只需要道谢/道别就能自然结束,就给true;否则给false。
 输出JSON: {"reply":"你的回应(日语)","tag":"natural|stiff|null","done":true|false}`;
   const r = await callAI(sys, user);
@@ -559,16 +570,20 @@ async function reviewDialogue(scene, history, candidatePatterns) {
   const candList = candidatePatterns.length
     ? candidatePatterns.map((p, i) => `${i}. ${p.pattern}(${p.meaning})`).join("\n")
     : "(无)";
+  const registerLine = scene.register === "casual"
+    ? "这场对话的人物关系亲近(朋友/熟悉的平级同事),应该全程用简体(タメ口),不是敬体——如果学习者中途切回です・ます,即使语法没错,也要在issues里指出"
+    : "这场对话是相对正式或不太熟的关系,应该全程用敬体(です・ます),不是简体——如果学习者中途说了简体,也要在issues里指出";
   const user = `场景背景: ${scene.background}
 对话目标: ${scene.goal}
 学习者扮演: ${scene.userRole},对方扮演: ${scene.aiRole}
+场景语域: ${registerLine}
 
 完整对话记录:
 ${formatDialogueHistory(scene, history)}
 
 请对学习者(${scene.userRole}那些发言)做整体复盘:
 1. summary:简短总结整体表现和用到的句型/表达(中日混合,100字以内)
-2. issues:指出哪些地方表达生硬、不够地道,或敬体(です/ます)和简体混用不一致的地方,没有就写"没有明显问题"
+2. issues:指出哪些地方表达生硬、不够地道,或者敬体简体的使用不符合上面"场景语域"的要求,没有就写"没有明显问题"
 3. suggestions:给出1~2个更地道的说法建议,没有就留空字符串""
 
 以下是本场景关联的目标句型候选(带编号),如果学习者在对话中用到了其中某个句型但用得有问题(语法错、用法不对、明显生硬),请从下面列表里选出对应编号;如果都没问题或都没用到,flaggedIssues给空数组[]。绝对不能选列表之外的句型、不能自己编编号。
@@ -833,17 +848,21 @@ function pickConfusionQuizItems(items, recentHeads, count, kind = "generic") {
    有没有明显的语法错误。 */
 async function reviewConfusionDialogue(scene, history, stageBenchmark) {
   const sys = `あなたは丁寧で親切な日本語教師です。针对学习者刚完成的一场角色扮演对话给出复盘点评,讲解以中文为主、适当夹杂日语术语。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const registerLine = scene.register === "casual"
+    ? "这场对话的人物关系亲近(朋友/熟悉的平级同事),应该全程用简体(タメ口),不是敬体——如果学习者中途切回です・ます,即使语法没错,也要在issues里指出"
+    : "这场对话是相对正式或不太熟的关系,应该全程用敬体(です・ます),不是简体——如果学习者中途说了简体,也要在issues里指出";
   const user = `场景背景: ${scene.background}
 对话目标: ${scene.goal}
 学习者扮演: ${scene.userRole},对方扮演: ${scene.aiRole}
 学习者水平: ${stageBenchmark}
+场景语域: ${registerLine}
 
 完整对话记录:
 ${formatDialogueHistory(scene, history)}
 
 请对学习者(${scene.userRole}那些发言)做整体复盘:
 1. summary: 简短总结整体表现和用到的表达(中日混合,100字以内)
-2. issues: 指出哪些地方表达生硬、不够地道,或敬体简体混用不一致,没有就写"没有明显问题"
+2. issues: 指出哪些地方表达生硬、不够地道,或者敬体简体的使用不符合上面"场景语域"的要求,没有就写"没有明显问题"
 3. suggestions: 给出1~2个更地道的说法建议,没有就留空字符串""
 4. grammarMistakes: 如果学习者的发言里存在明显的语法/句型使用错误(不是"不够地道"这种风格问题,而是确实用错了),列出来,每条{"quote":"学习者当时说的那句话","issue":"错在哪(中文)","suggestion":"更正确的说法"};没有就给空数组[]
 
@@ -2669,6 +2688,9 @@ function AppInner() {
                 <div className="dlg-scene-bg">{dialogueScene.background}</div>
                 <div className="dlg-scene-roles">你演 {dialogueScene.userRole} · AI演 {dialogueScene.aiRole}</div>
                 <div className="dlg-scene-goal">目标:{dialogueScene.goal}</div>
+                {dialogueScene.register === "casual" && (
+                  <div className="dlg-scene-register">💬 关系亲近,请用简体(タメ口)对话,不用敬体です・ます</div>
+                )}
               </div>
 
               {dialoguePhase !== "reviewed" && (
@@ -2876,7 +2898,7 @@ function AppInner() {
                 <div className="cf-scene-grid">
                   {CONFUSION_SCENES.filter((s) => s.category === "life").map((s) => (
                     <button key={s.id} className="cf-scene-btn" onClick={() => startConfusionDialogue(s)}>
-                      <span className="cf-scene-roles">{s.userRole} ↔ {s.aiRole}</span>
+                      <span className="cf-scene-roles">{s.userRole} ↔ {s.aiRole}{s.register === "casual" && <span className="badge badge-on cf-scene-register-badge">簡体</span>}</span>
                       <span className="cf-scene-bg">{s.background}</span>
                     </button>
                   ))}
@@ -2885,7 +2907,7 @@ function AppInner() {
                 <div className="cf-scene-grid">
                   {CONFUSION_SCENES.filter((s) => s.category === "work").map((s) => (
                     <button key={s.id} className="cf-scene-btn" onClick={() => startConfusionDialogue(s)}>
-                      <span className="cf-scene-roles">{s.userRole} ↔ {s.aiRole}</span>
+                      <span className="cf-scene-roles">{s.userRole} ↔ {s.aiRole}{s.register === "casual" && <span className="badge badge-on cf-scene-register-badge">簡体</span>}</span>
                       <span className="cf-scene-bg">{s.background}</span>
                     </button>
                   ))}
@@ -3074,6 +3096,9 @@ function AppInner() {
               <div className="dlg-scene-bg">{cfScene.background}</div>
               <div className="dlg-scene-roles">你演 {cfScene.userRole} · AI演 {cfScene.aiRole}</div>
               <div className="dlg-scene-goal">目标:{cfScene.goal}</div>
+              {cfScene.register === "casual" && (
+                <div className="dlg-scene-register">💬 关系亲近,请用简体(タメ口)对话,不用敬体です・ます</div>
+              )}
             </div>
 
             {cfDialogueErr && <div className="cf-err">{cfDialogueErr}</div>}
@@ -3463,6 +3488,8 @@ function Style() {
 .dlg-scene-bg{color:var(--ink);margin-bottom:4px}
 .dlg-scene-roles{color:var(--ai-deep);font-weight:600;margin-bottom:2px}
 .dlg-scene-goal{color:var(--ink-soft)}
+.dlg-scene-register{color:var(--ai);font-size:12px;margin-top:6px}
+.cf-scene-register-badge{margin-left:6px;vertical-align:middle}
 .dlg-bubbles{display:flex;flex-direction:column;gap:10px;margin-bottom:12px;max-height:50vh;overflow-y:auto}
 .dlg-bubble{max-width:82%;padding:10px 14px;border-radius:14px;font-size:15px;line-height:1.6}
 .dlg-ai{align-self:flex-start;background:var(--tint-panel2);border-bottom-left-radius:4px}

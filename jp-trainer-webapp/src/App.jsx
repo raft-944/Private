@@ -67,7 +67,15 @@ const addDays = (d, n) => { const t = new Date(d + "T00:00:00Z"); t.setUTCDate(t
 const mondayOf = (d) => { const dt = new Date(d + "T00:00:00Z"); const day = dt.getUTCDay(); dt.setUTCDate(dt.getUTCDate() + (day === 0 ? -6 : 1) - day); return dt.toISOString().slice(0, 10); };
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
-const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, session: null, studyTime: {} };
+const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, session: null, studyTime: {}, hwBacklog: null };
+
+/* 待复习积压达到"新句型日配额"的这么多倍时,暂停当天新句型引入,先把复习债还上——
+   参照 Anki"复习优先于新卡"的思路,但阈值给宽松点,避免正常的小波动就误伤新句型进度。 */
+const NEW_PATTERN_PAUSE_RATIO = 5;
+
+/* 每日作业连续这么多个批次都没做完,残留的句型题就转入错题本、批次清空清算——
+   不能无限累积;対话类残留没有实际判卷内容可转错题本,到这个阈值就直接放弃那道对话。 */
+const HW_BACKLOG_FLUSH_CYCLES = 2;
 
 /* 错题要连续答对这么多次才从错题本移除,而不是蒙对一次就当作掌握了——每条错题的
    streak 字段记录"目前连续答对了几次",答错/被判需要复核会清零,只有连续攒够这个
@@ -1421,11 +1429,13 @@ function AppInner() {
     else if (!freeMode) kind = "srs";
     if (!kind) return; // 自由练习/单题重练,不必断点续做
     const items = queue.map((it) => {
-      if (kind === "homework") return it.hw === "dialogue" ? { hw: "dialogue", sceneId: it.sceneId } : it.sub === "combo" ? { sub: "combo", pid1: it.p1.id, pid2: it.p2.id, mistakeId: it.mistakeId } : { pid: it.p.id, hw: it.hw, mistakeId: it.mistakeId };
+      if (kind === "homework") return it.hw === "dialogue" ? { hw: "dialogue", sceneId: it.sceneId, fromBacklog: !!it.fromBacklog } : it.sub === "combo" ? { sub: "combo", pid1: it.p1.id, pid2: it.p2.id, mistakeId: it.mistakeId, fromBacklog: !!it.fromBacklog } : { pid: it.p.id, hw: it.hw, mistakeId: it.mistakeId, fromBacklog: !!it.fromBacklog };
       if (kind === "weekly") return it.sub === "combo" ? { sub: "combo", pid1: it.p1.id, pid2: it.p2.id, mistakeId: it.mistakeId } : { sub: "weak", pid: it.p.id, mistakeId: it.mistakeId };
       return { pid: it.p.id, isNew: it.isNew };
     });
-    setDb((d) => ({ ...d, session: { kind, items, idx, stats: sessionStats } }));
+    // date 记录这份快照是哪天生成的:今日学习/每日作业跨天后要判定失效,不能让旧快照
+    // 冒充"今天的任务全貌"(旧快照更小,会把真实积压量吃掉,详见 startSession/startHomework 里的处理)
+    setDb((d) => ({ ...d, session: { kind, items, idx, stats: sessionStats, date: t } }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queue, idx, sessionStats, phase, view, weeklyMode, weeklyFormal, homeworkMode, listenMode, freeMode]);
 
@@ -1480,7 +1490,10 @@ function AppInner() {
   // 按 lesson→id 重新排过,用它才会先发完第3课剩下那条,再发第4课。
   const unlearned = ORDERED.filter((p) => !db.prog[p.id]);
   const newDoneToday = db.meta.date === t ? db.meta.newDone : 0;
-  const newSlots = Math.max(0, db.settings.newPerDay - newDoneToday);
+  // 待复习积压过多时暂停新句型引入,参照 Anki"复习优先于新卡"——阈值是新句型日配额的
+  // NEW_PATTERN_PAUSE_RATIO 倍,门槛给宽松点,避免正常小波动就误伤新句型进度
+  const newPatternsPaused = dueList.length >= db.settings.newPerDay * NEW_PATTERN_PAUSE_RATIO;
+  const newSlots = newPatternsPaused ? 0 : Math.max(0, db.settings.newPerDay - newDoneToday);
   const newList = unlearned.slice(0, newSlots);
   const learnedPatterns = PATTERNS.filter((p) => db.prog[p.id]);
   const recentCutoff = addDays(t, -6);
@@ -1488,6 +1501,15 @@ function AppInner() {
   const comboPool = recentPool.length >= 2 ? recentPool : learnedPatterns;
   const weekReady = comboPool.length >= 2;
   const weekDone = db.meta.weekKey === mondayOf(t);
+
+  /* 跨天残留的断点快照:今日学习/每日作业这两类一旦发现是"非今天"生成的快照,
+     就不能再直接当"继续做"提供——今日学习改成回退到按当前 db.prog 现算的
+     dueList/newList 重新开一轮(数据不会丢,due<=t 本来就会持续累积);
+     每日作业改成走 startHomework 里的"并入下一批"逻辑,而不是简单续做旧快照。
+     周挑战/听力不在这次需求范围内,继续保持原来的跨天续做行为。 */
+  const staleSrsSession = db.session && db.session.kind === "srs" && db.session.date && db.session.date !== t;
+  const staleHwSession = db.session && db.session.kind === "homework" && db.session.date && db.session.date !== t;
+  const hwBacklogPending = staleHwSession ? Math.max(0, db.session.items.length - db.session.idx) : 0;
 
   /* 学习时长:studyTime 按日期存累计秒数,"近N天日均"固定除以N(含没学的日子),
      不是只在学过的天数里求平均——这样才是"最近这段时间平均每天学多久"该有的意思 */
@@ -1592,12 +1614,41 @@ function AppInner() {
       return out;
     };
 
+    /* 积压处理(参照 Anki:未完成的不能被下一批悄悄覆盖,要并入新批次并优先做):
+       上一份 db.session 如果是"非今天生成的"每日作业快照,说明那批题跨天了还没做完,
+       它剩下没做的题(items.slice(idx))就是这次要处理的积压。 */
+    const staleHwSessionNow = db.session && db.session.kind === "homework" && db.session.date && db.session.date !== t;
+    const leftoverRaw = staleHwSessionNow ? db.session.items.slice(db.session.idx) : [];
+    let carried = leftoverRaw.map((d) => d.hw === "dialogue"
+      ? { hw: "dialogue", sceneId: d.sceneId, fromBacklog: true }
+      : d.sub === "combo"
+      ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId, fromBacklog: true }
+      : { p: PATTERNS[d.pid], hw: d.hw, mistakeId: d.mistakeId, fromBacklog: true });
+
+    // 积压连续 HW_BACKLOG_FLUSH_CYCLES 个批次都没做完:句型题转入错题本、批次清空清算
+    // (対话没有实际判卷内容,没法转错题本,到这个阈值就直接放弃那道残留対话)
+    let backlogDays = 0;
+    let flushedItems = [];
+    if (carried.length) {
+      backlogDays = (db.hwBacklog && db.hwBacklog.days ? db.hwBacklog.days : 0) + 1;
+      if (backlogDays >= HW_BACKLOG_FLUSH_CYCLES) {
+        flushedItems = carried.filter((it) => it.hw !== "dialogue");
+        carried = [];
+        backlogDays = 0;
+      }
+    }
+
+    const hasBacklog = carried.length > 0;
+    // 有积压时新增部分减半:4造句→2、5翻译→3(不是严格对半,凑成整数、又不会太少)
+    const compQuota = hasBacklog ? 2 : 4;
+    const transQuota = hasBacklog ? 3 : 5;
+    const slotBudget = compQuota + transQuota;
+
     // 优先把当前错题混进今天的作业里,做对了会自动从錯題本移除,不用你另外再点一次"闯关"
-    // 造句/翻译一共9个题位(4+5),情景对话是额外固定的第10题,不占这9个名额
     let compCount = 0, transCount = 0;
     const mistakeItems = [];
     for (const m of db.mistakes) {
-      if (mistakeItems.length >= 9) break;
+      if (mistakeItems.length >= slotBudget) break;
       // 練習帳(source==="confusion")来的错题不挂钩具体句型,没有 pid,不能塞进作业题位——
       // 練習帳本来就是"不计入每日/每周任务"的自由练习,这里跳过正是这条规则的体现
       if (m.pid === undefined) continue;
@@ -1605,20 +1656,54 @@ function AppInner() {
       else if (compCount <= transCount) { mistakeItems.push({ p: PATTERNS[m.pid], hw: "comp", mistakeId: m.id }); compCount++; }
       else { mistakeItems.push({ p: PATTERNS[m.pid], hw: "trans", mistakeId: m.id }); transCount++; }
     }
-    const remain = Math.max(0, 9 - mistakeItems.length);
-    const remainComp = Math.min(remain, Math.max(0, 4 - compCount));
+    const remain = Math.max(0, slotBudget - mistakeItems.length);
+    const remainComp = Math.min(remain, Math.max(0, compQuota - compCount));
     const remainTrans = remain - remainComp;
+
+    // 情景対话只有1个固定名额:如果积压里已经带了一条没做的対话,续用同一个场景,
+    // 不再另外生成新的(避免同一批出现两条対话);对话本身没有减半这一说
+    const carriedDialogue = carried.find((it) => it.hw === "dialogue");
+    const carriedPatternItems = carried.filter((it) => it.hw !== "dialogue");
+    const dialogueItem = carriedDialogue || { hw: "dialogue", sceneId: pickDailyScene().id };
+
     const items = [
+      ...carriedPatternItems,
       ...mistakeItems,
       ...pickN(remainComp, learned).map((p) => ({ p, hw: "comp" })),
       ...pickN(remainTrans, learned).map((p) => ({ p, hw: "trans" })),
-      { hw: "dialogue", sceneId: pickDailyScene().id },
+      dialogueItem,
     ];
     preGenRef.current = {};
     setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(true); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
-    setSessionStats({ ok: 0, partial: 0, wrong: 0 });
+    setSessionStats({ ok: 0, partial: 0, wrong: 0, backlogOk: 0, backlogPartial: 0, backlogWrong: 0 });
     setView("session");
     beginHomeworkItem(items[0], 0);
+    setDb((d) => {
+      const nd = { ...d, hwBacklog: hasBacklog ? { days: backlogDays } : null };
+      if (flushedItems.length) {
+        nd.mistakes = [...d.mistakes];
+        for (const it of flushedItems) {
+          const idPart = it.sub === "combo" ? { pid: it.p1.id, pid2: it.p2.id } : { pid: it.p.id };
+          const base = {
+            task: "(每日作业积压超过 " + HW_BACKLOG_FLUSH_CYCLES + " 个批次没做完,已自动转入错题本重新排期)",
+            type: it.sub === "combo" ? "combo" : it.hw, ans: "", ref: "", exp: "",
+            date: t, needsReview: false, streak: 0,
+          };
+          if (it.mistakeId) {
+            // 这道题本来就是从错题本里挑出来重练的,超时没做完就刷新原来那条,不重复叠加
+            const pos = nd.mistakes.findIndex((m) => m.id === it.mistakeId);
+            if (pos !== -1) nd.mistakes[pos] = { ...nd.mistakes[pos], ...base };
+            else nd.mistakes.unshift({ ...base, ...idPart, id: newId() });
+          } else {
+            const pos = nd.mistakes.findIndex((m) => m.pid === idPart.pid && m.pid2 === idPart.pid2);
+            if (pos === -1) nd.mistakes.unshift({ ...base, ...idPart, id: newId() });
+            // 这个句型已经在错题本里了就不重复加,保留原有内容
+          }
+        }
+        nd.mistakes = nd.mistakes.slice(0, 100);
+      }
+      return nd;
+    });
     // 后台批量预取"翻译题"(作业里只有这类题位真正需要AI出题,造句题是固定文案不用调用)。
     // 跳过第0题:如果它正好是翻译题,上面已经单独请求过了,再算进来会重复生成
     const transIndexed = items
@@ -1715,7 +1800,7 @@ function AppInner() {
     const s = db.session;
     if (!s) return;
     let items;
-    if (s.kind === "homework") items = s.items.map((d) => d.hw === "dialogue" ? { hw: "dialogue", sceneId: d.sceneId } : d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId } : { p: PATTERNS[d.pid], hw: d.hw, mistakeId: d.mistakeId });
+    if (s.kind === "homework") items = s.items.map((d) => d.hw === "dialogue" ? { hw: "dialogue", sceneId: d.sceneId, fromBacklog: !!d.fromBacklog } : d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId, fromBacklog: !!d.fromBacklog } : { p: PATTERNS[d.pid], hw: d.hw, mistakeId: d.mistakeId, fromBacklog: !!d.fromBacklog });
     else if (s.kind === "weekly") items = s.items.map((d) => d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId } : { sub: "weak", p: PATTERNS[d.pid], mistakeId: d.mistakeId });
     else items = s.items.map((d) => ({ p: PATTERNS[d.pid], isNew: d.isNew }));
     setQueue(items); setIdx(s.idx); setSessionStats(s.stats || { ok: 0, partial: 0, wrong: 0 });
@@ -1859,7 +1944,11 @@ function AppInner() {
 
   const applyDialogueResult = (item, scene, review) => {
     const hasIssues = review.flaggedIssues.length > 0;
-    setSessionStats((s) => ({ ...s, [hasIssues ? "partial" : "ok"]: s[hasIssues ? "partial" : "ok"] + 1 }));
+    const key = hasIssues ? "partial" : "ok";
+    // 每日作业结果页要拆开显示"今日新增/昨日遗留"各自的正确数,不能合并成一个笼统的完成度——
+    // item.fromBacklog 是 startHomework 并入积压题时标的,只有作业模式下有意义
+    const bkey = "backlog" + key[0].toUpperCase() + key.slice(1);
+    setSessionStats((s) => ({ ...s, [key]: s[key] + 1, ...(homeworkMode && item.fromBacklog ? { [bkey]: (s[bkey] || 0) + 1 } : {}) }));
     setDb((d) => {
       const nd = { ...d, mistakes: [...d.mistakes] };
       for (const f of review.flaggedIssues) {
@@ -1924,7 +2013,11 @@ function AppInner() {
   };
 
   const applyResult = (item, g) => {
-    setSessionStats((s) => ({ ...s, [g.verdict === "correct" ? "ok" : g.verdict]: s[g.verdict === "correct" ? "ok" : g.verdict] + 1 }));
+    const key = g.verdict === "correct" ? "ok" : g.verdict;
+    // 每日作业结果页要拆开显示"今日新增/昨日遗留"各自的正确数,不能合并成一个笼统的完成度——
+    // item.fromBacklog 是 startHomework 并入积压题时标的,只有作业模式下有意义
+    const bkey = "backlog" + key[0].toUpperCase() + key.slice(1);
+    setSessionStats((s) => ({ ...s, [key]: s[key] + 1, ...(homeworkMode && item.fromBacklog ? { [bkey]: (s[bkey] || 0) + 1 } : {}) }));
     setDb((d) => {
       const nd = { ...d, prog: { ...d.prog }, meta: { ...d.meta }, stats: { ...d.stats }, listenStats: { ...d.listenStats }, mistakes: [...d.mistakes] };
       nd.stats.total += 1;
@@ -1992,7 +2085,9 @@ function AppInner() {
     } else {
       setDb((d) => {
         const nd = { ...d, meta: { ...d.meta }, session: null };
-        if (homeworkMode) nd.meta.hwDate = t;
+        // 走到这里说明整批(含并入的积压题)都做完了,没有残留——债务已经还清,
+        // 不清掉 hwBacklog 的话,它记的"已经欠了几个批次"会在下次真正产生新积压时被误继承
+        if (homeworkMode) { nd.meta.hwDate = t; nd.hwBacklog = null; }
         if (weeklyFormal) nd.meta.weekKey = mondayOf(t);
         return nd;
       });
@@ -2456,7 +2551,7 @@ function AppInner() {
         <main className="page">
           <div className="date-line">{t}(北京时间)</div>
 
-          {db.session && (
+          {db.session && !staleSrsSession && !staleHwSession && (
             <section className="resume-card">
               <div className="resume-text">
                 有未完成的{db.session.kind === "homework" ? "每日作业" : db.session.kind === "weekly" ? "每周挑战" : "今日学习"}
@@ -2475,6 +2570,7 @@ function AppInner() {
               <div className="num-block"><div className="num ai-c">{newList.length}</div><div className="num-label">新句型</div></div>
               <div className="num-block"><div className="num">{learnedIds.length}<span className="num-total">/{PATTERNS.length}</span></div><div className="num-label">已学</div></div>
             </div>
+            {newPatternsPaused && <div className="pause-hint">⏸ 待复习积压较多,已暂停引入新句型,先把复习消化完</div>}
             {dueList.length + newList.length > 0 ? (
               <button className="btn-main" onClick={startSession}>開始 · 今日の学習</button>
             ) : (
@@ -2503,11 +2599,12 @@ function AppInner() {
                 </div>
                 {db.meta.hwDate === t && <span className="hw-done">✓ 今日已完成</span>}
               </div>
+              {hwBacklogPending > 0 && <div className="hw-backlog-badge">⚠ 有 {hwBacklogPending} 题积压待补做,点开始会自动并入本次</div>}
               {learnedIds.length === 0 ? (
                 <div className="hw-empty">先学几个句型,再来做作业吧</div>
               ) : (
                 <button className="btn-outline" onClick={startHomework}>
-                  {db.meta.hwDate === t ? "再练一组作业" : "開始 · 今日の宿題"}
+                  {hwBacklogPending > 0 ? "開始 · 补做+今日作业" : db.meta.hwDate === t ? "再练一组作业" : "開始 · 今日の宿題"}
                 </button>
               )}
             </section>
@@ -2812,6 +2909,18 @@ function AppInner() {
                 <span className="d-pt">△ {sessionStats.partial}</span>
                 <span className="d-ng">✗ {sessionStats.wrong}</span>
               </div>
+              {homeworkMode && queue.some((it) => it.fromBacklog) && (() => {
+                const backlogTotal = queue.filter((it) => it.fromBacklog).length;
+                const freshTotal = queue.length - backlogTotal;
+                const backlogOkTotal = (sessionStats.backlogOk || 0) + (sessionStats.backlogPartial || 0);
+                const freshOkTotal = sessionStats.ok + sessionStats.partial - backlogOkTotal;
+                return (
+                  <div className="done-breakdown">
+                    <div className="done-breakdown-row">今日新增:{freshTotal} 题(正确 {freshOkTotal})</div>
+                    <div className="done-breakdown-row">昨日遗留:{backlogTotal} 题(正确 {backlogOkTotal})</div>
+                  </div>
+                );
+              })()}
               <p className="done-note">{weeklyMode ? "本周综合挑战已完成,做错的组合题/弱点题已收入錯題本。" : homeworkMode ? "今日作业已完成,做对的错题已自动清除。" : listenMode ? "聴解練習已完成,没听懂的已收入錯題本。" : "答对的句型间隔已拉长,答错的明天会再次出现。"}</p>
               <button className="btn-main" onClick={() => setView("home")}>返回首页</button>
             </section>
@@ -3394,6 +3503,8 @@ function Style() {
 
 .all-done{text-align:center;font-size:18px;color:var(--ai-deep);line-height:1.9;padding:8px 0}
 .all-done-sub{font-size:12px;color:var(--ink-soft);font-family:sans-serif}
+.pause-hint{font-size:12px;color:var(--tint-brown-fg);background:var(--tint-brown-bg);border-radius:8px;padding:8px 10px;margin-bottom:10px}
+.hw-backlog-badge{font-size:11px;color:var(--shu);background:var(--tint-red-bg);border-radius:8px;padding:6px 8px;margin-bottom:10px;line-height:1.5}
 
 .hw-card{margin-top:16px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 20px}
 .hw-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px}
@@ -3548,6 +3659,8 @@ function Style() {
 .done-title{font-size:24px;color:var(--ai-deep);margin-bottom:16px;letter-spacing:2px}
 .done-stats{display:flex;justify-content:center;gap:22px;font-size:18px;margin-bottom:14px}
 .d-ok{color:var(--shu);font-weight:700}.d-pt{color:var(--stat-partial)}.d-ng{color:var(--ink-soft)}
+.done-breakdown{background:var(--tint-panel);border-radius:10px;padding:10px 14px;margin:0 0 14px;font-size:13px;color:var(--ink-soft);text-align:left}
+.done-breakdown-row{line-height:1.8}
 .done-note{font-size:13px;color:var(--ink-soft);margin-bottom:8px}
 
 .lesson-block{margin-bottom:8px}

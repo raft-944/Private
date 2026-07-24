@@ -3619,7 +3619,10 @@ function Style() {
   border-radius:12px;background:var(--tint-input-bg);resize:vertical;color:var(--ink)}
 .answer-box:focus{outline:2px solid var(--ai);border-color:var(--ai)}
 
-.result-wrap{position:relative;margin-top:6px}
+/* padding-top 给判卷印章预留位置:印章是 position:absolute 叠在右上角、背景透明,
+   之前没留空间,答案没打字/参考答案偏长时印章会直接盖在文字上面,叠得看不清——
+   这里留出印章大概的高度,让它稳稳待在右上角"批改留白"的位置,不再压字。 */
+.result-wrap{position:relative;margin-top:6px;padding-top:140px}
 .your-ans{margin-top:14px;padding:10px 12px;background:var(--tint-panel);border-radius:10px;font-size:15px}
 .your-ans label,.ref-block label,.exp-block label,.mk-line label{display:block;font-size:11px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:3px}
 .ref-block{margin-top:14px}

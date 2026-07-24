@@ -1085,7 +1085,7 @@ function FollowUpAsk({ contextSummary }) {
               className="followup-input"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) send(); }}
               placeholder="针对这道题追问,比如「这个助词为什么不能用另一个」…"
               disabled={busy}
             />
@@ -1448,7 +1448,11 @@ function AppInner() {
   useEffect(() => {
     if (view !== "session") return;
     const onKey = (e) => {
-      if (e.key !== "Enter") return;
+      if (e.key !== "Enter" || e.isComposing) return;
+      // 焦点在输入框里的回车不归这里管:结果页上有「追问」输入框,在里面按回车是要发送
+      // 追问的,事件冒泡到 window 如果也触发"下一题",这次追问就直接被冲掉了
+      const tag = e.target && e.target.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       const a = actionsRef.current;
       if (phase === "intro" && a.cur && a.loadQuestion) { e.preventDefault(); a.loadQuestion(a.cur.p); }
       else if (phase === "result" && a.next) { e.preventDefault(); a.next(); }
@@ -2817,7 +2821,7 @@ function AppInner() {
                         value={dialogueInput}
                         onChange={(e) => setDialogueInput(e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendDialogueTurn(); }
+                          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); sendDialogueTurn(); }
                         }}
                         placeholder="ここに日本語で書いてください…(Enter 提交 / Shift+Enter 换行)"
                         rows={2}
@@ -2872,7 +2876,9 @@ function AppInner() {
                     value={answer}
                     onChange={(e) => setAnswer(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
+                      // isComposing:日文输入法组词中按回车只是"確定"转换,不是要提交答案——
+                      // 不挡住的话,刚打了一半的句子就会被直接交卷(iOS/桌面端 IME 都会踩)
+                      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                         e.preventDefault();
                         if (answer.trim()) submit();
                         else if (q.type === "listening") speakJa(q.yomi || q.jp, 1, db.settings.voiceURI);
@@ -3152,7 +3158,7 @@ function AppInner() {
                     className="answer-box serif"
                     value={cfAnswer}
                     onChange={(e) => setCfAnswer(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (cfAnswer.trim()) submitConfusionAnswer(); } }}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (cfAnswer.trim()) submitConfusionAnswer(); } }}
                     placeholder="ここに日本語で書いてください…(Enter 提交 / Shift+Enter 换行)"
                     rows={3}
                     autoFocus
@@ -3238,7 +3244,7 @@ function AppInner() {
                       className="answer-box serif"
                       value={cfDialogueInput}
                       onChange={(e) => setCfDialogueInput(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendConfusionDialogueTurn(); } }}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); sendConfusionDialogueTurn(); } }}
                       placeholder="ここに日本語で書いてください…(Enter 提交 / Shift+Enter 换行)"
                       rows={2}
                       disabled={cfDialogueBusy}
@@ -3455,7 +3461,7 @@ function Style() {
     --tint-neutral-bg:#2C2C2E; --disabled-bg:#4A4E58; --stat-partial:#D8AE5C;
   }
 }
-*{box-sizing:border-box;margin:0;padding:0}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 .app{min-height:100vh;min-height:100dvh;background:var(--paper);color:var(--ink);
   font-family:"Noto Sans JP","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
   max-width:640px;margin:0 auto;display:flex;flex-direction:column}
@@ -3539,7 +3545,7 @@ function Style() {
 .wk-card{border-color:var(--tint-purple-border)}
 .ls-card{border-color:var(--tint-green-border)}
 .voice-picker{display:flex;gap:8px;margin-bottom:12px;align-items:center}
-.voice-picker select{flex:1;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:var(--tint-input-bg);color:var(--ink)}
+.voice-picker select{flex:1;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:16px;background:var(--tint-input-bg);color:var(--ink)}
 .voice-picker .btn-mini{margin-top:0;flex:0 0 auto;white-space:nowrap}
 .ls-btn{border-color:var(--tint-green-fg);color:var(--tint-green-fg)}
 .ls-btn:hover{background:var(--tint-green-bg)}
@@ -3555,7 +3561,8 @@ function Style() {
 .backup-head{font-size:11px;color:var(--ink-soft);letter-spacing:1px;margin-bottom:8px;text-align:center}
 .backup-card{margin-top:10px;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:12px}
 .backup-title{font-size:12px;color:var(--ink-soft);line-height:1.6;margin-bottom:8px}
-.backup-box{width:100%;height:90px;font-size:11px;padding:8px;border:1px solid var(--line);border-radius:8px;
+/* 16px 是防 iOS 聚焦自动放大的底线(导入时要点进来粘贴,聚焦就会触发) */
+.backup-box{width:100%;height:90px;font-size:16px;padding:8px;border:1px solid var(--line);border-radius:8px;
   background:var(--tint-input-bg);color:var(--ink);resize:vertical;word-break:break-all}
 .copy-msg{margin-top:8px;font-size:12px;color:var(--ai)}
 
@@ -3651,7 +3658,8 @@ function Style() {
 .followup-a{color:var(--ink);margin-top:2px}
 .followup-loading{font-size:12px;color:var(--ink-soft);margin:6px 0}
 .followup-input-row{display:flex;gap:8px;margin-top:10px}
-.followup-input{flex:1;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:var(--tint-input-bg);color:var(--ink)}
+/* 输入控件字号必须 ≥16px:iOS 聚焦字号更小的输入框时会自动放大整个页面,且失焦后不回弹 */
+.followup-input{flex:1;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:16px;background:var(--tint-input-bg);color:var(--ink)}
 .followup-input-row .btn-mini{margin-top:0;flex:0 0 auto}
 
 /* 印章缩小成右上角一枚小盖章:原来 150px 直径太大,会整个盖住参考答案/讲评开头看不清。

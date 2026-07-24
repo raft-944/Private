@@ -1147,7 +1147,12 @@ function AppInner() {
     if (!vv) return;
     const root = document.documentElement;
     const update = () => {
-      const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      const raw = window.innerHeight - vv.height - vv.offsetTop;
+      // 只有明显是软键盘(高度可观)才把导航栏顶上去。iOS Safari 的底部工具栏
+      // 收缩/展开会让 innerHeight 和 visualViewport.height 差出几十像素,这个小差值
+      // 不是键盘,却会被误当成键盘、把固定在底部的导航栏顶起来留出一片空白(用户反馈的bug)。
+      // 键盘至少一两百像素高,设个阈值把工具栏这种小差值滤掉。
+      const kb = raw > 150 ? raw : 0;
       root.style.setProperty("--kb-inset", kb + "px");
     };
     update();
@@ -2855,7 +2860,7 @@ function AppInner() {
                   <button className="btn-listen ghost" onClick={() => speakJa(q.yomi || q.jp, 0.65, db.settings.voiceURI)}>🐢 慢速</button>
                 </div>
               ) : (
-                <div className="q-task serif">
+                <div className={"q-task serif" + (q.jpTask ? " q-task-instr" : "")}>
                   <ChineseTaskText text={q.task} segments={taskSegmentsFor(q)} sentence={q.task} targetDesc={taskTargetDescFor(cur)} onReveal={markHinted} />
                 </div>
               )}
@@ -3582,6 +3587,9 @@ function Style() {
 
 .q-type{font-size:11px;letter-spacing:2px;color:var(--shu);margin-bottom:10px}
 .q-task{font-size:19px;line-height:1.7;margin-bottom:8px}
+/* 造句题的「この文型…を使って、自由に文を作ってください」是固定的操作提示,不是要读的题面内容,
+   给它小一号、颜色淡一点,省下的竖向空间让判卷结果里的「次へ」按钮更容易落在第一屏内。 */
+.q-task-instr{font-size:14px;line-height:1.6;color:var(--ink-soft)}
 .listen-box{display:flex;gap:10px;margin-bottom:8px;padding:14px 0}
 .btn-listen{padding:14px 20px;background:var(--ai);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:600;cursor:pointer}
 .btn-listen.ghost{background:none;border:1.5px solid var(--ai);color:var(--ai)}
@@ -3619,10 +3627,7 @@ function Style() {
   border-radius:12px;background:var(--tint-input-bg);resize:vertical;color:var(--ink)}
 .answer-box:focus{outline:2px solid var(--ai);border-color:var(--ai)}
 
-/* padding-top 给判卷印章预留位置:印章是 position:absolute 叠在右上角、背景透明,
-   之前没留空间,答案没打字/参考答案偏长时印章会直接盖在文字上面,叠得看不清——
-   这里留出印章大概的高度,让它稳稳待在右上角"批改留白"的位置,不再压字。 */
-.result-wrap{position:relative;margin-top:6px;padding-top:140px}
+.result-wrap{position:relative;margin-top:6px}
 .your-ans{margin-top:14px;padding:10px 12px;background:var(--tint-panel);border-radius:10px;font-size:15px}
 .your-ans label,.ref-block label,.exp-block label,.mk-line label{display:block;font-size:11px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:3px}
 .ref-block{margin-top:14px}
@@ -3649,13 +3654,16 @@ function Style() {
 .followup-input{flex:1;padding:9px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:var(--tint-input-bg);color:var(--ink)}
 .followup-input-row .btn-mini{margin-top:0;flex:0 0 auto}
 
-.stamp{position:absolute;top:-22px;right:2px;margin:0;width:150px;height:150px;border:3px solid var(--shu);border-radius:50%;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--shu);background:transparent;
-  box-shadow:0 4px 14px rgba(192,57,47,.18);
-  transform:rotate(-8deg);animation:stampIn .4s cubic-bezier(.2,1.6,.4,1);gap:2px;z-index:2}
-.stamp-mark{font-size:40px;line-height:1;font-weight:700}
-.stamp-label{font-size:15px;font-weight:700;letter-spacing:1px;font-family:"Noto Sans JP","Noto Sans SC",sans-serif}
-.stamp-sub{font-size:10px;opacity:.8}
+/* 印章缩小成右上角一枚小盖章:原来 150px 直径太大,会整个盖住参考答案/讲评开头看不清。
+   缩到 96px 后只是轻轻压在右上角空白处,不再遮挡左侧的答案正文,也就不需要靠 padding
+   把下面的内容整体往下推(那样会把「次へ」按钮顶到很靠下、要多翻一屏)。 */
+.stamp{position:absolute;top:-14px;right:0;margin:0;width:96px;height:96px;border:2.5px solid var(--shu);border-radius:50%;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--shu);background:var(--card);
+  box-shadow:0 3px 10px rgba(192,57,47,.16);
+  transform:rotate(-8deg);animation:stampIn .4s cubic-bezier(.2,1.6,.4,1);gap:1px;z-index:2}
+.stamp-mark{font-size:26px;line-height:1;font-weight:700}
+.stamp-label{font-size:11px;font-weight:700;letter-spacing:.5px;font-family:"Noto Sans JP","Noto Sans SC",sans-serif}
+.stamp-sub{font-size:8px;opacity:.8}
 @keyframes stampIn{0%{transform:scale(2) rotate(-8deg);opacity:0}70%{transform:scale(.94) rotate(-8deg);opacity:1}100%{transform:scale(1) rotate(-8deg)}}
 
 .done-card{text-align:center;padding:36px 24px}

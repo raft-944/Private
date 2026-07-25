@@ -961,7 +961,7 @@ ${list}
 - 涉及语境辨别层(sub是"语境辨别")的条目,中文句子里要自然带出对应的时态/语气线索(比如"已经"对应すでに/完了,"如果"对应もし/假定),让学生必须依据语境线索选对形式,不能靠死记硬背哪个词固定对应哪个形式
 - ${TASK_SEGMENTS_RULE}
 
-输出JSON: {"items":[{"qtype":"翻译","task":"中文句子",${TASK_SEGMENTS_FIELD}}]}` : `知识点: ${topicName}
+输出JSON: {"items":[{"n":条目编号(就是上面列表里的第几条,整数),"qtype":"翻译","task":"中文句子",${TASK_SEGMENTS_FIELD}}]}` : `知识点: ${topicName}
 学习者水平: ${stageBenchmark}
 
 请依次为下面这 ${items.length} 条条目各出一道练习题,顺序必须和列表一一对应,不要跳过、不要合并、不要调换顺序:
@@ -975,10 +975,16 @@ ${list}
 - 造句/翻译题本来就是完整句子,不受影响
 - ${TASK_SEGMENTS_RULE}
 
-输出JSON: {"items":[{"qtype":"辨析|搭配|造句|翻译","task":"题目内容(中文,交代清楚要写什么,必须能在一个文本框里一次性写完整答案)",${TASK_SEGMENTS_FIELD}}]}`;
+输出JSON: {"items":[{"n":条目编号(就是上面列表里的第几条,整数),"qtype":"辨析|搭配|造句|翻译","task":"题目内容(中文,交代清楚要写什么,必须能在一个文本框里一次性写完整答案)",${TASK_SEGMENTS_FIELD}}]}`;
   const r = await callAI(sys, user, Math.min(8000, 700 * items.length + 800));
-  if (!Array.isArray(r.items) || r.items.length !== items.length) throw new Error("confusion quiz count mismatch");
-  return r.items.map((q, i) => ({ ...q, head: items[i].head, sub: items[i].sub, taskSegments: Array.isArray(q.taskSegments) && q.taskSegments.length ? q.taskSegments : null }));
+  /* 按元素自带的编号 n 对位,对不上的位置返回 null,由调用方连同对应条目一起丢掉。
+     以前是"数量不等就整批 throw",AI 偶尔漏一条就让整次练习报错——主线漏批还能退回
+     现场出题,这里没有任何兜底,你得重新点一次「开始练习」(再烧一次额度)。
+     練習帳本来没有固定题量要求,少一道就少做一道,比整批失败好得多。 */
+  return alignBatch(r.items, items.length, (q, pos) => ({
+    ...q, head: items[pos].head, sub: items[pos].sub,
+    taskSegments: Array.isArray(q.taskSegments) && q.taskSegments.length ? q.taskSegments : null,
+  }));
 }
 
 /* 判卷:知识辨析类题目经常不止一个语法上说得通的答案,要求AI说明为什么优选某个答案,
@@ -2791,9 +2797,14 @@ function AppInner() {
       const recent = cfQuizRecentRef.current[topic.id] || [];
       const picked = pickConfusionQuizItems(items, recent, 6, topic.kind);
       const stage = confusionStageBenchmark(db);
-      const questions = await genConfusionQuiz(topic.name, picked, stage, topic.kind);
-      cfQuizRecentRef.current[topic.id] = picked.map((it) => it.head);
-      setCfQuiz({ topic, items: picked, questions });
+      const raw = await genConfusionQuiz(topic.name, picked, stage, topic.kind);
+      /* raw 里对不上位的条目是 null(AI 漏给了)。cfQuiz.items 和 cfQuiz.questions 是
+         靠同一个下标取的两个平行数组,所以必须成对丢弃,不能只过滤 questions——
+         否则第3条漏了以后,第4题会拿第4个题面去配第3个条目,判卷跟着一起错。 */
+      const kept = picked.map((it, i) => ({ it, q: raw[i] })).filter((x) => x.q);
+      // "最近练过哪些条目"只记真正出了题的,漏掉的条目不该被当成练过而在下次被跳过
+      cfQuizRecentRef.current[topic.id] = kept.map((x) => x.it.head);
+      setCfQuiz({ topic, items: kept.map((x) => x.it), questions: kept.map((x) => x.q) });
       setCfQuizPhase("question");
     } catch (e) {
       setCfErrMsg("出题失败:" + (e && e.message ? e.message : String(e)));
@@ -2814,8 +2825,10 @@ function AppInner() {
     setCfResult(null);
     try {
       const stage = confusionStageBenchmark(db);
-      const questions = await genConfusionQuiz(topic.name, [item], stage, topic.kind);
-      setCfQuiz({ topic, items: [item], questions, retryMistakeId: mistakeId });
+      const raw = await genConfusionQuiz(topic.name, [item], stage, topic.kind);
+      // 只有一条条目,没出出来就没什么可练的了(alignBatch 全空时本来就会抛,这里只是兜底)
+      if (!raw[0]) throw new Error("这道题没出出来,请再试一次");
+      setCfQuiz({ topic, items: [item], questions: [raw[0]], retryMistakeId: mistakeId });
       setCfQuizPhase("question");
     } catch (e) {
       setCfErrMsg("出题失败:" + (e && e.message ? e.message : String(e)));

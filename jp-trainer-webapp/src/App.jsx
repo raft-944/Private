@@ -465,7 +465,7 @@ async function annotateWords(jpTextRaw) {
 }
 
 async function gradeCombo(p1, p2, q, answer) {
-  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。${EXPLAIN_LANG_RULE}学習者水平:句型A ${levelBenchmark(p1.level)},句型B ${levelBenchmark(p2.level)}。判卷标准需分别符合各自句型的难度基准。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
+  const sys = `你是一位耐心细致的日语老师,负责判卷和讲解。${EXPLAIN_LANG_RULE}学习者水平:句型A ${levelBenchmark(p1.level)},句型B ${levelBenchmark(p2.level)}。判卷标准需分别符合各自句型的难度基准。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})
 【句型A教材解释】${explainText(p1)}
 【句型A易混淆点】${contrastsText(p1)}${styleTagText(p1)}
@@ -518,7 +518,7 @@ ${avoid && avoid.length ? "避免与这些句子雷同: " + avoid.join(" / ") : 
 }
 
 async function gradeListening(p, q, answer) {
-  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。${EXPLAIN_LANG_RULE}学習者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `你是一位耐心细致的日语老师,负责判卷和讲解。${EXPLAIN_LANG_RULE}学习者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `目标句型: ${p.pattern}(${p.conn} / ${p.meaning})
 听力原文(日语,学生只听到了声音,没看到文字): ${q.jp}
 学生听写下来的内容(允许用假名代替汉字,这不算错): ${answer}
@@ -656,7 +656,7 @@ done字段:如果这句回复说完之后,对话目标已经达成(该问到的�
    AI只能从候选列表里"选编号",不允许自己编pid——编号到pid的映射在代码里做,
    保证落错题本时pid一定真实存在、不会挂空。 */
 async function reviewDialogue(scene, history, candidatePatterns) {
-  const sys = `あなたは丁寧で親切な日本語教師です。针对学习者刚完成的一场角色扮演对话给出复盘点评。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `你是一位耐心细致的日语老师,针对学习者刚完成的一场角色扮演对话给出复盘点评。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const candList = candidatePatterns.length
     ? candidatePatterns.map((p, i) => `${i}. ${p.pattern}(${p.meaning})`).join("\n")
     : "(无)";
@@ -689,7 +689,7 @@ ${candList}
 }
 
 async function gradeAnswer(p, q, answer, hintedWords) {
-  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。${EXPLAIN_LANG_RULE}学習者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
+  const sys = `你是一位耐心细致的日语老师,负责判卷和讲解。${EXPLAIN_LANG_RULE}学习者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `句型: ${p.pattern}(${p.conn} / ${p.meaning})
 【教材解释】${explainText(p)}
 【易混淆点】${contrastsText(p)}${styleTagText(p)}
@@ -730,7 +730,7 @@ verdict 是 "correct" 时,breakdown 设为 null。
    句型/题目/学生答案/参考答案/讲解都打包进去,history 是这道题下面已经问过的追问记录
    (同一道题可以连续追问好几轮,换题后由调用方清空,不带过去)。 */
 async function askFollowUp(contextSummary, history, question) {
-  const sys = `あなたは丁寧で親切な日本語教師です。学习者刚做完一道题,现在针对这道题追问,请紧扣这道题的内容作答,不要跑题到无关内容。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `你是一位耐心细致的日语老师。学习者刚做完一道题,现在针对这道题追问,请紧扣这道题的内容作答,不要跑题到无关内容。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const historyText = history && history.length
     ? "\n\n这道题下面之前的追问记录:\n" + history.map((h) => `学习者问: ${h.q}\n你答: ${h.a}`).join("\n")
     : "";
@@ -851,7 +851,7 @@ ${list}
    "动词变形"的核心考点是"变形选对没选对",要求判卷优先看这个、并且和其他小瑕疵分开说,
    不能让无关小错掩盖了变形本身对不对这个核心反馈。 */
 async function gradeConfusionAnswer(topicName, item, question, answer, stageBenchmark, kind = "generic") {
-  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `你是一位耐心细致的日语老师,负责判卷和讲解。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const head = `知识点: ${topicName}
 条目: ${item.head}(${item.sub})
 【用法说明】${item.note}
@@ -943,7 +943,7 @@ function pickConfusionQuizItems(items, recentHeads, count, kind = "generic") {
    传空数组的话 AI 根本没法选、永远查不出问题;这里改成不依赖候选列表,直接现场判断
    有没有明显的语法错误。 */
 async function reviewConfusionDialogue(scene, history, stageBenchmark) {
-  const sys = `あなたは丁寧で親切な日本語教師です。针对学习者刚完成的一场角色扮演对话给出复盘点评。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `你是一位耐心细致的日语老师,针对学习者刚完成的一场角色扮演对话给出复盘点评。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const registerLine = scene.register === "casual"
     ? "这场对话的人物关系亲近(朋友/熟悉的平级同事),应该全程用简体(タメ口),不是敬体——如果学习者中途切回です・ます,即使语法没错,也要在issues里指出"
     : "这场对话是相对正式或不太熟的关系,应该全程用敬体(です・ます),不是简体——如果学习者中途说了简体,也要在issues里指出";
@@ -994,7 +994,7 @@ ${avoidLast ? "刚练过的上一个命题(不要出雷同的场景/关系): " +
 }
 
 async function gradeConfusionEmail(topicName, scenario, emailText, stageBenchmark) {
-  const sys = `あなたは丁寧で厳しい日本語ビジネスメール指導教師です。请按结构完整度批改学习者写的商务邮件,不以字数长短评分。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `你是一位严格细致的日语商务邮件指导老师。请按结构完整度批改学习者写的商务邮件,不以字数长短评分。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `邮件情境类型: ${topicName}
 收件人: ${scenario.recipient.org} ${scenario.recipient.name}(关系: ${scenario.recipient.relation})
 写信原因: ${scenario.situation}
@@ -3821,6 +3821,17 @@ function Style() {
   font-size:12px;color:var(--shu);line-height:1.6}
 .scope-flag{margin:8px 0 4px;padding:8px 12px;background:var(--tint-green-bg);border:1px solid var(--tint-green-border);border-radius:10px;
   font-size:12px;color:var(--tint-green-fg);line-height:1.6}
+
+/* 判卷印章是 position:absolute 钉在右上角、而且有纯色底(不透明),会实心盖住底下的内容。
+   之前试过用 padding-top 给它留竖向空间,但那样把「次へ」按钮推得太靠下、要多翻一屏。
+   改成只留横向空间:落在印章那片区域里的几个文字块,右边留出印章的宽度,让文字提前换行、
+   不伸到印章底下去。竖向一点不占,按钮位置不受影响。
+   印章 96px 宽,rotate(-8deg) 后外接盒约 108px,取 112px 留一点余量。
+   这几条必须写在上面 .your-ans / .review-flag / .scope-flag 之后:那几条用的是
+   padding 简写,会重设 padding-right,放前面就得靠选择器优先级去压它,容易被误改。 */
+.result-wrap > .review-flag,
+.result-wrap > .scope-flag,
+.result-wrap > .your-ans{padding-right:112px}
 
 .followup-block{margin-top:14px}
 .followup-toggle{background:none;border:1px dashed var(--line);border-radius:10px;padding:8px 12px;font-size:12px;color:var(--ai);cursor:pointer;width:100%;text-align:left}

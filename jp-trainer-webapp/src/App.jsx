@@ -77,6 +77,16 @@ const NEW_PATTERN_PAUSE_RATIO = 5;
    不能无限累积;対话类残留没有实际判卷内容可转错题本,到这个阈值就直接放弃那道对话。 */
 const HW_BACKLOG_FLUSH_CYCLES = 2;
 
+/* ---- 题量动态调节(借鉴 hsrs 的 session 机制,但只用简单规则,不引入概率化调度) ---- */
+/* 每周挑战:本周错题涉及的句型数达到这个值,弱点重测从 3 道加到 5 道 */
+const WEEKLY_WEAK_BOOST_THRESHOLD = 6;
+/* 每日作业:做完固定题量后,正确率达到这个比例(且错题本还有没练到的存量)才追加题目——
+   门槛定高一点,做得吃力的时候绝不追加,避免越做越挫败 */
+const HW_EXTRA_ACCURACY = 0.8;
+/* 每日作业单次最多追加几道。每道都要额外一次 AI 调用(还有 3.5 秒全局限流),
+   给到 2 道是"奖励做得好"和"别让人等太久"之间的折中 */
+const HW_EXTRA_MAX = 2;
+
 /* 错题要连续答对这么多次才从错题本移除,而不是蒙对一次就当作掌握了——每条错题的
    streak 字段记录"目前连续答对了几次",答错/被判需要复核会清零,只有连续攒够这个
    数才真正移除。所有错题清除逻辑(SRS的重练、練習帳的重练)都共用这一个阈值。 */
@@ -267,8 +277,8 @@ function speakJa(text, rate = 1, voiceURI) {
 async function genComboQuestion(p1, p2, avoid) {
   const sys = `あなたは日本語教師です。学習者:句型A对应 JLPT ${levelBenchmark(p1.level)},句型B对应 JLPT ${levelBenchmark(p2.level)}(《大家的日语》初中级)。出题词汇和语法请分别符合各自句型的难度基准,不要因为其中一个句型简单/难就把另一个也拉到同一水平。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `请出一道"複合作文"练习题,要求学习者在同一句话(或简短的两三句对话)中,同时正确使用以下两个句型。
-句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})
-句型B: ${p2.pattern}(${p2.conn} / ${p2.meaning})
+句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})${styleTagText(p1)}
+句型B: ${p2.pattern}(${p2.conn} / ${p2.meaning})${styleTagText(p2)}
 请给出一个中文情境提示(30字以内),说明想表达的内容,让学习者据此写出同时包含这两个句型的日语句子或简短对话。
 ${avoid && avoid.length ? "避免与这些情境雷同: " + avoid.join(" / ") : ""}${personInstruction([p1, p2])}
 ${TASK_SEGMENTS_RULE}
@@ -289,6 +299,58 @@ function explainText(p) {
 function contrastsText(p) {
   const t = p.contrasts && p.contrasts.length ? p.contrasts.map((c) => c[0] + "：" + c[1]).join("\n") : "无";
   return truncateText(t, 400);
+}
+
+/* ================= 文体/语域标签(style / formality) =================
+   借鉴 hsrs 的 mode 机制:给句型标上文体归属,出题时约束例句、判卷时约束搭配。
+   两个字段都是可选的,没标的句型(初级那批基本都是"两可"或统一敬体,标了价值不大)
+   一律按"不限制"处理,行为和加这套标签之前完全一样。
+     style:      "敬体" | "简体" | "两可"   —— です・ます体 vs 普通体
+     formality:  "书面语" | "口语" | "两可" —— 文章/正式场合 vs 日常会话
+   注意:和 scenes.js 里场景的 register 字段不是一回事(那个说的是对话双方关系亲疏),
+   所以这里故意不复用 register 这个名字,避免以后自己看混。 */
+function styleTagText(p) {
+  if (!p) return "";
+  const parts = [];
+  if (p.style && p.style !== "两可") parts.push(`该句型只用于${p.style}(不要写成另一种文体)`);
+  if (p.formality && p.formality !== "两可") parts.push(`该句型属于${p.formality},例句的语气要符合这个场合`);
+  return parts.length ? `\n【文体限制】${parts.join(";")}` : "";
+}
+
+/* 两个句型能不能放进同一句话:文体标签直接冲突(一个只能敬体一个只能简体,
+   或一个只能书面语一个只能口语)的组合排除掉——同一句话里没法同时满足。
+   任一方没标或标的是"两可"都视为兼容。这个判断放在 JS 里做而不是交给 AI:
+   抽对子时就避开冲突组合,比让 AI 事后判断"这两个能不能搭"可靠,也不花 AI 调用。 */
+function styleTagsCompatible(a, b) {
+  const clash = (k) => {
+    const x = a && a[k], y = b && b[k];
+    return x && y && x !== "两可" && y !== "两可" && x !== y;
+  };
+  return !clash("style") && !clash("formality");
+}
+
+/* 判卷时统一插入的"文体前后一致"规则。不依赖句型有没有标签——查的是学习者自己
+   写出来的这句话内部是否文体统一(前半句です・ます、后半句だ/である这种混用),
+   这是很常见又容易被"语法没错"放过去的问题,所以单独作为一条判卷规则写死。 */
+const STYLE_CONSISTENCY_RULE = `文体一致性检查(重要):检查学生这句话内部的文体是否统一——同一个句子(或同一段对话中同一个说话人的话)里不能敬体(です・ます)和简体(だ/である/辞書形結び)混用。如果发现前后文体不一致(例如前半句用「です」后半句用「だ」),即使语法本身没有错,也必须在 explanation 里明确指出是文体不一致、具体哪里不一致、应该统一成哪一种,并且 verdict 最高只能给 "partial",不能给 "correct"。若该句型本身有文体限制(见上面【文体限制】),学生用了不符合的文体,同样按这条处理。`;
+
+/* 判卷时要求 AI 把错误归类到"是不是目标句型的问题"。
+   这条解决的问题:以前一句话里句型用对了、只是某个单词或助词写错,整句判 partial 会
+   把这个句型的复习间隔也砍半,相当于因为一个无关的词就认为"这个句型没掌握好",
+   下次又要重考一遍已经会的句型。现在把错误范围单独拿出来,让排期只对"句型自己的错"负责
+   (具体怎么分流见 applyResult)。 */
+const ERROR_SCOPE_RULE = `错误范围归类(errorScope 字段,必须给):除了整体 verdict,还要判断这次的错误到底出在哪一层——
+- "none": 没有任何错误(verdict 为 correct 时给这个)
+- "pattern": 错误出在目标句型本身(句型没用、用错了形式、接续错、该句型的使用场景/文体用错)
+- "outside": 目标句型本身用得完全正确,错误只出在句型之外的地方(单词选错/写错、与句型无关的助词、时态、拼写、汉字错字等)
+- "both": 句型本身有问题,句型之外也有问题
+判断时请严格一点:只有目标句型的形态和用法完全挑不出毛病,才可以给 "outside"。这个字段只用来决定复习排期,不影响你在 explanation 里正常指出所有问题。`;
+
+/* AI 没给或给了非法值时的兜底:答对就是 none,答错默认按最保守的 "pattern" 处理
+   (宁可照旧缩短这个句型的间隔,也不要因为 AI 漏字段就误判成"跟句型无关"、放过真正的句型问题)。 */
+function normalizeErrorScope(scope, verdict) {
+  if (verdict === "correct") return "none";
+  return scope === "outside" || scope === "both" || scope === "pattern" ? scope : "pattern";
 }
 
 /* 课本例句的逐词标注结果缓存在 localStorage(和判卷/进度数据分开存,不用同步到云端),
@@ -388,10 +450,10 @@ async function gradeCombo(p1, p2, q, answer) {
   const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:句型A ${levelBenchmark(p1.level)},句型B ${levelBenchmark(p2.level)}。判卷标准需分别符合各自句型的难度基准。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})
 【句型A教材解释】${explainText(p1)}
-【句型A易混淆点】${contrastsText(p1)}
+【句型A易混淆点】${contrastsText(p1)}${styleTagText(p1)}
 句型B: ${p2.pattern}(${p2.conn} / ${p2.meaning})
 【句型B教材解释】${explainText(p2)}
-【句型B易混淆点】${contrastsText(p2)}
+【句型B易混淆点】${contrastsText(p2)}${styleTagText(p2)}
 题目(複合作文): ${q.task}
 学生的答案: ${answer}
 
@@ -401,6 +463,8 @@ async function gradeCombo(p1, p2, q, answer) {
 - "wrong": 两个句型基本都没用对,或严重语法错误,或没有作答
 
 请依据上述教材解释判卷。若学习者的句子语法无误,但违反了教材解释中说明的使用场景、文体或语气限制,须明确指出,不可判为完全正确。若踩中易混淆点,请说明与哪个句型混淆了、区别在哪。
+
+${STYLE_CONSISTENCY_RULE}
 
 给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
 
@@ -422,7 +486,7 @@ verdict 是 "correct" 时,breakdown 设为 null。
 async function genListeningSentence(p, avoid, tier) {
   const sys = `あなたは日本語教師です。学習者:JLPT ${levelBenchmark(p.level)}(《大家的日语》${p.level}水平)。词汇和语法必须限定在该难度范围内,句子要自然、适合朗读听力练习。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `请为以下句型新造一句自然的日语例句(不要用课本原句),用于听力练习,学习者只能听、看不到文字。
-句型: ${p.pattern}(${p.conn} / ${p.meaning})
+句型: ${p.pattern}(${p.conn} / ${p.meaning})${styleTagText(p)}
 难度档位(${tier.name}): ${tier.spec}
 其他要求:
 1. 必须包含该句型
@@ -462,7 +526,7 @@ async function genQuestion(p, avoid, forceType) {
   const user = `请围绕以下句型出一道练习题。
 句型: ${p.pattern}
 接续: ${p.conn}
-意思: ${p.meaning}
+意思: ${p.meaning}${styleTagText(p)}
 课本例句: ${p.exJP}
 题目类型: ${type === "translation" ? "翻译题——给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用上述句型" : `造句题——请按以下要求出题:
 1. 场景(中文,25字以内)只能表达一个清晰、单一的意思,不能同时塞入两件不相关的信息(例如不要把"喜欢什么"和"东西放在哪里"混在同一个场景里)
@@ -482,7 +546,7 @@ ${TASK_SEGMENTS_RULE}
    用于"每日复习"这类一次要出好几道题、又不确定固定题型的场景。 */
 async function genQuestionBatch(items) {
   const sys = "あなたは日本語教師です。这批题目里每道题都会单独标注该题句型对应的 JLPT 难度基准(如 N4、N3〜N2),请严格按各自的标注出题,不要用同一个难度套所有题目,更不要把简单句型的题也拉到难句型的水平。出题词汇和语法必须符合各题标注的难度范围。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
-  const list = items.map((it, i) => `第${i + 1}题 — 句型:${it.p.pattern}(${it.p.conn} / ${it.p.meaning}) — 【難易度基準】${levelBenchmark(it.p.level)} — 题型:${it.type === "translation" ? "翻译题" : "造句题"}${personInstruction(it.p)}`).join("\n");
+  const list = items.map((it, i) => `第${i + 1}题 — 句型:${it.p.pattern}(${it.p.conn} / ${it.p.meaning}) — 【難易度基準】${levelBenchmark(it.p.level)} — 题型:${it.type === "translation" ? "翻译题" : "造句题"}${styleTagText(it.p)}${personInstruction(it.p)}`).join("\n");
   const user = `请一次性为下面这 ${items.length} 道题各自出题,每题的句型和题型已经指定好,请严格按顺序对应,不要弄混、不要跳过任何一题、不要合并。
 
 ${list}
@@ -503,7 +567,7 @@ ${list}
    比genQuestionBatch更简单,因为不用在提示词里区分题型 */
 async function genTranslationBatch(patterns) {
   const sys = "あなたは日本語教師です。这批题目里每道题都会单独标注该题句型对应的 JLPT 难度基准(如 N4、N3〜N2),请严格按各自的标注出题,不要用同一个难度套所有题目,更不要把简单句型的题也拉到难句型的水平。出题词汇和语法必须符合各题标注的难度范围。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
-  const list = patterns.map((p, i) => `第${i + 1}题 — 句型:${p.pattern}(${p.conn} / ${p.meaning}) — 【難易度基準】${levelBenchmark(p.level)}${personInstruction(p)}`).join("\n");
+  const list = patterns.map((p, i) => `第${i + 1}题 — 句型:${p.pattern}(${p.conn} / ${p.meaning}) — 【難易度基準】${levelBenchmark(p.level)}${styleTagText(p)}${personInstruction(p)}`).join("\n");
   const user = `请一次性为下面这 ${patterns.length} 个句型各出一道翻译题,顺序必须和句型编号一一对应,不要弄混、不要跳过、不要合并。
 
 ${list}
@@ -611,7 +675,7 @@ async function gradeAnswer(p, q, answer, hintedWords) {
   const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `句型: ${p.pattern}(${p.conn} / ${p.meaning})
 【教材解释】${explainText(p)}
-【易混淆点】${contrastsText(p)}
+【易混淆点】${contrastsText(p)}${styleTagText(p)}
 题目(${q.type === "translation" ? "翻译题" : "造句题"}): ${q.task}
 学生的答案: ${answer}
 ${hintedWords && hintedWords.length ? `学生在做题过程中主动点开查看过读音/释义的生词(说明这些词单纯是词汇量不够,不代表句型没掌握): ${hintedWords.join("、")}` : ""}
@@ -623,6 +687,10 @@ ${hintedWords && hintedWords.length ? `学生在做题过程中主动点开查�
 
 请依据上述教材解释判卷。若学习者的句子语法无误,但违反了教材解释中说明的使用场景、文体或语气限制,须明确指出,不可判为完全正确。若踩中易混淆点,请说明与哪个句型混淆了、区别在哪。
 
+${STYLE_CONSISTENCY_RULE}
+
+${ERROR_SCOPE_RULE}
+
 给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
 ${isComposition ? `
 如果 verdict 不是 "correct"(即 partial 或 wrong),额外给出结构化语法讲解 breakdown,拆解正确答案(reference)的语法构造,帮助学习者理解错在哪、该怎么搭句子:
@@ -632,10 +700,11 @@ ${isComposition ? `
 - modifier: 句子里的修饰关系(谁修饰谁、为什么这样排列);如果句子结构简单没有复杂修饰关系,写"该句结构简单,无复杂修饰关系"
 verdict 是 "correct" 时,breakdown 设为 null。` : ""}
 
-输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,中日混合,120字以内"${isComposition ? ',"breakdown":{"skeleton":"...","verbForm":"...","particleReason":"...","modifier":"..."}或null' : ''}}`;
+输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"errorScope":"none|pattern|outside|both","reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,中日混合,120字以内"${isComposition ? ',"breakdown":{"skeleton":"...","verbForm":"...","particleReason":"...","modifier":"..."}或null' : ''}}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
   if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
+  g.errorScope = normalizeErrorScope(g.errorScope, g.verdict);
   if (!g.breakdown || typeof g.breakdown !== "object") g.breakdown = null;
   return g;
 }
@@ -790,6 +859,8 @@ async function gradeConfusionAnswer(topicName, item, question, answer, stageBenc
 - "partial": 大方向对但有小错误(助词、活用、搭配等)
 - "wrong": 用法明显错误,或没有用上这个知识点该有的结构
 - 同类错误前后判卷标准要一致,不要这次严那次松
+
+${STYLE_CONSISTENCY_RULE}
 
 输出JSON: {"verdict":"correct|partial|wrong","reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,中日混合,120字以内,若存在更优答案请说明为什么优选它"}`;
   const g = await callAI(sys, user);
@@ -1281,6 +1352,10 @@ function AppInner() {
   const recentTasks = useRef({});
   const preGenRef = useRef({}); // 批量出题的结果缓存,key是题目在当前队列里的下标
   const sessionGenRef = useRef(0); // 每次开始新的一组题就递增,防止上一轮延迟返回的批量结果写错地方
+  /* 提前预取的"追加题"清单。必须把清单本身也存下来,不能等到真要追加时再重新挑一遍:
+     作业的最后一题是情景対話,它复盘完可能又往错题本前面插进新的错题,重新挑就会挑出
+     另一批句型,和刚才预取好的题面对不上、白白浪费预取。 */
+  const hwExtraPlanRef = useRef(null);
   const dialogueRecentRef = useRef([]); // 最近几天用过的情景对话场景id,避免连续撞同一个
 
   /* ================= 練習帳(知识辨析/场景对话/书面邮件,自由练习) =================
@@ -1434,7 +1509,7 @@ function AppInner() {
     else if (!freeMode) kind = "srs";
     if (!kind) return; // 自由练习/单题重练,不必断点续做
     const items = queue.map((it) => {
-      if (kind === "homework") return it.hw === "dialogue" ? { hw: "dialogue", sceneId: it.sceneId, fromBacklog: !!it.fromBacklog } : it.sub === "combo" ? { sub: "combo", pid1: it.p1.id, pid2: it.p2.id, mistakeId: it.mistakeId, fromBacklog: !!it.fromBacklog } : { pid: it.p.id, hw: it.hw, mistakeId: it.mistakeId, fromBacklog: !!it.fromBacklog };
+      if (kind === "homework") return it.hw === "dialogue" ? { hw: "dialogue", sceneId: it.sceneId, fromBacklog: !!it.fromBacklog } : it.sub === "combo" ? { sub: "combo", pid1: it.p1.id, pid2: it.p2.id, mistakeId: it.mistakeId, fromBacklog: !!it.fromBacklog } : { pid: it.p.id, hw: it.hw, mistakeId: it.mistakeId, fromBacklog: !!it.fromBacklog, isExtra: !!it.isExtra };
       if (kind === "weekly") return it.sub === "combo" ? { sub: "combo", pid1: it.p1.id, pid2: it.p2.id, mistakeId: it.mistakeId } : { sub: "weak", pid: it.p.id, mistakeId: it.mistakeId };
       return { pid: it.p.id, isNew: it.isNew };
     });
@@ -1683,6 +1758,7 @@ function AppInner() {
       dialogueItem,
     ];
     preGenRef.current = {};
+    hwExtraPlanRef.current = null; // 新的一批作业,上一批没用掉的追加计划作废
     setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(true); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0, backlogOk: 0, backlogPartial: 0, backlogWrong: 0 });
     setView("session");
@@ -1724,19 +1800,32 @@ function AppInner() {
   const startWeekly = () => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     if (comboPool.length < 2) return;
+    /* 抽两个句型凑一道複合作文。除了不能抽到同一个句型,还要避开"文体标签冲突"的组合
+       (比如一个只能用敬体、另一个只能用简体)——这种组合本身就没法写进同一句话,
+       让 AI 事后去判断"这两个能不能搭"既不可靠又费一次调用,不如抽的时候就避开。
+       重试若干次仍找不到兼容的对子(池子太小或标签太挤)就接受现状,只保证"不是同一个句型",
+       毕竟出不了题比文体不搭更糟。 */
     const pickPair = () => {
       const a = comboPool[Math.floor(Math.random() * comboPool.length)];
       let b = comboPool[Math.floor(Math.random() * comboPool.length)];
       let tries = 0;
-      while (b.id === a.id && tries < 10) { b = comboPool[Math.floor(Math.random() * comboPool.length)]; tries++; }
+      while ((b.id === a.id || !styleTagsCompatible(a, b)) && tries < 20) {
+        b = comboPool[Math.floor(Math.random() * comboPool.length)];
+        tries++;
+      }
       return [a, b];
     };
     const combos = Array.from({ length: 5 }, pickPair);
     const cutoff = recentCutoff;
     const counts = {};
-    // 練習帳来的错题没有 pid,不参与"弱点句型"统计(它们本来就不挂钩具体句型)
-    db.mistakes.forEach((m) => { if (m.pid !== undefined && m.date >= cutoff) counts[m.pid] = (counts[m.pid] || 0) + 1; });
-    let weakPids = Object.keys(counts).map(Number).sort((a, b) => counts[b] - counts[a]).slice(0, 3);
+    // 練習帳来的错题没有 pid,不参与"弱点句型"统计(它们本来就不挂钩具体句型);
+    // 非句型类错误(nonPattern,句型用对了只是词写错了)也不算这个句型的弱点,
+    // 否则"哪些句型薄弱"的排名会被无关的单词错误带偏
+    db.mistakes.forEach((m) => { if (m.pid !== undefined && !m.nonPattern && m.date >= cutoff) counts[m.pid] = (counts[m.pid] || 0) + 1; });
+    // 弱点重测题量随本周错题量浮动:错题攒得多说明这周欠的债多,多测2道;
+    // 少的时候就保持3道,不用凑数(参照 hsrs 让当天题量贴合当前状态的思路,规则从简)
+    const weakSlots = Object.keys(counts).length >= WEEKLY_WEAK_BOOST_THRESHOLD ? 5 : 3;
+    let weakPids = Object.keys(counts).map(Number).sort((a, b) => counts[b] - counts[a]).slice(0, weakSlots);
     if (weakPids.length === 0) {
       weakPids = [...learnedPatterns].sort((a, b) => db.prog[a.id].lv - db.prog[b.id].lv).slice(0, 3).map((p) => p.id);
     }
@@ -1809,7 +1898,7 @@ function AppInner() {
     const s = db.session;
     if (!s) return;
     let items;
-    if (s.kind === "homework") items = s.items.map((d) => d.hw === "dialogue" ? { hw: "dialogue", sceneId: d.sceneId, fromBacklog: !!d.fromBacklog } : d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId, fromBacklog: !!d.fromBacklog } : { p: PATTERNS[d.pid], hw: d.hw, mistakeId: d.mistakeId, fromBacklog: !!d.fromBacklog });
+    if (s.kind === "homework") items = s.items.map((d) => d.hw === "dialogue" ? { hw: "dialogue", sceneId: d.sceneId, fromBacklog: !!d.fromBacklog } : d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId, fromBacklog: !!d.fromBacklog } : { p: PATTERNS[d.pid], hw: d.hw, mistakeId: d.mistakeId, fromBacklog: !!d.fromBacklog, isExtra: !!d.isExtra });
     else if (s.kind === "weekly") items = s.items.map((d) => d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId } : { sub: "weak", p: PATTERNS[d.pid], mistakeId: d.mistakeId });
     else items = s.items.map((d) => ({ p: PATTERNS[d.pid], isNew: d.isNew }));
     setQueue(items); setIdx(s.idx); setSessionStats(s.stats || { ok: 0, partial: 0, wrong: 0 });
@@ -2016,7 +2105,9 @@ function AppInner() {
       ? gradeListening(item.p, q, "(学生表示没听懂,请给出参考答案和讲解)")
       : gradeAnswer(item.p, q, "(学生表示不会写,请给出参考答案和该句型的关键讲解)");
     gradeCall.then((g) => {
-      const r = { ...g, verdict: "wrong" };
+      // 主动"不会写/没听懂"就是句型本身没掌握,errorScope 强制按句型问题算,
+      // 不能让 AI 判成"只是句型之外的小错"从而照常拉长复习间隔
+      const r = { ...g, verdict: "wrong", errorScope: "pattern" };
       setResult(r); applyResult(item, r); setPhase("result");
     }).catch((e) => { setErrMsg("获取答案失败:" + (e && e.message ? e.message : String(e))); setPhase("error"); });
   };
@@ -2040,9 +2131,14 @@ function AppInner() {
         nd.stats.ok += 1;
         if (isListening) nd.listenStats.ok += 1;
       }
+      /* errorScope === "outside":目标句型本身用对了,错的只是句型之外的东西
+         (单词写错、无关的助词、时态等)。这种情况不该让这个句型的复习间隔跟着缩短——
+         否则会因为一个无关的词就认为"这个句型没掌握",下次又要重考一遍已经会的句型。
+         错题照样进错题本(那个词确实要练),但标记成非句型类错误,排期按答对处理。 */
+      const outsideOnly = g.errorScope === "outside" && g.verdict !== "correct";
       if (g.verdict !== "correct" || needsReview) {
         // 答错/需要复核:连续答对计数清零,刷新这条错题的最新内容
-        const base = { task: q.task, type: q.type, ans: answer.trim() || "(未作答)", ref: g.reference, exp: g.explanation, breakdown: g.breakdown || null, date: t, needsReview, streak: 0 };
+        const base = { task: q.task, type: q.type, ans: answer.trim() || "(未作答)", ref: g.reference, exp: g.explanation, breakdown: g.breakdown || null, date: t, needsReview, streak: 0, nonPattern: outsideOnly };
         const idPart = isCombo ? { pid: item.p1.id, pid2: item.p2.id } : { pid: item.p.id };
         if (item.mistakeId) {
           // 重练了还是不对/仍需复核:刷新原来那条记录,而不是再叠加一条新的
@@ -2070,7 +2166,8 @@ function AppInner() {
         const cur = existed ? { ...existed } : { lv: 0, ok: 0, ng: 0, learnedDate: t };
         let { lv } = cur;
         let due;
-        if (g.verdict === "correct") { due = addDays(t, INTERVALS[Math.min(lv, INTERVALS.length - 1)]); lv = Math.min(lv + 1, INTERVALS.length); cur.ok++; }
+        // outsideOnly:句型本身没问题,排期按答对走(错的那个词已经单独记进错题本了)
+        if (g.verdict === "correct" || outsideOnly) { due = addDays(t, INTERVALS[Math.min(lv, INTERVALS.length - 1)]); lv = Math.min(lv + 1, INTERVALS.length); cur.ok++; }
         else if (g.verdict === "partial") { due = addDays(t, Math.max(1, Math.round(INTERVALS[Math.min(lv, INTERVALS.length - 1)] / 2))); cur.ok++; }
         else { lv = Math.max(0, lv - 2); due = addDays(t, 1); cur.ng++; }
         nd.prog[item.p.id] = { ...cur, lv, due };
@@ -2083,6 +2180,41 @@ function AppInner() {
     });
   };
 
+  /* ---- 每日作业的动态追加(借鉴 hsrs:让当天题量贴合当前状态,而不是固定数字) ----
+     做完固定题量后,如果这次做得顺(正确率够高)而且错题本里还有本次没练到的存量,
+     就追加一两道;做得吃力时绝不追加,避免越做越挫败。
+     有积压并入的批次一律不追加——积压本身已经是额外负担,再加题就是雪上加霜,
+     而且和"有积压时新增减半"这条规则直接矛盾。 */
+  /* 追加题从错题本里挑,但要排除本次已经练过的句型——按 pid 排除而不是只按错题 id:
+     否则最后一题刚答错、这条新错题立刻又被抽成追加题,等于让人把刚看过答案的同一道题
+     再抄一遍,没有意义。 */
+  const hwExtraCandidates = () => {
+    const usedPids = new Set();
+    queue.forEach((it) => {
+      if (it.p) usedPids.add(it.p.id);
+      if (it.p1) { usedPids.add(it.p1.id); usedPids.add(it.p2.id); }
+    });
+    return db.mistakes.filter((m) => m.pid !== undefined && !usedPids.has(m.pid));
+  };
+  const shouldAppendHwExtra = () => {
+    if (!homeworkMode) return false;
+    // 已经追加过一轮就不再追加。用"队列里有没有追加题"判断而不是用一个 ref,
+    // 这样中断后重新进来续做也不会因为 ref 被重置而又追加一轮
+    if (queue.some((it) => it.isExtra)) return false;
+    if (queue.some((it) => it.fromBacklog)) return false;
+    const done = sessionStats.ok + sessionStats.partial + sessionStats.wrong;
+    if (done === 0) return false;
+    // 只把完全答对的算进正确率:partial 说明还有小错,不该被当成"做得顺"
+    if (sessionStats.ok / done < HW_EXTRA_ACCURACY) return false;
+    return hwExtraCandidates().length > 0;
+  };
+  const buildHwExtras = () => hwExtraCandidates()
+    .slice(0, HW_EXTRA_MAX)
+    .map((m) => ({ p: PATTERNS[m.pid], hw: "trans", mistakeId: m.id, isExtra: true }));
+  /* 最后一题的按钮文案:如果按下去其实还会追加题目,就不能写"完成",不然点了以后
+     又冒出新题会显得莫名其妙 */
+  const nextBtnLabel = () => (idx + 1 < queue.length ? "次へ →" : shouldAppendHwExtra() ? "追加問題へ →" : "完成今日学習");
+
   const next = () => {
     if (idx + 1 < queue.length) {
       setIdx(idx + 1);
@@ -2091,6 +2223,21 @@ function AppInner() {
       else if (homeworkMode) beginHomeworkItem(nextItem, idx + 1);
       else if (listenMode) beginListenItem(nextItem);
       else beginItem(nextItem, idx + 1);
+      // 刚翻到最后一题:如果这时候看起来会触发追加,就提前把追加题的题面在后台取好,
+      // 等真的追加时直接命中缓存、不用干等。没取到也不影响(beginHomeworkItem 会退回现场请求)
+      if (idx + 2 === queue.length && shouldAppendHwExtra()) {
+        const extras = buildHwExtras();
+        hwExtraPlanRef.current = extras;
+        runPrefetch(extras.map((it, i) => ({ idx: queue.length + i, p: it.p })), (chunk) => genTranslationBatch(chunk.map((c) => c.p)));
+      }
+    } else if (shouldAppendHwExtra()) {
+      // 优先用预取时定下的那份清单(题面已经在缓存里),没有才现挑
+      const extras = hwExtraPlanRef.current && hwExtraPlanRef.current.length ? hwExtraPlanRef.current : buildHwExtras();
+      hwExtraPlanRef.current = null;
+      const nextIdx = queue.length;
+      setQueue([...queue, ...extras]);
+      setIdx(nextIdx);
+      beginHomeworkItem(extras[0], nextIdx);
     } else {
       setDb((d) => {
         const nd = { ...d, meta: { ...d.meta }, session: null };
@@ -2740,7 +2887,7 @@ function AppInner() {
           {phase !== "done" && (
             <div className="pattern-head">
               <span className={"tag " + (weeklyMode ? "tag-wk" : homeworkMode ? "tag-hw" : listenMode ? "tag-ls" : cur.isNew ? "tag-new" : "tag-rev")}>
-                {weeklyMode ? (cur.sub === "combo" ? "週間 · 複合作文" : "週間 · 弱点再測") : homeworkMode ? (cur.hw === "dialogue" ? "作業 · 情景対話" : cur.sub === "combo" ? "作業 · 複合作文" : cur.hw === "comp" ? "作業 · 造句" : "作業 · 翻訳") : listenMode ? "聴解練習" : freeMode ? "自由练习" : cur.isNew ? "新句型" : "复习"}
+                {weeklyMode ? (cur.sub === "combo" ? "週間 · 複合作文" : "週間 · 弱点再測") : homeworkMode ? (cur.isExtra ? "作業 · 追加問題" : cur.hw === "dialogue" ? "作業 · 情景対話" : cur.sub === "combo" ? "作業 · 複合作文" : cur.hw === "comp" ? "作業 · 造句" : "作業 · 翻訳") : listenMode ? "聴解練習" : freeMode ? "自由练习" : cur.isNew ? "新句型" : "复习"}
               </span>
               {cur.hw === "dialogue" && dialogueScene ? (
                 <span className="pattern-name serif">{dialogueScene.userRole} ↔ {dialogueScene.aiRole}</span>
@@ -2849,7 +2996,7 @@ function AppInner() {
                   <div className="exp-block"><label>本场对话</label><div>{dialogueReview.summary}</div></div>
                   <div className="exp-block"><label>可以改进的地方</label><div>{dialogueReview.issues}</div></div>
                   {dialogueReview.suggestions && <div className="exp-block"><label>更地道的说法</label><div>{dialogueReview.suggestions}</div></div>}
-                  <button className="btn-main" onClick={next}>{idx + 1 < queue.length ? "次へ →" : "完成今日学習"}</button>
+                  <button className="btn-main" onClick={next}>{nextBtnLabel()}</button>
                 </div>
               )}
             </section>
@@ -2901,12 +3048,15 @@ function AppInner() {
                   {result.verdict === "correct" && result.selfCheck === false && (
                     <div className="review-flag">⚠️ 建议复核 · AI判定与讲解有出入,已留在错题本</div>
                   )}
+                  {result.verdict !== "correct" && result.errorScope === "outside" && (
+                    <div className="scope-flag">✓ 句型本身用对了 · 错的是句型之外的词/助词,这个句型的复习间隔照常拉长,错的地方单独记进错题本</div>
+                  )}
                   {answer.trim() && <div className="your-ans"><label>你的答案</label><div className="serif">{answer}</div></div>}
                   <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{furiganaify(result.reference)}</div></div>
                   <div className="exp-block"><label>先生の講評</label><div>{result.explanation}</div></div>
                   <BreakdownBlock breakdown={result.breakdown} />
                   <FollowUpAsk key={idx} contextSummary={buildFollowUpContext(cur, q, answer, result)} />
-                  <button className="btn-main" onClick={next}>{idx + 1 < queue.length ? "次へ →" : "完成今日学習"}</button>
+                  <button className="btn-main" onClick={next}>{nextBtnLabel()}</button>
                 </div>
               )}
             </section>
@@ -2932,6 +3082,9 @@ function AppInner() {
                   </div>
                 );
               })()}
+              {homeworkMode && queue.some((it) => it.isExtra) && (
+                <div className="done-extra-note">今天做得不错,额外追加了 {queue.filter((it) => it.isExtra).length} 道错题本里的题</div>
+              )}
               <p className="done-note">{weeklyMode ? "本周综合挑战已完成,做错的组合题/弱点题已收入錯題本。" : homeworkMode ? "今日作业已完成,做对的错题已自动清除。" : listenMode ? "聴解練習已完成,没听懂的已收入錯題本。" : "答对的句型间隔已拉长,答错的明天会再次出现。"}</p>
               <button className="btn-main" onClick={() => setView("home")}>返回首页</button>
             </section>
@@ -3395,6 +3548,7 @@ function AppInner() {
                   <span className="mk-head-left">
                     <span className="serif">{isConfusion ? m.label : <>{p.pattern}{p2 && <> ＋ {p2.pattern}</>}</>}</span>
                     {m.needsReview && <span className="badge badge-review">⚠️ 建议复核</span>}
+                    {m.nonPattern && <span className="badge badge-nonpattern">句型没问题 · 词/助词错</span>}
                     {m.streak > 0 && <span className="badge badge-streak">连续答对 {m.streak}/{MISTAKE_CLEAR_STREAK}</span>}
                   </span>
                   <span className="mk-date">{m.date}</span>
@@ -3648,6 +3802,8 @@ function Style() {
 .card .btn-main{margin-top:16px}
 .review-flag{margin:8px 0 4px;padding:8px 12px;background:var(--tint-red2-bg);border:1px solid var(--tint-red2-border);border-radius:10px;
   font-size:12px;color:var(--shu);line-height:1.6}
+.scope-flag{margin:8px 0 4px;padding:8px 12px;background:var(--tint-green-bg);border:1px solid var(--tint-green-border);border-radius:10px;
+  font-size:12px;color:var(--tint-green-fg);line-height:1.6}
 
 .followup-block{margin-top:14px}
 .followup-toggle{background:none;border:1px dashed var(--line);border-radius:10px;padding:8px 12px;font-size:12px;color:var(--ai);cursor:pointer;width:100%;text-align:left}
@@ -3680,6 +3836,7 @@ function Style() {
 .d-ok{color:var(--shu);font-weight:700}.d-pt{color:var(--stat-partial)}.d-ng{color:var(--ink-soft)}
 .done-breakdown{background:var(--tint-panel);border-radius:10px;padding:10px 14px;margin:0 0 14px;font-size:13px;color:var(--ink-soft);text-align:left}
 .done-breakdown-row{line-height:1.8}
+.done-extra-note{font-size:12px;color:var(--tint-green-fg);background:var(--tint-green-bg);border-radius:10px;padding:8px 12px;margin-bottom:12px}
 .done-note{font-size:13px;color:var(--ink-soft);margin-bottom:8px}
 
 .lesson-block{margin-bottom:8px}
@@ -3704,6 +3861,7 @@ function Style() {
 .mk-head-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .badge-review{background:var(--tint-red2-bg);color:var(--shu)}
 .badge-streak{background:var(--tint-green-bg);color:var(--tint-green-fg)}
+.badge-nonpattern{background:var(--tint-brown-bg);color:var(--tint-brown-fg)}
 .mk-date{font-size:11px;color:var(--ink-soft);font-weight:400;white-space:nowrap}
 .mk-task{font-size:14px;margin:8px 0}
 .mk-line{margin:6px 0;font-size:14px}

@@ -7,6 +7,7 @@ export const PATTERNS_CHUKYU = [
   {
     "lesson": 51,
     "level": "中級",
+    "style": "敬体",
     "pattern": "〜てもらえませんか・〜ていただけませんか・〜てもらえないでしょうか・〜ていただけないでしょうか",
     "conn": "動詞て形 + もらえませんか／いただけませんか（更客气：もらえないでしょうか／いただけないでしょうか）",
     "meaning": "能不能请你…?(委婉请求对方帮忙，比てください更客气)",
@@ -37,6 +38,7 @@ export const PATTERNS_CHUKYU = [
   {
     "lesson": 51,
     "level": "中級",
+    "formality": "书面语",
     "pattern": "〜のようだ・〜のような〜・〜のように…",
     "conn": "名詞 + のようだ／のような + 名詞／のように + 形容詞・動詞",
     "meaning": "像…一样(比喻)",
@@ -279,6 +281,7 @@ export const PATTERNS_CHUKYU = [
   {
     "lesson": 52,
     "level": "中級",
+    "formality": "口语",
     "pattern": "〜というのは〜のことだ・〜というのは…ということだ",
     "conn": "名詞 + というのは + 名詞 + のことだ／普通形 + ということだ",
     "meaning": "所谓…就是…(解释词语的含义)",
@@ -413,6 +416,7 @@ export const PATTERNS_CHUKYU = [
   {
     "lesson": 52,
     "level": "中級",
+    "formality": "口语",
     "pattern": "〜みたいだ・〜みたいな〜・〜みたいに…",
     "conn": "名詞・普通形 + みたいだ／みたいな + 名詞／みたいに + 形容詞・動詞",
     "meaning": "像…一样(口语，比「ようだ」更随意)",

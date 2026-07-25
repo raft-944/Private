@@ -117,6 +117,13 @@ const HW_EXTRA_ACCURACY = 0.8;
    给到 2 道是"奖励做得好"和"别让人等太久"之间的折中 */
 const HW_EXTRA_MAX = 2;
 
+/* 每做满这么多题,停下来看一段讲评。
+   判卷是异步的(提交完立刻进下一题),但"全部做完才统一给讲评"在今日学习这种几十道题的
+   场次里就变成了:做到第30题才知道第1题错在哪,中间的错误一路重复,讲评也没人看得下去。
+   分段的取舍点在于:一组太小则频繁打断、判卷等待暴露得多(刚提交的那题必然还在飞);
+   一组太大则反馈太迟。5 题一组时,看第1题讲评的时间足够第5题判完,基本感觉不到等待。 */
+const REVIEW_CHUNK = 5;
+
 /* 错题要连续答对这么多次才从错题本移除,而不是蒙对一次就当作掌握了——每条错题的
    streak 字段记录"目前连续答对了几次",答错/被判需要复核会清零,只有连续攒够这个
    数才真正移除。所有错题清除逻辑(SRS的重练、練習帳的重练)都共用这一个阈值。 */
@@ -1331,7 +1338,8 @@ function AppInner() {
   /* --- 学习会话状态 --- */
   const [queue, setQueue] = useState([]);
   const [idx, setIdx] = useState(0);
-  const [phase, setPhase] = useState("idle"); // intro | loadingQ | question | grading | result | error | done
+  // idle | intro | loadingQ | question | dialogue | error | chunk(每 REVIEW_CHUNK 题的分段讲评) | waiting(队尾等判卷) | done
+  const [phase, setPhase] = useState("idle");
   const [q, setQ] = useState(null);
   const [answer, setAnswer] = useState("");
 
@@ -1439,6 +1447,8 @@ function AppInner() {
   /* 每道题的判卷状态,按题号索引:{ [题号]: { status:"grading"|"done"|"error", ctx, result?, error? } }
      判卷改成异步之后,提交完就进下一题,结果陆续回来存在这里,最后统一展示。 */
   const [gradeStates, setGradeStates] = useState({});
+  /* 结果页默认只展示最后一组讲评,这个开关用来回看本场前面几组 */
+  const [showAllResults, setShowAllResults] = useState(false);
   const [errMsg, setErrMsg] = useState("");
   const [openLesson, setOpenLesson] = useState(null);
   const actionsRef = useRef({});
@@ -1609,7 +1619,8 @@ function AppInner() {
     });
     // date 记录这份快照是哪天生成的:今日学习/每日作业跨天后要判定失效,不能让旧快照
     // 冒充"今天的任务全貌"(旧快照更小,会把真实积压量吃掉,详见 startSession/startHomework 里的处理)
-    setDb((d) => ({ ...d, session: { kind, items, idx, stats: sessionStats, date: t } }));
+    // 分段讲评页上第 idx 题已经答完了,快照要记 idx+1,否则中断后续做会让这题重做一遍
+    setDb((d) => ({ ...d, session: { kind, items, idx: phase === "chunk" ? idx + 1 : idx, stats: sessionStats, date: t } }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queue, idx, sessionStats, phase, view, weeklyMode, weeklyFormal, homeworkMode, listenMode, freeMode]);
 
@@ -1678,6 +1689,14 @@ function AppInner() {
     return () => window.removeEventListener("keydown", onKey);
   }, [view, phase]);
 
+  /* --- 进入分段讲评页/结果页时回到顶部 ---
+     上一屏可能正停在答题框附近,直接换成一长串讲评列表的话,视口会落在中间某道题上,
+     看起来像"漏了前面几题"。
+     (和其它 effect 一样,必须写在 `if (!db) return` 之前——hooks 数量不能变) */
+  useEffect(() => {
+    if (phase === "chunk" || phase === "done") window.scrollTo(0, 0);
+  }, [phase]);
+
   const confirmFirstUse = () => {
     setDb({ ...DEFAULT_DB });
     setNeedsFirstUseConfirm(false);
@@ -1732,6 +1751,7 @@ function AppInner() {
       if (weeklyFormal) nd.meta.weekKey = mondayOf(today());
       return nd;
     });
+    setShowAllResults(false); // 每场结果页都从"只看最后一组"开始
     setPhase("done");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [db, phase, gradeStates]);
@@ -2442,25 +2462,44 @@ function AppInner() {
   const buildHwExtras = () => hwExtraCandidates()
     .slice(0, HW_EXTRA_MAX)
     .map((m) => ({ p: PATTERNS[m.pid], hw: "trans", mistakeId: m.id, isExtra: true }));
+  /* 刚答完第 idx 题之后,是不是该停下来看这一组的讲评。
+     队尾不算——最后一组走的是 waiting → done,讲评在结果页上给。 */
+  const willBreakForChunk = () => {
+    if ((idx + 1) % REVIEW_CHUNK !== 0 || idx + 1 >= queue.length) return false;
+    // 这一组一条判卷记录都没有就别停(理论上只可能整组都是情景对话——
+    // 对话的讲评是在对话页上当场给的,不走 gradeStates,停下来会是一张空白页)
+    const from = Math.floor(idx / REVIEW_CHUNK) * REVIEW_CHUNK;
+    return Object.keys(gradeStates).some((k) => Number(k) >= from && Number(k) <= idx);
+  };
   /* 最后一题的按钮文案:如果按下去其实还会追加题目,就不能写"完成",不然点了以后
-     又冒出新题会显得莫名其妙 */
-  const nextBtnLabel = () => (idx + 1 < queue.length ? "次へ →" : shouldAppendHwExtra() ? "追加問題へ →" : "完成今日学習");
+     又冒出新题会显得莫名其妙;按下去是去看讲评时同理,要说清楚 */
+  const nextBtnLabel = () => (willBreakForChunk() ? "看这组讲评 →" : idx + 1 < queue.length ? "次へ →" : shouldAppendHwExtra() ? "追加問題へ →" : "完成今日学習");
+
+  /* 真的翻到第 nextIdx 题(不再判断该不该插讲评,那是 next 的事) */
+  const advanceTo = (nextIdx) => {
+    setIdx(nextIdx);
+    const nextItem = queue[nextIdx];
+    if (weeklyMode) beginWeeklyItem(nextItem);
+    else if (homeworkMode) beginHomeworkItem(nextItem, nextIdx);
+    else if (listenMode) beginListenItem(nextItem);
+    else beginItem(nextItem, nextIdx);
+    // 刚翻到最后一题:如果这时候看起来会触发追加,就提前把追加题的题面在后台取好,
+    // 等真的追加时直接命中缓存、不用干等。没取到也不影响(beginHomeworkItem 会退回现场请求)
+    if (nextIdx + 1 === queue.length && shouldAppendHwExtra()) {
+      const extras = buildHwExtras();
+      hwExtraPlanRef.current = extras;
+      runPrefetch(extras.map((it, i) => ({ idx: queue.length + i, p: it.p })), (chunk) => genTranslationBatch(chunk.map((c) => c.p)));
+    }
+  };
+
+  /* 看完一组讲评,继续做后面的题 */
+  const continueChunk = () => advanceTo(idx + 1);
 
   const next = () => {
     if (idx + 1 < queue.length) {
-      setIdx(idx + 1);
-      const nextItem = queue[idx + 1];
-      if (weeklyMode) beginWeeklyItem(nextItem);
-      else if (homeworkMode) beginHomeworkItem(nextItem, idx + 1);
-      else if (listenMode) beginListenItem(nextItem);
-      else beginItem(nextItem, idx + 1);
-      // 刚翻到最后一题:如果这时候看起来会触发追加,就提前把追加题的题面在后台取好,
-      // 等真的追加时直接命中缓存、不用干等。没取到也不影响(beginHomeworkItem 会退回现场请求)
-      if (idx + 2 === queue.length && shouldAppendHwExtra()) {
-        const extras = buildHwExtras();
-        hwExtraPlanRef.current = extras;
-        runPrefetch(extras.map((it, i) => ({ idx: queue.length + i, p: it.p })), (chunk) => genTranslationBatch(chunk.map((c) => c.p)));
-      }
+      // 做满一组就先去看讲评,不直接翻下一题
+      if (willBreakForChunk()) { setPhase("chunk"); return; }
+      advanceTo(idx + 1);
     } else if (shouldAppendHwExtra()) {
       // 优先用预取时定下的那份清单(题面已经在缓存里),没有才现挑
       const extras = hwExtraPlanRef.current && hwExtraPlanRef.current.length ? hwExtraPlanRef.current : buildHwExtras();
@@ -2907,6 +2946,63 @@ function AppInner() {
   };
 
   /* ================= 渲染 ================= */
+
+  /* 单道题的讲评块。分段讲评页(phase==="chunk")和最后的结果页都用它,
+     所以抽出来——两份拷贝迟早会漂移(上一版就是因为只改了一处才出现讲评样式不一致)。 */
+  const renderGradeItem = (gi) => {
+    const st = gradeStates[gi];
+    if (!st) return null;
+    const c = st.ctx;
+    if (st.status === "error") {
+      return (
+        <div key={gi} className="result-item">
+          <div className="result-item-head">第 {gi + 1} 题</div>
+          <div className="cf-err">判卷失败:{st.error}</div>
+          <button className="btn-mini" onClick={() => retryGrade(gi)}>重新判这道题</button>
+        </div>
+      );
+    }
+    if (st.status !== "done") {
+      return (
+        <div key={gi} className="result-item">
+          <div className="result-item-head">第 {gi + 1} 题</div>
+          <div className="followup-loading">判卷中…</div>
+        </div>
+      );
+    }
+    const r = st.result;
+    return (
+      <div key={gi} className="result-item">
+        <div className="result-item-head">
+          第 {gi + 1} 题
+          <span className={"result-item-verdict rv-" + r.verdict}>
+            {r.verdict === "correct" ? "◎ 正解" : r.verdict === "partial" ? "△ 接近" : "✗ 再来"}
+          </span>
+        </div>
+        <div className="result-item-q serif">{c.isListening ? "🎧 " + (c.q.jp || "") : c.q.task}</div>
+        {r.verdict === "correct" && r.selfCheck === false && (
+          <div className="review-flag">⚠️ 建议复核 · AI判定与讲解有出入,已留在错题本</div>
+        )}
+        {r.verdict !== "correct" && r.errorScope === "outside" && (
+          <div className="scope-flag">✓ 句型本身用对了 · 错的是句型之外的词/助词,这个句型的复习间隔照常拉长,错的地方单独记进错题本</div>
+        )}
+        {c.answer && <div className="your-ans"><label>你的答案</label><div className="serif">{c.answer}</div></div>}
+        <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{furiganaify(r.reference)}</div></div>
+        <div className="exp-block"><label>先生の講評</label><div>{r.explanation}</div></div>
+        <BreakdownBlock breakdown={r.breakdown} />
+        <FollowUpAsk key={gi} contextSummary={buildFollowUpContext(c.item, c.q, c.answer, r)} />
+      </div>
+    );
+  };
+
+  /* 讲评分组:第 gi 题属于第 Math.floor(gi / REVIEW_CHUNK) 组。
+     用 idx 直接算而不另存 state,免得两者不同步。 */
+  const chunkFrom = Math.floor(idx / REVIEW_CHUNK) * REVIEW_CHUNK;
+  /* 结果页只展示最后一组(前面的组在做题过程中已经逐组看过了),
+     想回看全部有"展开本次全部讲评"的开关 */
+  const lastChunkFrom = queue.length ? Math.floor((queue.length - 1) / REVIEW_CHUNK) * REVIEW_CHUNK : 0;
+  const gradedIdxInRange = (from, to) =>
+    Object.keys(gradeStates).map(Number).filter((gi) => gi >= from && gi <= to).sort((a, b) => a - b);
   const cur = queue[idx];
   actionsRef.current = { cur, next, retry, loadQuestion };
   const lessons = [...new Set(PATTERNS.map((p) => p.lesson))];
@@ -3133,13 +3229,18 @@ function AppInner() {
             </div>
           )}
 
-          {/* 提交完就进下一题了,这里让你看到后台正在判几题——不然会以为提交没生效 */}
-          {phase !== "done" && phase !== "waiting" && (() => {
+          {/* 提交完就进下一题了,这里让你看到后台正在判几题——不然会以为提交没生效。
+              顺手说明还差几题就能看到这一组的讲评,不然"要等到什么时候"心里没数 */}
+          {phase !== "done" && phase !== "waiting" && phase !== "chunk" && (() => {
             const g = Object.values(gradeStates).filter((st) => st.status === "grading").length;
-            return g > 0 ? <div className="bg-grading">⏳ {g} 题正在后台判卷,做完最后一题会一起给出讲评</div> : null;
+            if (!g) return null;
+            // 本组还剩几题(含当前这题):最后一组可能不满 REVIEW_CHUNK,用队列长度兜一下
+            const left = Math.min(REVIEW_CHUNK - (idx % REVIEW_CHUNK), queue.length - idx);
+            return <div className="bg-grading">⏳ {g} 题正在后台判卷 · 本组还剩 {left} 题,做完一起给出讲评</div>;
           })()}
 
-          {phase !== "done" && (
+          {/* 分段讲评页/等判卷页展示的是一整组题,顶上再挂"当前句型"就对不上了 */}
+          {phase !== "done" && phase !== "waiting" && phase !== "chunk" && (
             <div className="pattern-head">
               <span className={"tag " + (weeklyMode ? "tag-wk" : homeworkMode ? "tag-hw" : listenMode ? "tag-ls" : cur.isNew ? "tag-new" : "tag-rev")}>
                 {weeklyMode ? (cur.sub === "combo" ? "週間 · 複合作文" : "週間 · 弱点再測") : homeworkMode ? (cur.isExtra ? "作業 · 追加問題" : cur.hw === "dialogue" ? "作業 · 情景対話" : cur.sub === "combo" ? "作業 · 複合作文" : cur.hw === "comp" ? "作業 · 造句" : "作業 · 翻訳") : listenMode ? "聴解練習" : freeMode ? "自由练习" : cur.isNew ? "新句型" : "复习"}
@@ -3299,6 +3400,26 @@ function AppInner() {
             </section>
           )}
 
+          {/* 分段讲评:每做满 REVIEW_CHUNK 题停一次。
+              刚提交的那题大概率还在判卷,这里不拦着——列表里那条会显示"判卷中…"并在结果
+              回来时自己填上,你从第一题往下读的这段时间刚好够它跑完。 */}
+          {phase === "chunk" && (() => {
+            const keys = gradedIdxInRange(chunkFrom, idx);
+            const pending = keys.filter((gi) => gradeStates[gi].status === "grading").length;
+            return (
+              <section className="card">
+                <div className="results-head">
+                  第 {chunkFrom + 1}–{idx + 1} 题讲评
+                  {pending > 0 && <span className="results-pending"> · {pending} 题还在判卷中,结果会自己填上</span>}
+                </div>
+                {keys.map(renderGradeItem)}
+                <button className="btn-main" onClick={continueChunk}>
+                  继续做后面 {queue.length - idx - 1} 题 →
+                </button>
+              </section>
+            );
+          })()}
+
           {phase === "waiting" && (
             <section className="card done-card">
               <div className="done-title serif">採点中…</div>
@@ -3340,58 +3461,27 @@ function AppInner() {
             </section>
           )}
 
-          {/* 判卷结果统一在最后展示。判卷是你做题时在后台并行跑的,所以中间不用等;
-              这里按题号顺序把每道题的讲评列出来,每条都能单独追问。 */}
-          {phase === "done" && Object.keys(gradeStates).length > 0 && (
-            <section className="card">
-              <div className="results-head">全部讲评({Object.keys(gradeStates).length} 题)</div>
-              {Object.keys(gradeStates).map(Number).sort((a, b) => a - b).map((gi) => {
-                const st = gradeStates[gi];
-                const c = st.ctx;
-                if (st.status === "error") {
-                  return (
-                    <div key={gi} className="result-item">
-                      <div className="result-item-head">第 {gi + 1} 题</div>
-                      <div className="cf-err">判卷失败:{st.error}</div>
-                      <button className="btn-mini" onClick={() => retryGrade(gi)}>重新判这道题</button>
-                    </div>
-                  );
-                }
-                if (st.status !== "done") {
-                  return (
-                    <div key={gi} className="result-item">
-                      <div className="result-item-head">第 {gi + 1} 题</div>
-                      <div className="followup-loading">判卷中…</div>
-                    </div>
-                  );
-                }
-                const r = st.result;
-                return (
-                  <div key={gi} className="result-item">
-                    <div className="result-item-head">
-                      第 {gi + 1} 题
-                      <span className={"result-item-verdict rv-" + r.verdict}>
-                        {r.verdict === "correct" ? "◎ 正解" : r.verdict === "partial" ? "△ 接近" : "✗ 再来"}
-                      </span>
-                    </div>
-                    <div className="result-item-q serif">{c.isListening ? "🎧 " + (c.q.jp || "") : c.q.task}</div>
-                    {r.verdict === "correct" && r.selfCheck === false && (
-                      <div className="review-flag">⚠️ 建议复核 · AI判定与讲解有出入,已留在错题本</div>
-                    )}
-                    {r.verdict !== "correct" && r.errorScope === "outside" && (
-                      <div className="scope-flag">✓ 句型本身用对了 · 错的是句型之外的词/助词,这个句型的复习间隔照常拉长,错的地方单独记进错题本</div>
-                    )}
-                    {c.answer && <div className="your-ans"><label>你的答案</label><div className="serif">{c.answer}</div></div>}
-                    <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{furiganaify(r.reference)}</div></div>
-                    <div className="exp-block"><label>先生の講評</label><div>{r.explanation}</div></div>
-                    <BreakdownBlock breakdown={r.breakdown} />
-                    <FollowUpAsk key={gi} contextSummary={buildFollowUpContext(c.item, c.q, c.answer, r)} />
-                  </div>
-                );
-              })}
-              <button className="btn-main" onClick={() => setView("home")}>返回首页</button>
-            </section>
-          )}
+          {/* 结果页只展示最后一组的讲评——前面的组在做题过程中已经逐组看过了,
+              全列出来在几十道题的场次里就是一屏翻不完的长列表。想回看全部有开关。 */}
+          {phase === "done" && Object.keys(gradeStates).length > 0 && (() => {
+            const total = Object.keys(gradeStates).length;
+            const keys = showAllResults ? gradedIdxInRange(0, queue.length) : gradedIdxInRange(lastChunkFrom, queue.length);
+            const hidden = total - gradedIdxInRange(lastChunkFrom, queue.length).length;
+            return (
+              <section className="card">
+                <div className="results-head">
+                  {showAllResults ? `全部讲评(${total} 题)` : `最后一组讲评(第 ${lastChunkFrom + 1}–${queue.length} 题)`}
+                </div>
+                {keys.map(renderGradeItem)}
+                {hidden > 0 && (
+                  <button className="btn-ghost results-more" onClick={() => setShowAllResults(!showAllResults)}>
+                    {showAllResults ? "只看最后一组" : `回看本次前面 ${hidden} 题的讲评`}
+                  </button>
+                )}
+                <button className="btn-main" onClick={() => setView("home")}>返回首页</button>
+              </section>
+            );
+          })()}
 
           {phase !== "done" && (
             <button className="quit-link" onClick={() => setView("home")}>中断,返回首页(进度已保存)</button>
@@ -4154,6 +4244,10 @@ function Style() {
 .settings-note{font-size:11px;color:var(--ink-soft);line-height:1.6;margin:-4px 0 10px}
 .grading-progress{font-size:13px;color:var(--ink-soft);margin:10px 0}
 .results-head{font-size:13px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:4px}
+/* 本组里还没判完的题数,提示这几条会自己填上,不用手动刷新 */
+.results-pending{letter-spacing:0;color:var(--stat-partial)}
+/* 结果页"回看前面几组"的开关:btn-ghost 默认不是通栏的,这里要和下面的返回按钮对齐 */
+.results-more{display:block;width:100%;margin-top:14px}
 .result-item{padding:16px 0;border-bottom:1px dashed var(--line)}
 .result-item:last-of-type{border-bottom:none}
 .result-item-head{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-soft);margin-bottom:6px}

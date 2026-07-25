@@ -1702,6 +1702,40 @@ function AppInner() {
     );
   }
 
+  /* 队尾等判卷:所有判卷都落地之后,再决定是追加题目还是真的收尾。
+     必须等齐才判断——追加的条件看的是正确率,判卷没回来时正确率是不准的。
+
+     ⚠️ 这个 effect 必须放在下面 `if (!db) return` 之前:hooks 的调用顺序和数量
+     每次渲染都必须一致,放在早退之后会导致"db 还没加载时少调一个 hook、加载后多调一个",
+     React 直接报 #310 白屏。构建不会报这个错,只有真跑起来才炸。
+     回调里用到的 shouldAppendHwExtra / buildHwExtras / queue / t 等都定义在下方——
+     没关系,effect 回调是渲染结束后才执行的,那时它们已经初始化好了;
+     但 db 为空时函数体走不到那些声明,所以额外加一道 !db 的保险。 */
+  useEffect(() => {
+    if (!db || phase !== "waiting") return;
+    const pending = Object.values(gradeStates).some((st) => st.status === "grading");
+    if (pending) return;
+    if (shouldAppendHwExtra()) {
+      const extras = hwExtraPlanRef.current && hwExtraPlanRef.current.length ? hwExtraPlanRef.current : buildHwExtras();
+      hwExtraPlanRef.current = null;
+      const nextIdx = queue.length;
+      setQueue([...queue, ...extras]);
+      setIdx(nextIdx);
+      beginHomeworkItem(extras[0], nextIdx);
+      return;
+    }
+    setDb((d) => {
+      const nd = { ...d, meta: { ...d.meta }, session: null };
+      // 走到这里说明整批(含并入的积压题)都做完了,没有残留——债务已经还清,
+      // 不清掉 hwBacklog 的话,它记的"已经欠了几个批次"会在下次真正产生新积压时被误继承
+      if (homeworkMode) { nd.meta.hwDate = today(); nd.hwBacklog = null; }
+      if (weeklyFormal) nd.meta.weekKey = mondayOf(today());
+      return nd;
+    });
+    setPhase("done");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [db, phase, gradeStates]);
+
   if (!db) return <div className="app"><Style /><div className="center-msg">読み込み中…</div></div>;
 
   /* --- 派生数据 --- */
@@ -2441,33 +2475,6 @@ function AppInner() {
       setPhase("waiting");
     }
   };
-
-  /* 队尾等判卷:所有判卷都落地之后,再决定是追加题目还是真的收尾。
-     必须等齐才判断——追加的条件看的是正确率,判卷没回来时正确率是不准的。 */
-  useEffect(() => {
-    if (phase !== "waiting") return;
-    const pending = Object.values(gradeStates).some((st) => st.status === "grading");
-    if (pending) return;
-    if (shouldAppendHwExtra()) {
-      const extras = hwExtraPlanRef.current && hwExtraPlanRef.current.length ? hwExtraPlanRef.current : buildHwExtras();
-      hwExtraPlanRef.current = null;
-      const nextIdx = queue.length;
-      setQueue([...queue, ...extras]);
-      setIdx(nextIdx);
-      beginHomeworkItem(extras[0], nextIdx);
-      return;
-    }
-    setDb((d) => {
-      const nd = { ...d, meta: { ...d.meta }, session: null };
-      // 走到这里说明整批(含并入的积压题)都做完了,没有残留——债务已经还清,
-      // 不清掉 hwBacklog 的话,它记的"已经欠了几个批次"会在下次真正产生新积压时被误继承
-      if (homeworkMode) { nd.meta.hwDate = t; nd.hwBacklog = null; }
-      if (weeklyFormal) nd.meta.weekKey = mondayOf(t);
-      return nd;
-    });
-    setPhase("done");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, gradeStates]);
 
   const retry = () => {
     const item = queue[idx];

@@ -277,8 +277,8 @@ function speakJa(text, rate = 1, voiceURI) {
 async function genComboQuestion(p1, p2, avoid) {
   const sys = `あなたは日本語教師です。学習者:句型A对应 JLPT ${levelBenchmark(p1.level)},句型B对应 JLPT ${levelBenchmark(p2.level)}(《大家的日语》初中级)。出题词汇和语法请分别符合各自句型的难度基准,不要因为其中一个句型简单/难就把另一个也拉到同一水平。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `请出一道"複合作文"练习题,要求学习者在同一句话(或简短的两三句对话)中,同时正确使用以下两个句型。
-句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})${styleTagText(p1)}
-句型B: ${p2.pattern}(${p2.conn} / ${p2.meaning})${styleTagText(p2)}
+句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})${styleTagText(p1)}${explainBriefText(p1)}
+句型B: ${p2.pattern}(${p2.conn} / ${p2.meaning})${styleTagText(p2)}${explainBriefText(p2)}
 请给出一个中文情境提示(30字以内),说明想表达的内容,让学习者据此写出同时包含这两个句型的日语句子或简短对话。
 ${avoid && avoid.length ? "避免与这些情境雷同: " + avoid.join(" / ") : ""}${personInstruction([p1, p2])}
 ${TASK_SEGMENTS_RULE}
@@ -296,10 +296,28 @@ function truncateText(text, max) {
 function explainText(p) {
   return truncateText(p.explain || "无", 300);
 }
+
+/* 出题用的教材解释,比判卷那份(explainText,300字)截得更短。
+   加这个是为了修一类真实出现过的bug:同一个形式对应多个义项的句型(比如四个「Vています」——
+   進行/状態職業/習慣/結果の状態,pattern 字段只靠括号里的标签区分),出题时如果只给
+   pattern/conn/meaning,AI 不知道这一条具体要考哪个义项,就会出出考点错位的题
+   (例如给"状態・職業"义出了个「小李在京都旅行」,而"旅行"天然是进行义,学习者
+   写出唯一自然的答案反而被判错)。把教材解释带上,AI 才知道该往哪个义项出题。
+   批量出题时每题都要带一份,所以必须比判卷那份短,免得整个 prompt 过长。 */
+function explainBriefText(p) {
+  if (!p.explain) return "";
+  return `\n【该句型的教材解释,出题必须落在这个义项/用法范围内】${truncateText(p.explain, 160)}`;
+}
 function contrastsText(p) {
   const t = p.contrasts && p.contrasts.length ? p.contrasts.map((c) => c[0] + "：" + c[1]).join("\n") : "无";
   return truncateText(t, 400);
 }
+
+/* 讲解语言的统一要求。以前各处写的是"讲解は中文为主、适当夹杂日语术语(中日混合)",
+   问题有两个:①"中日混合"给模型的自由度太大,同一条规则每次理解不一样,实测有时整段
+   讲评都是日语;②这句指令本身就是半日半中写的(「讲解は中文为主」),模型看到这种写法
+   会跟着用日语。改成明确的"正文全中文、只有被引用的日语内容保留日语",消除歧义。 */
+const EXPLAIN_LANG_RULE = `讲解语言:讲解正文必须全部用中文书写,不要用日语写句子或从句。只有以下内容保留日语原文:被引用的假名/单词/例句/句型名,以及日语语法术语(如「て形」「継続動詞」「辞書形」)。不要写成中日混写的句子(例如不要写「動詞「読む」は継続動詞で、接続も正しいです」这种整句日语),应写成「动词「読む」是持续动词,接续也正确」这样的中文句子。`;
 
 /* ================= 文体/语域标签(style / formality) =================
    借鉴 hsrs 的 mode 机制:给句型标上文体归属,出题时约束例句、判卷时约束搭配。
@@ -447,7 +465,7 @@ async function annotateWords(jpTextRaw) {
 }
 
 async function gradeCombo(p1, p2, q, answer) {
-  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:句型A ${levelBenchmark(p1.level)},句型B ${levelBenchmark(p2.level)}。判卷标准需分别符合各自句型的难度基准。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
+  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。${EXPLAIN_LANG_RULE}学習者水平:句型A ${levelBenchmark(p1.level)},句型B ${levelBenchmark(p2.level)}。判卷标准需分别符合各自句型的难度基准。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})
 【句型A教材解释】${explainText(p1)}
 【句型A易混淆点】${contrastsText(p1)}${styleTagText(p1)}
@@ -475,7 +493,7 @@ ${STYLE_CONSISTENCY_RULE}
 - modifier: 句子里的修饰关系,以及两个句型在同一句话里是怎么衔接/组合的;如果结构简单,写"该句结构简单,无复杂修饰关系"
 verdict 是 "correct" 时,breakdown 设为 null。
 
-输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语,需同时包含两个句型)","explanation":"分别点评两个句型各自的使用情况,指出哪里好、哪里需要改,中日混合,150字以内","breakdown":{"skeleton":"...","verbForm":"...","particleReason":"...","modifier":"..."}或null}`;
+输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语,需同时包含两个句型)","explanation":"分别点评两个句型各自的使用情况,指出哪里好、哪里需要改,用中文,150字以内","breakdown":{"skeleton":"...","verbForm":"...","particleReason":"...","modifier":"..."}或null}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
   if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
@@ -486,7 +504,7 @@ verdict 是 "correct" 时,breakdown 设为 null。
 async function genListeningSentence(p, avoid, tier) {
   const sys = `あなたは日本語教師です。学習者:JLPT ${levelBenchmark(p.level)}(《大家的日语》${p.level}水平)。词汇和语法必须限定在该难度范围内,句子要自然、适合朗读听力练习。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `请为以下句型新造一句自然的日语例句(不要用课本原句),用于听力练习,学习者只能听、看不到文字。
-句型: ${p.pattern}(${p.conn} / ${p.meaning})${styleTagText(p)}
+句型: ${p.pattern}(${p.conn} / ${p.meaning})${styleTagText(p)}${explainBriefText(p)}
 难度档位(${tier.name}): ${tier.spec}
 其他要求:
 1. 必须包含该句型
@@ -500,7 +518,7 @@ ${avoid && avoid.length ? "避免与这些句子雷同: " + avoid.join(" / ") : 
 }
 
 async function gradeListening(p, q, answer) {
-  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。${EXPLAIN_LANG_RULE}学習者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `目标句型: ${p.pattern}(${p.conn} / ${p.meaning})
 听力原文(日语,学生只听到了声音,没看到文字): ${q.jp}
 学生听写下来的内容(允许用假名代替汉字,这不算错): ${answer}
@@ -512,7 +530,7 @@ async function gradeListening(p, q, answer) {
 
 给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何听写差异、听错/漏听的地方,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
 
-输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"explanation":"具体指出听写内容和原文的差异(比如漏了哪个助词、把哪个词的活用形式听错了),再用一句话说明这句话的中文意思,中日混合,120字以内"}`;
+输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"explanation":"具体指出听写内容和原文的差异(比如漏了哪个助词、把哪个词的活用形式听错了),再用一句话说明这句话的中文意思,用中文,120字以内"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
   if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
@@ -526,7 +544,7 @@ async function genQuestion(p, avoid, forceType) {
   const user = `请围绕以下句型出一道练习题。
 句型: ${p.pattern}
 接续: ${p.conn}
-意思: ${p.meaning}${styleTagText(p)}
+意思: ${p.meaning}${styleTagText(p)}${explainBriefText(p)}
 课本例句: ${p.exJP}
 题目类型: ${type === "translation" ? "翻译题——给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用上述句型" : `造句题——请按以下要求出题:
 1. 场景(中文,25字以内)只能表达一个清晰、单一的意思,不能同时塞入两件不相关的信息(例如不要把"喜欢什么"和"东西放在哪里"混在同一个场景里)
@@ -546,7 +564,7 @@ ${TASK_SEGMENTS_RULE}
    用于"每日复习"这类一次要出好几道题、又不确定固定题型的场景。 */
 async function genQuestionBatch(items) {
   const sys = "あなたは日本語教師です。这批题目里每道题都会单独标注该题句型对应的 JLPT 难度基准(如 N4、N3〜N2),请严格按各自的标注出题,不要用同一个难度套所有题目,更不要把简单句型的题也拉到难句型的水平。出题词汇和语法必须符合各题标注的难度范围。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
-  const list = items.map((it, i) => `第${i + 1}题 — 句型:${it.p.pattern}(${it.p.conn} / ${it.p.meaning}) — 【難易度基準】${levelBenchmark(it.p.level)} — 题型:${it.type === "translation" ? "翻译题" : "造句题"}${styleTagText(it.p)}${personInstruction(it.p)}`).join("\n");
+  const list = items.map((it, i) => `第${i + 1}题 — 句型:${it.p.pattern}(${it.p.conn} / ${it.p.meaning}) — 【難易度基準】${levelBenchmark(it.p.level)} — 题型:${it.type === "translation" ? "翻译题" : "造句题"}${styleTagText(it.p)}${explainBriefText(it.p)}${personInstruction(it.p)}`).join("\n");
   const user = `请一次性为下面这 ${items.length} 道题各自出题,每题的句型和题型已经指定好,请严格按顺序对应,不要弄混、不要跳过任何一题、不要合并。
 
 ${list}
@@ -567,7 +585,7 @@ ${list}
    比genQuestionBatch更简单,因为不用在提示词里区分题型 */
 async function genTranslationBatch(patterns) {
   const sys = "あなたは日本語教師です。这批题目里每道题都会单独标注该题句型对应的 JLPT 难度基准(如 N4、N3〜N2),请严格按各自的标注出题,不要用同一个难度套所有题目,更不要把简单句型的题也拉到难句型的水平。出题词汇和语法必须符合各题标注的难度范围。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
-  const list = patterns.map((p, i) => `第${i + 1}题 — 句型:${p.pattern}(${p.conn} / ${p.meaning}) — 【難易度基準】${levelBenchmark(p.level)}${styleTagText(p)}${personInstruction(p)}`).join("\n");
+  const list = patterns.map((p, i) => `第${i + 1}题 — 句型:${p.pattern}(${p.conn} / ${p.meaning}) — 【難易度基準】${levelBenchmark(p.level)}${styleTagText(p)}${explainBriefText(p)}${personInstruction(p)}`).join("\n");
   const user = `请一次性为下面这 ${patterns.length} 个句型各出一道翻译题,顺序必须和句型编号一一对应,不要弄混、不要跳过、不要合并。
 
 ${list}
@@ -638,7 +656,7 @@ done字段:如果这句回复说完之后,对话目标已经达成(该问到的�
    AI只能从候选列表里"选编号",不允许自己编pid——编号到pid的映射在代码里做,
    保证落错题本时pid一定真实存在、不会挂空。 */
 async function reviewDialogue(scene, history, candidatePatterns) {
-  const sys = `あなたは丁寧で親切な日本語教師です。针对学习者刚完成的一场角色扮演对话给出复盘点评,讲解以中文为主、适当夹杂日语术语。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `あなたは丁寧で親切な日本語教師です。针对学习者刚完成的一场角色扮演对话给出复盘点评。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const candList = candidatePatterns.length
     ? candidatePatterns.map((p, i) => `${i}. ${p.pattern}(${p.meaning})`).join("\n")
     : "(无)";
@@ -654,14 +672,14 @@ async function reviewDialogue(scene, history, candidatePatterns) {
 ${formatDialogueHistory(scene, history)}
 
 请对学习者(${scene.userRole}那些发言)做整体复盘:
-1. summary:简短总结整体表现和用到的句型/表达(中日混合,100字以内)
+1. summary:简短总结整体表现和用到的句型/表达(用中文,100字以内)
 2. issues:指出哪些地方表达生硬、不够地道,或者敬体简体的使用不符合上面"场景语域"的要求,没有就写"没有明显问题"
 3. suggestions:给出1~2个更地道的说法建议,没有就留空字符串""
 
 以下是本场景关联的目标句型候选(带编号),如果学习者在对话中用到了其中某个句型但用得有问题(语法错、用法不对、明显生硬),请从下面列表里选出对应编号;如果都没问题或都没用到,flaggedIssues给空数组[]。绝对不能选列表之外的句型、不能自己编编号。
 ${candList}
 
-输出JSON: {"summary":"...","issues":"...","suggestions":"...","flaggedIssues":[{"index":候选编号(数字),"quote":"学习者当时说的那句话(日语)","suggestion":"更自然的说法","note":"简短说明问题在哪(中日混合,40字以内)"}]}`;
+输出JSON: {"summary":"...","issues":"...","suggestions":"...","flaggedIssues":[{"index":候选编号(数字),"quote":"学习者当时说的那句话(日语)","suggestion":"更自然的说法","note":"简短说明问题在哪(用中文,40字以内)"}]}`;
   const r = await callAI(sys, user);
   if (!r.summary) throw new Error("bad dialogue review");
   const flaggedIssues = (Array.isArray(r.flaggedIssues) ? r.flaggedIssues : [])
@@ -671,8 +689,7 @@ ${candList}
 }
 
 async function gradeAnswer(p, q, answer, hintedWords) {
-  const isComposition = q.type === "composition";
-  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语(中日混合)。学習者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
+  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。${EXPLAIN_LANG_RULE}学習者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `句型: ${p.pattern}(${p.conn} / ${p.meaning})
 【教材解释】${explainText(p)}
 【易混淆点】${contrastsText(p)}${styleTagText(p)}
@@ -692,15 +709,15 @@ ${STYLE_CONSISTENCY_RULE}
 ${ERROR_SCOPE_RULE}
 
 给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
-${isComposition ? `
-如果 verdict 不是 "correct"(即 partial 或 wrong),额外给出结构化语法讲解 breakdown,拆解正确答案(reference)的语法构造,帮助学习者理解错在哪、该怎么搭句子:
+
+如果 verdict 不是 "correct"(即 partial 或 wrong),额外给出结构化语法讲解 breakdown,拆解正确答案(reference)的语法构造,帮助学习者理解错在哪、该怎么搭句子(翻译题和造句题都要给):
 - skeleton: reference 用的是目标句型的哪个语法骨架/结构公式,句子里各部分分别对应骨架的哪个成分
 - verbForm: 句中动词/形容词/助动词的活用形式是怎么推导出来的(从词典形一步步变成句中形式);如果这道题不涉及动词变形,写"该句不涉及动词变形"
 - particleReason: 句中关键助词为什么这样选、依据是什么;如果不涉及助词辨析,写"该句无需特别辨析助词"
 - modifier: 句子里的修饰关系(谁修饰谁、为什么这样排列);如果句子结构简单没有复杂修饰关系,写"该句结构简单,无复杂修饰关系"
-verdict 是 "correct" 时,breakdown 设为 null。` : ""}
+verdict 是 "correct" 时,breakdown 设为 null。
 
-输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"errorScope":"none|pattern|outside|both","reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,中日混合,120字以内"${isComposition ? ',"breakdown":{"skeleton":"...","verbForm":"...","particleReason":"...","modifier":"..."}或null' : ''}}`;
+输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"errorScope":"none|pattern|outside|both","reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,用中文,120字以内","breakdown":{"skeleton":"...","verbForm":"...","particleReason":"...","modifier":"..."}或null}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
   if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
@@ -713,7 +730,7 @@ verdict 是 "correct" 时,breakdown 设为 null。` : ""}
    句型/题目/学生答案/参考答案/讲解都打包进去,history 是这道题下面已经问过的追问记录
    (同一道题可以连续追问好几轮,换题后由调用方清空,不带过去)。 */
 async function askFollowUp(contextSummary, history, question) {
-  const sys = `あなたは丁寧で親切な日本語教師です。学习者刚做完一道题,现在针对这道题追问,请紧扣这道题的内容作答,不要跑题到无关内容。讲解以中文为主,可以夹杂日语术语/例句。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `あなたは丁寧で親切な日本語教師です。学习者刚做完一道题,现在针对这道题追问,请紧扣这道题的内容作答,不要跑题到无关内容。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const historyText = history && history.length
     ? "\n\n这道题下面之前的追问记录:\n" + history.map((h) => `学习者问: ${h.q}\n你答: ${h.a}`).join("\n")
     : "";
@@ -722,7 +739,7 @@ ${contextSummary}${historyText}
 
 学习者现在追问: ${question}
 
-请针对这道题紧扣着回答,不要泛泛而谈无关内容,中日混合,150字以内。
+请针对这道题紧扣着回答,不要泛泛而谈无关内容,用中文,150字以内。
 输出JSON: {"answer":"..."}`;
   const r = await callAI(sys, user, 1200);
   if (!r.answer) throw new Error("bad follow-up answer");
@@ -834,7 +851,7 @@ ${list}
    "动词变形"的核心考点是"变形选对没选对",要求判卷优先看这个、并且和其他小瑕疵分开说,
    不能让无关小错掩盖了变形本身对不对这个核心反馈。 */
 async function gradeConfusionAnswer(topicName, item, question, answer, stageBenchmark, kind = "generic") {
-  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。讲解は中文为主、适当夹杂日语术语。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `あなたは丁寧で親切な日本語教師です。判定と讲解を行います。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const head = `知识点: ${topicName}
 条目: ${item.head}(${item.sub})
 【用法说明】${item.note}
@@ -851,7 +868,7 @@ async function gradeConfusionAnswer(topicName, item, question, answer, stageBenc
 - 允许多个合理答案(比如敬体/简体皆可,只要变形逻辑正确都算对),存在更优选择时说明为什么优选它
 - explanation 里必须先明确点出"变形对不对"这个核心结论,再谈其他方面
 
-输出JSON: {"verdict":"correct|partial|wrong","formCorrect":true|false,"reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,先说变形对不对,再说其他,中日混合,120字以内"}` : head + `
+输出JSON: {"verdict":"correct|partial|wrong","formCorrect":true|false,"reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,先说变形对不对,再说其他,用中文,120字以内"}` : head + `
 判定标准:
 - 这类题目经常存在不止一个语法上都说得通的答案,不要因为学生的答案和你脑海里的"标准答案"字面不同就直接判错;只要语法正确、能自然表达题目要求的意思就判 correct
 - 如果学生的答案和你认为更优的答案都合理,请在讲解里说明你更推荐哪一个、为什么(比如更自然、更符合当前语境),但仍判 correct,不要因为"不是最优选"而降级
@@ -862,7 +879,7 @@ async function gradeConfusionAnswer(topicName, item, question, answer, stageBenc
 
 ${STYLE_CONSISTENCY_RULE}
 
-输出JSON: {"verdict":"correct|partial|wrong","reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,中日混合,120字以内,若存在更优答案请说明为什么优选它"}`;
+输出JSON: {"verdict":"correct|partial|wrong","reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,用中文,120字以内,若存在更优答案请说明为什么优选它"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad confusion grade");
   return g;
@@ -926,7 +943,7 @@ function pickConfusionQuizItems(items, recentHeads, count, kind = "generic") {
    传空数组的话 AI 根本没法选、永远查不出问题;这里改成不依赖候选列表,直接现场判断
    有没有明显的语法错误。 */
 async function reviewConfusionDialogue(scene, history, stageBenchmark) {
-  const sys = `あなたは丁寧で親切な日本語教師です。针对学习者刚完成的一场角色扮演对话给出复盘点评,讲解以中文为主、适当夹杂日语术语。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `あなたは丁寧で親切な日本語教師です。针对学习者刚完成的一场角色扮演对话给出复盘点评。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const registerLine = scene.register === "casual"
     ? "这场对话的人物关系亲近(朋友/熟悉的平级同事),应该全程用简体(タメ口),不是敬体——如果学习者中途切回です・ます,即使语法没错,也要在issues里指出"
     : "这场对话是相对正式或不太熟的关系,应该全程用敬体(です・ます),不是简体——如果学习者中途说了简体,也要在issues里指出";
@@ -940,7 +957,7 @@ async function reviewConfusionDialogue(scene, history, stageBenchmark) {
 ${formatDialogueHistory(scene, history)}
 
 请对学习者(${scene.userRole}那些发言)做整体复盘:
-1. summary: 简短总结整体表现和用到的表达(中日混合,100字以内)
+1. summary: 简短总结整体表现和用到的表达(用中文,100字以内)
 2. issues: 指出哪些地方表达生硬、不够地道,或者敬体简体的使用不符合上面"场景语域"的要求,没有就写"没有明显问题"
 3. suggestions: 给出1~2个更地道的说法建议,没有就留空字符串""
 4. grammarMistakes: 如果学习者的发言里存在明显的语法/句型使用错误(不是"不够地道"这种风格问题,而是确实用错了),列出来,每条{"quote":"学习者当时说的那句话","issue":"错在哪(中文)","suggestion":"更正确的说法"};没有就给空数组[]
@@ -977,7 +994,7 @@ ${avoidLast ? "刚练过的上一个命题(不要出雷同的场景/关系): " +
 }
 
 async function gradeConfusionEmail(topicName, scenario, emailText, stageBenchmark) {
-  const sys = `あなたは丁寧で厳しい日本語ビジネスメール指導教師です。请按结构完整度批改学习者写的商务邮件,不以字数长短评分。讲解以中文为主、适当夹杂日语术语。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `あなたは丁寧で厳しい日本語ビジネスメール指導教師です。请按结构完整度批改学习者写的商务邮件,不以字数长短评分。${EXPLAIN_LANG_RULE}只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `邮件情境类型: ${topicName}
 收件人: ${scenario.recipient.org} ${scenario.recipient.name}(关系: ${scenario.recipient.relation})
 写信原因: ${scenario.situation}
@@ -987,7 +1004,7 @@ async function gradeConfusionEmail(topicName, scenario, emailText, stageBenchmar
 学习者写的邮件全文:
 ${emailText}
 
-请逐项检查以下 8 个维度,每项给 {"label":"维度名","ok":true|false,"note":"具体说明哪里有问题/为什么有问题,ok时可以留空或简短肯定,中日混合,60字以内"},维度和顺序固定为:
+请逐项检查以下 8 个维度,每项给 {"label":"维度名","ok":true|false,"note":"具体说明哪里有问题/为什么有问题,ok时可以留空或简短肯定,用中文,60字以内"},维度和顺序固定为:
 1. 称呼:对方公司/部门/姓名+敬称是否规范
 2. 开头问候语:是否有符合关系远近的固定寒暄(如「お世話になっております」),初次联系与长期合作对象的开头用语应有区别
 3. 自报身份:如果是初次联系或对方可能不确定发件人身份,是否做了自我介绍

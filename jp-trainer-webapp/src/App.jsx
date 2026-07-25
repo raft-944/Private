@@ -233,22 +233,41 @@ function extractFirstJsonArray(text) {
    这样"最后一题的等待时间"基本只等于单题判卷时间,和总题数无关。 */
 const MAX_CONCURRENT = 3;   // 同时在飞的最大请求数
 const MIN_CALL_GAP_MS = 350; // 相邻两次"发出"之间的最小间隔,防止瞬间并发把接口打爆
+/* 后台预取最多占几个名额:必须小于 MAX_CONCURRENT,给前台留一条永远走得通的路。
+   开一场 29 题的复习会一次甩出 6 个批量预取请求,每个都是"一次出5道题"的大响应(慢);
+   如果它们能把 3 个名额全占满,那么现场出题(你正盯着"先生が問題を作っています…")
+   和判卷就得排在这些大请求后面,等待被放大好几倍。 */
+const MAX_BG_CONCURRENT = 2;
 let inFlight = 0;
+let bgInFlight = 0;
 let lastDispatchAt = 0;
-const waitQueue = [];
+const waitQueue = [];   // 前台队列:现场出题、判卷——用户正在等的
+const bgWaitQueue = []; // 后台队列:批量预取——只在前台没人排队时才轮到
 
-/* 取一个并发名额。拿不到就排队等,前面的一完成就会叫醒队首。 */
-function acquireSlot() {
-  if (inFlight < MAX_CONCURRENT) {
+/* 取一个并发名额。拿不到就排队等,前面的一完成就会叫醒队首(前台优先)。 */
+function acquireSlot(background) {
+  const ok = background
+    ? inFlight < MAX_CONCURRENT && bgInFlight < MAX_BG_CONCURRENT
+    : inFlight < MAX_CONCURRENT;
+  if (ok) {
     inFlight++;
+    if (background) bgInFlight++;
     return Promise.resolve();
   }
-  return new Promise((resolve) => waitQueue.push(resolve));
+  return new Promise((resolve) => (background ? bgWaitQueue : waitQueue).push(resolve));
 }
-function releaseSlot() {
-  const next = waitQueue.shift();
-  if (next) next(); // 名额直接转交给队首,inFlight 不变
-  else inFlight--;
+function releaseSlot(background) {
+  if (background) bgInFlight--;
+  // 名额优先转交前台队首(inFlight 不变,只是换了个人占着)
+  const fg = waitQueue.shift();
+  if (fg) { fg(); return; }
+  // 前台没人等,才轮到后台,而且仍然受后台名额上限约束
+  if (bgWaitQueue.length && bgInFlight < MAX_BG_CONCURRENT) {
+    bgInFlight++;
+    bgWaitQueue.shift()();
+    return;
+  }
+  inFlight--;
 }
 /* 拿到名额之后再做一次很小的间隔控制:并发是允许的,但不要在同一毫秒里全部发出去 */
 async function spaceOutDispatch() {
@@ -259,14 +278,14 @@ async function spaceOutDispatch() {
 
 /* 真正发请求+429退避重试的共用逻辑,只返回原始文字,不在这里解析JSON形状,
    这样单个问题(callAI)和批量问题(callAIArray)可以共用同一套重试机制 */
-async function callAIRaw(system, user, maxTokens) {
+async function callAIRaw(system, user, maxTokens, background) {
   // 名额在整个重试循环之外持有:429 退避期间也应该占着名额,否则一批请求同时撞限流后
   // 会一起放开名额、又一起重试,等于把限流又打一遍
-  await acquireSlot();
+  await acquireSlot(background);
   try {
     return await callAIRawInner(system, user, maxTokens);
   } finally {
-    releaseSlot();
+    releaseSlot(background);
   }
 }
 
@@ -330,9 +349,9 @@ async function callAI(system, user, maxTokens = 3000) {
 }
 
 /* 批量版:一次调用要多道题,maxTokens按题数放大一些,避免写到一半被截断 */
-async function callAIArray(system, user, itemCount) {
+async function callAIArray(system, user, itemCount, background) {
   // 每条题目现在还要顺带出 taskSegments(逐词切分),比之前占的篇幅稍大,预算相应调高
-  const text = await callAIRaw(system, user, Math.min(8000, 900 * Math.max(itemCount, 1) + 700));
+  const text = await callAIRaw(system, user, Math.min(8000, 900 * Math.max(itemCount, 1) + 700), background);
   const jsonStr = extractFirstJsonArray(text);
   if (!jsonStr) throw new Error("返回内容不含完整JSON数组:" + text.slice(0, 80));
   const parsed = JSON.parse(jsonStr);
@@ -643,6 +662,29 @@ ${TASK_SEGMENTS_RULE}
 /* 批量版(混合题型):items = [{p, type}, ...],一次调用生成items.length道题,
    题型(翻译/造句)提前指定好,顺序必须和输出的数组一一对应。
    用于"每日复习"这类一次要出好几道题、又不确定固定题型的场景。 */
+/* 把批量出题的返回结果对位到各个题位上,返回长度为 count 的数组,对不上的位置是 null。
+
+   为什么不能只按数组顺序取:AI 偶尔会少给一条、多给一条或者乱序。以前的做法是
+   "数量不等就整批 throw",一条不对,这一批 5 道题全部退回现场出题——你就会连着看到
+   好几道题在转圈"先生が問題を作っています…"。所以现在要求每个元素自带题号 n,按 n 对位,
+   少给的那几个位置留空(届时单独现场出题),其余照用。
+
+   但对位错了比现场出题更糟(会拿 A 句型的题去考 B 句型,判卷也跟着错),所以:
+   n 合法就按 n 放;n 缺失时只有在"数量刚好对得上"时才退回按顺序放,否则这条丢弃。 */
+function alignBatch(arr, count, build) {
+  const out = new Array(count).fill(null);
+  const lenOk = Array.isArray(arr) && arr.length === count;
+  (Array.isArray(arr) ? arr : []).forEach((q, i) => {
+    if (!q || !q.task) return;
+    const n = Number(q.n);
+    const pos = Number.isInteger(n) && n >= 1 && n <= count ? n - 1 : (lenOk ? i : -1);
+    if (pos < 0 || out[pos]) return; // 同一个题号给了两条,只认第一条
+    out[pos] = build(q, pos);
+  });
+  if (!out.some(Boolean)) throw new Error("批量出题没有一条可用(返回 " + (Array.isArray(arr) ? arr.length : 0) + " 条)");
+  return out;
+}
+
 async function genQuestionBatch(items) {
   const sys = "あなたは日本語教師です。这批题目里每道题都会单独标注该题句型对应的 JLPT 难度基准(如 N4、N3〜N2),请严格按各自的标注出题,不要用同一个难度套所有题目,更不要把简单句型的题也拉到难句型的水平。出题词汇和语法必须符合各题标注的难度范围。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
   const list = items.map((it, i) => `第${i + 1}题 — 句型:${it.p.pattern}(${it.p.conn} / ${it.p.meaning}) — 【難易度基準】${levelBenchmark(it.p.level)} — 题型:${it.type === "translation" ? "翻译题" : "造句题"}${styleTagText(it.p)}${explainBriefText(it.p)}${personInstruction(it.p)}`).join("\n");
@@ -656,10 +698,12 @@ ${list}
 - 各题之间内容不要相似雷同
 - ${TASK_SEGMENTS_RULE}
 
-按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"task":"题目内容(中文)",${TASK_SEGMENTS_FIELD}}`;
-  const arr = await callAIArray(sys, user, items.length);
-  if (arr.length !== items.length) throw new Error("批量出题数量(" + arr.length + ")与预期(" + items.length + ")不符");
-  return arr.map((q, i) => ({ type: items[i].type, task: q.task, taskSegments: Array.isArray(q.taskSegments) && q.taskSegments.length ? q.taskSegments : null }));
+按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"n":题号(就是上面的第几题,整数),"task":"题目内容(中文)",${TASK_SEGMENTS_FIELD}}`;
+  const arr = await callAIArray(sys, user, items.length, true);
+  return alignBatch(arr, items.length, (q, pos) => ({
+    type: items[pos].type, task: q.task,
+    taskSegments: Array.isArray(q.taskSegments) && q.taskSegments.length ? q.taskSegments : null,
+  }));
 }
 
 /* 批量版(纯翻译题):专门给"每日作业"里那些必须是翻译题的题位用,
@@ -674,10 +718,12 @@ ${list}
 每一题:给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型。各题之间内容不要相似雷同。
 ${TASK_SEGMENTS_RULE}
 
-按顺序输出一个JSON数组,长度必须正好是 ${patterns.length},每个元素格式: {"task":"题目内容(中文)",${TASK_SEGMENTS_FIELD}}`;
-  const arr = await callAIArray(sys, user, patterns.length);
-  if (arr.length !== patterns.length) throw new Error("批量出题数量(" + arr.length + ")与预期(" + patterns.length + ")不符");
-  return arr.map((q) => ({ type: "translation", task: q.task, taskSegments: Array.isArray(q.taskSegments) && q.taskSegments.length ? q.taskSegments : null }));
+按顺序输出一个JSON数组,长度必须正好是 ${patterns.length},每个元素格式: {"n":题号(就是上面的第几题,整数),"task":"题目内容(中文)",${TASK_SEGMENTS_FIELD}}`;
+  const arr = await callAIArray(sys, user, patterns.length, true);
+  return alignBatch(arr, patterns.length, (q) => ({
+    type: "translation", task: q.task,
+    taskSegments: Array.isArray(q.taskSegments) && q.taskSegments.length ? q.taskSegments : null,
+  }));
 }
 
 /* ================= 情景对话:多轮AI调用 ================= */
@@ -1455,6 +1501,8 @@ function AppInner() {
   const recentTasks = useRef({});
   const preGenRef = useRef({}); // 批量出题的结果缓存,key是题目在当前队列里的下标
   const sessionGenRef = useRef(0); // 每次开始新的一组题就递增,防止上一轮延迟返回的批量结果写错地方
+  const prefetchingRef = useRef(new Set()); // 正在预取中的题位下标,避免补取和开场预取重复请求同一题
+  const prefetchFailRef = useRef(0); // 本场有几批预取彻底失败——结果页上提示一下,不然只能靠猜
   /* 提前预取的"追加题"清单。必须把清单本身也存下来,不能等到真要追加时再重新挑一遍:
      作业的最后一题是情景対話,它复盘完可能又往错题本前面插进新的错题,重新挑就会挑出
      另一批句型,和刚才预取好的题面对不上、白白浪费预取。 */
@@ -1822,16 +1870,45 @@ function AppInner() {
   const runPrefetch = (indexedItems, generator) => {
     const myGen = sessionGenRef.current;
     const CHUNK_SIZE = 5;
-    for (let i = 0; i < indexedItems.length; i += CHUNK_SIZE) {
-      const chunk = indexedItems.slice(i, i + CHUNK_SIZE);
+    // 已经在预取路上的题位不再重复请求(补取会和开场的批量预取撞车)
+    const todo = indexedItems.filter((it) => !preGenRef.current[it.idx] && !prefetchingRef.current.has(it.idx));
+    todo.forEach((it) => prefetchingRef.current.add(it.idx));
+    for (let i = 0; i < todo.length; i += CHUNK_SIZE) {
+      const chunk = todo.slice(i, i + CHUNK_SIZE);
       if (chunk.length === 0) continue;
       generator(chunk)
         .then((qs) => {
           if (sessionGenRef.current !== myGen) return; // 已经切到别的会话了,这批结果作废,避免张冠李戴
-          qs.forEach((q, j) => { preGenRef.current[chunk[j].idx] = q; });
+          // qs 里可能有 null(那一条 AI 没给或对不上位),这些位置留空、届时现场出题
+          qs.forEach((q, j) => { if (q && q.task) preGenRef.current[chunk[j].idx] = q; });
         })
-        .catch(() => { /* 批量失败就算了,届时退回单题现场请求 */ });
+        .catch(() => { prefetchFailRef.current += 1; /* 整批失败,这几题届时退回单题现场请求 */ })
+        .finally(() => { chunk.forEach((c) => prefetchingRef.current.delete(c.idx)); });
     }
+  };
+
+  /* 临阵补取:每翻一页都看一眼后面 LOOKAHEAD 道题有没有现成的题面,缺的现在就在后台补。
+     开场的批量预取会因为各种原因留下空洞(整批失败、AI 少给一条、断点续做时压根没预取过),
+     以前这些空洞只能等你真翻到那一题才发现,于是就在那里干等 AI。
+     补取是后台优先级,而且你在每道题上停留几十秒,提前一两题启动基本都来得及。 */
+  const LOOKAHEAD = 3;
+  const topUpAhead = (fromIdx, items) => {
+    const q = items || queue;
+    // 聴解用的是另一套生成器(逐句朗读文本);每周挑战的 beginWeeklyItem 根本不读 preGenRef,
+    // 给它预取等于白烧额度——这两种模式先不补,要补得连 begin* 一起改
+    if (listenMode || weeklyMode) return;
+    const want = [];
+    for (let i = fromIdx; i < Math.min(fromIdx + LOOKAHEAD, q.length); i++) {
+      const it = q[i];
+      // 只有"单句型 + 需要AI出题"的题位能预取:新句型要等你读完介绍页、
+      // 造句题是固定文案、複合作文和情景对话各有自己的生成路径
+      if (!it || !it.p || it.isNew || it.sub === "combo" || it.hw === "dialogue" || it.hw === "comp") continue;
+      want.push({ idx: i, p: it.p });
+    }
+    if (!want.length) return;
+    if (homeworkMode) runPrefetch(want, (chunk) => genTranslationBatch(chunk.map((c) => c.p)));
+    else runPrefetch(want.map((w) => ({ ...w, type: Math.random() < 0.6 ? "translation" : "composition" })),
+      (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type }))));
   };
 
   const startSession = () => {
@@ -1843,6 +1920,8 @@ function AppInner() {
     ];
     if (!items.length) return;
     preGenRef.current = {};
+    prefetchingRef.current.clear();
+    prefetchFailRef.current = 0;
     setQueue(items); setIdx(0); setFreeMode(false); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
@@ -1966,6 +2045,8 @@ function AppInner() {
       dialogueItem,
     ];
     preGenRef.current = {};
+    prefetchingRef.current.clear();
+    prefetchFailRef.current = 0;
     hwExtraPlanRef.current = null; // 新的一批作业,上一批没用掉的追加计划作废
     setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(true); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0, backlogOk: 0, backlogPartial: 0, backlogWrong: 0 }); setGradeStates({});
@@ -2107,6 +2188,13 @@ function AppInner() {
   const resumeSession = () => {
     const s = db.session;
     if (!s) return;
+    // 续做也要走一遍"新会话"的初始化:递增 sessionGenRef 让上一轮延迟返回的预取结果作废,
+    // 清掉 preGenRef——上一轮留下的题面是按上一轮的队列下标存的,续做的队列虽然是同一批题,
+    // 但如果中间开过别的场次(每日作业/自由练习),那些下标就对不上了,照用会张冠李戴
+    sessionGenRef.current++;
+    preGenRef.current = {};
+    prefetchingRef.current.clear();
+    prefetchFailRef.current = 0;
     let items;
     if (s.kind === "homework") items = s.items.map((d) => d.hw === "dialogue" ? { hw: "dialogue", sceneId: d.sceneId, fromBacklog: !!d.fromBacklog } : d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId, fromBacklog: !!d.fromBacklog } : { p: PATTERNS[d.pid], hw: d.hw, mistakeId: d.mistakeId, fromBacklog: !!d.fromBacklog, isExtra: !!d.isExtra });
     else if (s.kind === "weekly") items = s.items.map((d) => d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId } : { sub: "weak", p: PATTERNS[d.pid], mistakeId: d.mistakeId });
@@ -2119,6 +2207,21 @@ function AppInner() {
     else if (s.kind === "homework") beginHomeworkItem(item, s.idx);
     else if (s.kind === "listen") beginListenItem(item);
     else beginItem(item, s.idx);
+    /* 续做原来完全不预取——这是"每道题都要现场出题"最主要的来源:
+       断点续做时 preGenRef 是空的(要么刚重新打开网页,要么上一轮的结果已作废),
+       于是剩下的每一题都得现场等 AI。这里把剩下的题按开场时同样的方式批量预取上。
+       跳过当前这一题(上面已经单独请求了),每周挑战/聴解不预取(它们各有自己的生成路径)。 */
+    const rest = items
+      .map((it, i) => ({ idx: i, ...it }))
+      .filter((it) => it.idx > s.idx);
+    if (s.kind === "homework") {
+      runPrefetch(rest.filter((it) => it.sub !== "combo" && it.hw === "trans"),
+        (chunk) => genTranslationBatch(chunk.map((c) => c.p)));
+    } else if (s.kind === "srs") {
+      runPrefetch(
+        rest.filter((it) => !it.isNew).map((it) => ({ ...it, type: Math.random() < 0.6 ? "translation" : "composition" })),
+        (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type }))));
+    }
   };
 
   const discardSession = () => setDb((d) => ({ ...d, session: null }));
@@ -2490,6 +2593,8 @@ function AppInner() {
       hwExtraPlanRef.current = extras;
       runPrefetch(extras.map((it, i) => ({ idx: queue.length + i, p: it.p })), (chunk) => genTranslationBatch(chunk.map((c) => c.p)));
     }
+    // 顺手把后面几题缺的题面补上——开场批量预取留下的空洞就是在这里被填掉的
+    topUpAhead(nextIdx + 1);
   };
 
   /* 看完一组讲评,继续做后面的题 */
@@ -2972,7 +3077,8 @@ function AppInner() {
     }
     const r = st.result;
     return (
-      <div key={gi} className="result-item">
+      // ri-* 决定整块的底色和左侧色带:答错/接近的题要一眼就能从一串讲评里认出来
+      <div key={gi} className={"result-item ri-" + r.verdict}>
         <div className="result-item-head">
           第 {gi + 1} 题
           <span className={"result-item-verdict rv-" + r.verdict}>
@@ -3457,6 +3563,11 @@ function AppInner() {
                 <div className="done-extra-note">今天做得不错,额外追加了 {queue.filter((it) => it.isExtra).length} 道错题本里的题</div>
               )}
               <p className="done-note">{weeklyMode ? "本周综合挑战已完成,做错的组合题/弱点题已收入錯題本。" : homeworkMode ? "今日作业已完成,做对的错题已自动清除。" : listenMode ? "聴解練習已完成,没听懂的已收入錯題本。" : "答对的句型间隔已拉长,答错的明天会再次出现。"}</p>
+              {/* 预取失败会表现为"做题时不停看到现场出题的转圈",但从界面上完全看不出原因。
+                  这里报一下次数,下次出现卡顿时就有据可查,不用靠猜 */}
+              {prefetchFailRef.current > 0 && (
+                <div className="done-note">⚠️ 本场有 {prefetchFailRef.current} 批题目预取失败,这些题只能现场出题(所以中途会看到等待)。偶发一两次是网络/AI 抖动,如果每次都有,告诉我这个数字。</div>
+              )}
               <button className="btn-main" onClick={() => setView("home")}>返回首页</button>
             </section>
           )}
@@ -4182,9 +4293,11 @@ function Style() {
 .answer-box:focus{outline:2px solid var(--ai);border-color:var(--ai)}
 
 .result-wrap{position:relative;margin-top:6px}
-.your-ans{margin-top:14px;padding:10px 12px;background:var(--tint-panel);border-radius:10px;font-size:15px}
+/* 「你的答案」和「参考答案」是一对要横着比对的东西,盒子样式必须完全一致——
+   以前只有你的答案有内边距和底色,参考答案是裸的,两行文字的左边缘差了 12px,
+   看起来就是参考答案顶格、你的答案往里缩。 */
+.your-ans,.ref-block{margin-top:12px;padding:10px 12px;background:var(--tint-panel);border-radius:10px;font-size:15px}
 .your-ans label,.ref-block label,.exp-block label,.mk-line label{display:block;font-size:11px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:3px}
-.ref-block{margin-top:14px}
 .ref-jp{font-size:17px;color:var(--ai-deep)}
 .exp-block{margin-top:12px;font-size:14px;line-height:1.8;background:var(--tint-cream);border-radius:10px;padding:12px}
 .exp-block label{margin-bottom:6px}
@@ -4248,11 +4361,33 @@ function Style() {
 .results-pending{letter-spacing:0;color:var(--stat-partial)}
 /* 结果页"回看前面几组"的开关:btn-ghost 默认不是通栏的,这里要和下面的返回按钮对齐 */
 .results-more{display:block;width:100%;margin-top:14px}
-.result-item{padding:16px 0;border-bottom:1px dashed var(--line)}
-.result-item:last-of-type{border-bottom:none}
-.result-item-head{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-soft);margin-bottom:6px}
-.result-item-verdict{font-weight:700}
-.rv-correct{color:var(--shu)}.rv-partial{color:var(--stat-partial)}.rv-wrong{color:var(--ink-soft)}
+/* 每道题一张独立小卡。原来只用一条虚线分隔,而题目内部又嵌着好几个带底色的小块
+   (你的答案/参考答案/講評/結構詳解),分界线混在里面根本看不出来。
+   改成:卡片边框 + 左侧一条判定色带,一眼就能数清几道题、哪道错了。 */
+.result-item{position:relative;margin:0 0 14px;padding:14px 14px 14px 16px;
+  background:var(--tint-input-bg);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.result-item::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--line)}
+.result-item:last-of-type{margin-bottom:0}
+/* 答错和接近的题关注优先级明显高于答对的:整块换成暖色底 + 判定色带,
+   答对的保持低调(底色不变),这样翻讲评时视线会自己被拽到该看的那几道上 */
+.ri-correct::before{background:var(--tint-green-fg)}
+.ri-partial::before{background:var(--stat-partial)}
+.ri-partial{background:var(--tint-amber-bg);border-color:var(--tint-amber-border)}
+.ri-wrong::before{background:var(--shu)}
+.ri-wrong{background:var(--tint-red2-bg);border-color:var(--tint-red2-border)}
+/* 整块带了底色之后,里面那几个小块本来的浅底色会和它糊成一片
+   (講評用的 tint-cream 和 tint-amber-bg 几乎同色),统一换成卡片底色保持层次 */
+.ri-partial .your-ans,.ri-partial .ref-block,.ri-partial .exp-block,.ri-partial .breakdown-block,
+.ri-wrong .your-ans,.ri-wrong .ref-block,.ri-wrong .exp-block,.ri-wrong .breakdown-block{background:var(--card)}
+.result-item-head{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-soft);
+  margin:0 0 10px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+/* 判定改成右对齐的实心徽章,比原来紧跟题号的一行小字显眼得多。
+   边框用 currentColor,配色跟着下面的 rv-* 走,浅色/深色模式都不用另写一套。 */
+.result-item-verdict{margin-left:auto;font-weight:700;font-size:12px;letter-spacing:1px;
+  padding:3px 10px;border-radius:999px;background:var(--card);border:1px solid currentColor}
+.rv-correct{color:var(--tint-green-fg)}
+.rv-partial{color:var(--stat-partial)}
+.rv-wrong{color:var(--shu)}
 .result-item-q{font-size:15px;color:var(--ink);line-height:1.7;margin-bottom:4px}
 .done-extra-note{font-size:12px;color:var(--tint-green-fg);background:var(--tint-green-bg);border-radius:10px;padding:8px 12px;margin-bottom:12px}
 .done-note{font-size:13px;color:var(--ink-soft);margin-bottom:8px}

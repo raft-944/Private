@@ -519,6 +519,14 @@ function naiveSegmentChinese(text) {
    yomi 是假名读音——很多日语单词本来就是汉字写法(比如"数学"日语也写"数学"),
    这种情况下光给汉字对学习者没有任何新信息,真正有用的是"这个词读作什么/怎么写出来",
    所以主要展示的是 yomi,jp 只在和假名不同(有汉字)时才附带标出来。 */
+/* 粗略判断两句日语是不是"写的同一句话"。只用来决定折叠起来的那道正解题要不要提示
+   "参考答案和你的写法不一样",判错了顶多是多提示/少提示一句,不影响判卷,所以不必精确:
+   去掉空白和标点再比,这样句末有没有句号、逗号打成「、」还是「,」都不算差异。 */
+function sameJaText(a, b) {
+  const norm = (s) => (s || "").replace(/[\s、。，,.!!??・…「」『』()（）〜~ー]/g, "");
+  return norm(a) === norm(b);
+}
+
 const WORD_TR_CACHE_KEY = "jp_word_tr_cache_v1";
 function wordTrCacheKey(sentence, word) { return sentence + "" + word; }
 function getCachedWordTr(sentence, word) {
@@ -1495,6 +1503,8 @@ function AppInner() {
   const [gradeStates, setGradeStates] = useState({});
   /* 结果页默认只展示最后一组讲评,这个开关用来回看本场前面几组 */
   const [showAllResults, setShowAllResults] = useState(false);
+  /* 答对的题默认折叠(只留题目+你的答案),这里记的是被手动展开的题号 */
+  const [expandedGrades, setExpandedGrades] = useState(() => new Set());
   const [errMsg, setErrMsg] = useState("");
   const [openLesson, setOpenLesson] = useState(null);
   const actionsRef = useRef({});
@@ -1736,6 +1746,13 @@ function AppInner() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [view, phase]);
+
+  /* 开新一场时把"手动展开过哪几题"清空。gradeStates 被清空就说明换场了——
+     展开状态是按题号记的,不清的话新一场里同样题号的题会莫名其妙一上来就是展开的。
+     (和其它 effect 一样必须写在 `if (!db) return` 之前) */
+  useEffect(() => {
+    if (Object.keys(gradeStates).length === 0) setExpandedGrades((s) => (s.size ? new Set() : s));
+  }, [gradeStates]);
 
   /* --- 进入分段讲评页/结果页时回到顶部 ---
      上一屏可能正停在答题框附近,直接换成一长串讲评列表的话,视口会落在中间某道题上,
@@ -3076,9 +3093,12 @@ function AppInner() {
       );
     }
     const r = st.result;
+    const full = !isCollapsibleGrade(r) || expandedGrades.has(gi);
+    // 折叠时给一句提示,告诉你这题值不值得展开:参考答案和你写的不一样,说明有更自然的说法
+    const refDiffers = !sameJaText(c.answer, r.reference);
     return (
       // ri-* 决定整块的底色和左侧色带:答错/接近的题要一眼就能从一串讲评里认出来
-      <div key={gi} className={"result-item ri-" + r.verdict}>
+      <div key={gi} className={"result-item ri-" + r.verdict + (full ? "" : " ri-collapsed")}>
         <div className="result-item-head">
           第 {gi + 1} 题
           <span className={"result-item-verdict rv-" + r.verdict}>
@@ -3093,11 +3113,49 @@ function AppInner() {
           <div className="scope-flag">✓ 句型本身用对了 · 错的是句型之外的词/助词,这个句型的复习间隔照常拉长,错的地方单独记进错题本</div>
         )}
         {c.answer && <div className="your-ans"><label>你的答案</label><div className="serif">{c.answer}</div></div>}
-        <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{furiganaify(r.reference)}</div></div>
-        <div className="exp-block"><label>先生の講評</label><div>{r.explanation}</div></div>
-        <BreakdownBlock breakdown={r.breakdown} />
-        <FollowUpAsk key={gi} contextSummary={buildFollowUpContext(c.item, c.q, c.answer, r)} />
+        {full ? (
+          <>
+            <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{furiganaify(r.reference)}</div></div>
+            <div className="exp-block"><label>先生の講評</label><div>{r.explanation}</div></div>
+            <BreakdownBlock breakdown={r.breakdown} />
+            <FollowUpAsk key={gi} contextSummary={buildFollowUpContext(c.item, c.q, c.answer, r)} />
+          </>
+        ) : (
+          <button className="ri-expand" onClick={() => toggleGrade(gi)}>
+            {refDiffers
+              ? <><span className="ri-diff">参考答案和你的写法不一样</span> · 展开看讲评 ›</>
+              : <>参考答案和你写的一致 · 展开看讲评 ›</>}
+          </button>
+        )}
       </div>
+    );
+  };
+
+  /* 哪些题可以折叠:只有"答对而且 AI 自己也没有自相矛盾"的题。
+     selfCheck===false 是"判成了正解但讲解跟判定打架"的可疑情况,顶着正解的名头却最需要
+     你亲眼看一下(而且已经留在错题本里了),这种一律不折叠。 */
+  const isCollapsibleGrade = (r) => r.verdict === "correct" && r.selfCheck !== false;
+  const toggleGrade = (gi) => setExpandedGrades((s) => {
+    const n = new Set(s);
+    if (n.has(gi)) n.delete(gi); else n.add(gi);
+    return n;
+  });
+  /* 一组里"答对被折叠起来的题"的统一展开/收起开关。没有可折叠的题时不显示。 */
+  const gradeExpandToggle = (keys) => {
+    const foldable = keys.filter((gi) => {
+      const st = gradeStates[gi];
+      return st && st.status === "done" && isCollapsibleGrade(st.result);
+    });
+    if (!foldable.length) return null;
+    const allOpen = foldable.every((gi) => expandedGrades.has(gi));
+    return (
+      <button className="ri-expand-all" onClick={() => setExpandedGrades((s) => {
+        const n = new Set(s);
+        foldable.forEach((gi) => (allOpen ? n.delete(gi) : n.add(gi)));
+        return n;
+      })}>
+        {allOpen ? `收起答对的 ${foldable.length} 题` : `展开答对的 ${foldable.length} 题`}
+      </button>
     );
   };
 
@@ -3517,6 +3575,7 @@ function AppInner() {
                 <div className="results-head">
                   第 {chunkFrom + 1}–{idx + 1} 题讲评
                   {pending > 0 && <span className="results-pending"> · {pending} 题还在判卷中,结果会自己填上</span>}
+                  {gradeExpandToggle(keys)}
                 </div>
                 {keys.map(renderGradeItem)}
                 <button className="btn-main" onClick={continueChunk}>
@@ -3582,6 +3641,7 @@ function AppInner() {
               <section className="card">
                 <div className="results-head">
                   {showAllResults ? `全部讲评(${total} 题)` : `最后一组讲评(第 ${lastChunkFrom + 1}–${queue.length} 题)`}
+                  {gradeExpandToggle(keys)}
                 </div>
                 {keys.map(renderGradeItem)}
                 {hidden > 0 && (
@@ -4356,7 +4416,10 @@ function Style() {
 .bg-grading{font-size:11px;color:var(--ai);background:var(--tint-blue-bg);border-radius:8px;padding:6px 10px;margin-bottom:10px}
 .settings-note{font-size:11px;color:var(--ink-soft);line-height:1.6;margin:-4px 0 10px}
 .grading-progress{font-size:13px;color:var(--ink-soft);margin:10px 0}
-.results-head{font-size:13px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:4px}
+.results-head{display:flex;align-items:center;flex-wrap:wrap;gap:6px;font-size:13px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:4px}
+/* 一组里"答对被折叠的题"的统一展开开关,挂在组标题右端 */
+.ri-expand-all{margin-left:auto;flex:0 0 auto;background:none;border:1px solid var(--line);border-radius:999px;
+  padding:3px 10px;font-size:11px;letter-spacing:0;color:var(--ai);cursor:pointer}
 /* 本组里还没判完的题数,提示这几条会自己填上,不用手动刷新 */
 .results-pending{letter-spacing:0;color:var(--stat-partial)}
 /* 结果页"回看前面几组"的开关:btn-ghost 默认不是通栏的,这里要和下面的返回按钮对齐 */
@@ -4379,6 +4442,13 @@ function Style() {
    (講評用的 tint-cream 和 tint-amber-bg 几乎同色),统一换成卡片底色保持层次 */
 .ri-partial .your-ans,.ri-partial .ref-block,.ri-partial .exp-block,.ri-partial .breakdown-block,
 .ri-wrong .your-ans,.ri-wrong .ref-block,.ri-wrong .exp-block,.ri-wrong .breakdown-block{background:var(--card)}
+/* 答对的题折叠成"题目 + 你的答案 + 一个展开按钮":这几道的关注优先级最低,
+   但不能直接藏掉——参考答案里常有比你写的更自然的说法(见 ri-diff 提示),
+   而且 selfCheck 打架的那种可疑正解一律不折叠(见 isCollapsibleGrade)。 */
+.ri-collapsed{padding-bottom:10px}
+.ri-expand{display:block;width:100%;margin-top:10px;padding:8px 10px;text-align:left;cursor:pointer;
+  background:none;border:1px dashed var(--line);border-radius:10px;color:var(--ink-soft);font-size:12px}
+.ri-diff{color:var(--stat-partial);font-weight:700}
 .result-item-head{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-soft);
   margin:0 0 10px;padding-bottom:8px;border-bottom:1px solid var(--line)}
 /* 判定改成右对齐的实心徽章,比原来紧跟题号的一行小字显眼得多。

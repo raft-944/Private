@@ -5,6 +5,26 @@ import { SCENES, resolveScenePatterns } from "./data/scenes.js";
 import { CONFUSION_SCENES } from "./data/confusionScenes.js";
 import { CONFUSION_EMAIL_TOPICS } from "./data/confusionEmails.js";
 
+/* 到期队列的排序:按"最容易遗忘"排——①间隔档位(lv)低的优先,它们记得最不牢;
+   ②同档位里逾期越久的优先。复习上限截断时,留下的就一定是最该先复习的那些。
+   抽成模块级函数是因为首页预热和真正开始学习两处都要用,写两份迟早会漂移。 */
+function sortedDueList(db, t) {
+  return PATTERNS
+    .filter((p) => db.prog[p.id] && db.prog[p.id].due <= t)
+    .sort((a, b) => {
+      const pa = db.prog[a.id], pb = db.prog[b.id];
+      if (pa.lv !== pb.lv) return pa.lv - pb.lv;
+      if (pa.due !== pb.due) return pa.due < pb.due ? -1 : 1;
+      return a.id - b.id;
+    });
+}
+
+/* 首页预热:打开 App 时先在后台把当天头几题生成好,点"開始"就能立刻做第一题。
+   这是"凌晨 Cron 预生成"的轻量替代——不需要给 Vercel 加 Supabase 的 service_role 密钥、
+   不需要把排队逻辑在服务端重写一遍、不学的日子也不会白烧额度(不打开就不生成)。 */
+const WARM_COUNT = 5;
+const warmCache = new Map(); // pid -> 已生成好的题目
+
 /* ================= 遗忘曲线参数 ================= */
 const INTERVALS = [1, 2, 4, 7, 15, 30, 60]; // 天
 const STORE_KEY = "jp_srs_v1";
@@ -67,7 +87,17 @@ const addDays = (d, n) => { const t = new Date(d + "T00:00:00Z"); t.setUTCDate(t
 const mondayOf = (d) => { const dt = new Date(d + "T00:00:00Z"); const day = dt.getUTCDay(); dt.setUTCDate(dt.getUTCDate() + (day === 0 ? -6 : 1) - day); return dt.toISOString().slice(0, 10); };
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
-const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, session: null, studyTime: {}, hwBacklog: null };
+/* ---- 每日复习量控制 ---- */
+/* 每天最多安排多少道复习题。超出的顺延(它们的 due 没变,还留在到期队列里,
+   第二天因为逾期更久会自动排到更前面)。做成 db.settings.reviewCap 可调,
+   这里只是默认值:N4 阶段句子短,40 题大约 20~25 分钟做题时间;进入 N3/N2 之后
+   句子变长、还多了语感辨析,单题耗时会涨,届时要能下调。 */
+const REVIEW_CAP_DEFAULT = 40;
+/* 连续这么多天复习上限都被用满(说明"每天学N个新句型"的输入速度超过了消化能力),
+   就自动下调每日新句型数,把资源让给消化积压。参数留在这里方便按实际学习数据调整。 */
+const CAP_STREAK_FOR_DOWNGRADE = 5;
+
+const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null, reviewCap: REVIEW_CAP_DEFAULT }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, session: null, studyTime: {}, hwBacklog: null };
 
 /* 待复习积压达到"新句型日配额"的这么多倍时,暂停当天新句型引入,先把复习债还上——
    参照 Anki"复习优先于新卡"的思路,但阈值给宽松点,避免正常的小波动就误伤新句型进度。 */
@@ -177,24 +207,68 @@ function extractFirstJsonArray(text) {
   return null;
 }
 
-/* 全局节流:不管调用多频繁,两次AI调用之间至少间隔这么久,给免费额度留缓冲,
-   从源头上减少撞到"短时间窗口内请求次数超限"这类429的概率 */
-let lastCallAt = 0;
-const MIN_CALL_GAP_MS = 3500;
-async function throttleGap() {
-  const wait = MIN_CALL_GAP_MS - (Date.now() - lastCallAt);
+/* ================= AI 调用的并发池 =================
+   这里替换掉了原来的"全局节流"实现。原来是:
+     let lastCallAt = 0;
+     async function throttleGap() {
+       const wait = 3500 - (Date.now() - lastCallAt);
+       if (wait > 0) await new Promise(r => setTimeout(r, wait));
+       lastCallAt = Date.now();   // ← 写在 await 之后
+     }
+   它有两个问题:
+   ① 完全串行:任意两次调用之间强制隔 3.5 秒,判卷根本没法并行,一场 50 题的复习
+      光排队就要几分钟,这是"等不下去想放弃"的主因。
+   ② 而且它并不是并发安全的:lastCallAt 是在 await 之后才写的,所以三个请求同时进来时
+      都会算出"不用等"、一起冲出去,节流保护形同虚设——既没能并行,又没真挡住突发。
+
+   改成真正的并发池(信号量):最多 MAX_CONCURRENT 个请求同时在飞,一个完成就立刻放一个
+   进来(而不是攒够一批再一起发),同时保留一个很小的最小间隔避免瞬间打爆接口。
+   这样"最后一题的等待时间"基本只等于单题判卷时间,和总题数无关。 */
+const MAX_CONCURRENT = 3;   // 同时在飞的最大请求数
+const MIN_CALL_GAP_MS = 350; // 相邻两次"发出"之间的最小间隔,防止瞬间并发把接口打爆
+let inFlight = 0;
+let lastDispatchAt = 0;
+const waitQueue = [];
+
+/* 取一个并发名额。拿不到就排队等,前面的一完成就会叫醒队首。 */
+function acquireSlot() {
+  if (inFlight < MAX_CONCURRENT) {
+    inFlight++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => waitQueue.push(resolve));
+}
+function releaseSlot() {
+  const next = waitQueue.shift();
+  if (next) next(); // 名额直接转交给队首,inFlight 不变
+  else inFlight--;
+}
+/* 拿到名额之后再做一次很小的间隔控制:并发是允许的,但不要在同一毫秒里全部发出去 */
+async function spaceOutDispatch() {
+  const wait = MIN_CALL_GAP_MS - (Date.now() - lastDispatchAt);
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-  lastCallAt = Date.now();
+  lastDispatchAt = Date.now();
 }
 
 /* 真正发请求+429退避重试的共用逻辑,只返回原始文字,不在这里解析JSON形状,
    这样单个问题(callAI)和批量问题(callAIArray)可以共用同一套重试机制 */
 async function callAIRaw(system, user, maxTokens) {
+  // 名额在整个重试循环之外持有:429 退避期间也应该占着名额,否则一批请求同时撞限流后
+  // 会一起放开名额、又一起重试,等于把限流又打一遍
+  await acquireSlot();
+  try {
+    return await callAIRawInner(system, user, maxTokens);
+  } finally {
+    releaseSlot();
+  }
+}
+
+async function callAIRawInner(system, user, maxTokens) {
   let lastErr;
   const MAX_ATTEMPTS = 4;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     try {
-      await throttleGap();
+      await spaceOutDispatch();
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1260,7 +1334,6 @@ function AppInner() {
   const [phase, setPhase] = useState("idle"); // intro | loadingQ | question | grading | result | error | done
   const [q, setQ] = useState(null);
   const [answer, setAnswer] = useState("");
-  const [result, setResult] = useState(null);
 
   /* --- 学习时长统计 ---
      只统计"题目已经显示、等待作答"这段时间(phase==="question",含听力答题;
@@ -1363,6 +1436,9 @@ function AppInner() {
   const [importMsg, setImportMsg] = useState("");
   const [copyMsg, setCopyMsg] = useState("");
   const [sessionStats, setSessionStats] = useState({ ok: 0, partial: 0, wrong: 0 });
+  /* 每道题的判卷状态,按题号索引:{ [题号]: { status:"grading"|"done"|"error", ctx, result?, error? } }
+     判卷改成异步之后,提交完就进下一题,结果陆续回来存在这里,最后统一展示。 */
+  const [gradeStates, setGradeStates] = useState({});
   const [errMsg, setErrMsg] = useState("");
   const [openLesson, setOpenLesson] = useState(null);
   const actionsRef = useRef({});
@@ -1518,7 +1594,8 @@ function AppInner() {
 
   /* --- 断点快照:每次题号/队列变化时,把"做到第几题"写入 db.session --- */
   useEffect(() => {
-    if (!loaded.current || view !== "session" || queue.length === 0 || phase === "done") return;
+    // waiting 阶段所有题都已提交、只在等判卷回来,没必要再刷快照
+    if (!loaded.current || view !== "session" || queue.length === 0 || phase === "done" || phase === "waiting") return;
     let kind = null;
     if (weeklyMode && weeklyFormal) kind = "weekly";
     else if (homeworkMode) kind = "homework";
@@ -1536,6 +1613,54 @@ function AppInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queue, idx, sessionStats, phase, view, weeklyMode, weeklyFormal, homeworkMode, listenMode, freeMode]);
 
+  /* --- 首页预热:后台先把当天头几题生成好 ---
+     和上面那个盘点 effect 一样,必须写在 `if (!db) return` 之前,所以这里自己算到期队列。
+     只在首页触发、每次打开 App 只做一轮(warmedRef),到期队列为空就不做——
+     这样不会在你没打算学习的时候白烧 AI 额度。生成结果按句型 id 存进 warmCache,
+     真正开始做题时 beginItem/loadQuestion 会优先命中它。 */
+  const warmedRef = useRef(false);
+  useEffect(() => {
+    if (!db || !loaded.current || view !== "home" || warmedRef.current) return;
+    const t2 = today();
+    const cap = db.settings.reviewCap || REVIEW_CAP_DEFAULT;
+    const head = sortedDueList(db, t2).slice(0, cap).slice(0, WARM_COUNT).filter((p) => !warmCache.has(p.id));
+    if (!head.length) return;
+    warmedRef.current = true;
+    const items = head.map((p) => ({ p, type: Math.random() < 0.6 ? "translation" : "composition" }));
+    genQuestionBatch(items)
+      .then((qs) => qs.forEach((q, i) => { if (q && q.task) warmCache.set(head[i].id, q); }))
+      .catch(() => { /* 预热失败无所谓,做题时会照常现场出题 */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [db, view]);
+
+  /* --- 复习积压的每日盘点 + 新句型自动降档 ---
+     每天第一次打开时盘一次:如果当天的到期量已经超过复习上限,说明"每天学N个新句型"
+     的输入速度超过了消化能力,连续 CAP_STREAK_FOR_DOWNGRADE 天都这样就自动把
+     每日新句型数减半(最低到1),把资源让给消化积压。降档只是改 settings.newPerDay,
+     你随时可以在设置里手动调回去。
+     这个 effect 必须写在 `if (!db) return` 之前(hooks 不能放在早退之后),
+     所以这里自己重算一遍到期量,而不是用下面派生出来的 dueAll。 */
+  useEffect(() => {
+    if (!db || !loaded.current) return;
+    const t2 = today();
+    if (db.meta.capDate === t2) return; // 今天已经盘过了
+    const cap = db.settings.reviewCap || REVIEW_CAP_DEFAULT;
+    const dueCount = PATTERNS.filter((p) => db.prog[p.id] && db.prog[p.id].due <= t2).length;
+    const hit = dueCount > cap;
+    setDb((d) => {
+      const nd = { ...d, meta: { ...d.meta }, settings: { ...d.settings } };
+      nd.meta.capDate = t2;
+      nd.meta.capHitStreak = hit ? (d.meta.capHitStreak || 0) + 1 : 0;
+      if (nd.meta.capHitStreak >= CAP_STREAK_FOR_DOWNGRADE && nd.settings.newPerDay > 1) {
+        nd.settings.newPerDay = Math.max(1, Math.floor(nd.settings.newPerDay / 2));
+        nd.meta.capHitStreak = 0;              // 降完档重新开始计数,观察新速度够不够
+        nd.meta.autoDowngradedAt = t2;         // 首页据此提示一次,让你知道是系统自动调的
+      }
+      return nd;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [db]);
+
   /* --- 回车快捷键:讲解页/新句型页/错误页按 Enter 等同于点主按钮(答题框内是 Enter 提交、Shift+Enter 换行,逻辑写在文本框自己的 onKeyDown 里) --- */
   useEffect(() => {
     if (view !== "session") return;
@@ -1547,7 +1672,6 @@ function AppInner() {
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       const a = actionsRef.current;
       if (phase === "intro" && a.cur && a.loadQuestion) { e.preventDefault(); a.loadQuestion(a.cur.p); }
-      else if (phase === "result" && a.next) { e.preventDefault(); a.next(); }
       else if (phase === "error" && a.retry) { e.preventDefault(); a.retry(); }
     };
     window.addEventListener("keydown", onKey);
@@ -1583,7 +1707,17 @@ function AppInner() {
   /* --- 派生数据 --- */
   const t = today();
   const learnedIds = Object.keys(db.prog).map(Number);
-  const dueList = PATTERNS.filter((p) => db.prog[p.id] && db.prog[p.id].due <= t);
+  /* 所有到期未消化的句型(due <= 今天)。因为 due 只在真正答题后才更新,
+     没做的会一直留在这里累积,不会因为跨天而消失(Anki 的到期队列模型)。 */
+  const dueSorted = sortedDueList(db, t);
+  const dueAll = dueSorted;
+  /* 每日复习硬上限:超出的顺延到以后(它们的 due 没变,还在 dueAll 里,
+     第二天会因为逾期更久而自动排到更前面,不会被无限期拖下去)。
+     上限做成设置项而不是写死:N4 阶段句子短、40 题可行,进入 N3/N2 之后
+     句子变长、还多了语感辨析,单题耗时会涨,届时要能下调。 */
+  const reviewCap = db.settings.reviewCap || REVIEW_CAP_DEFAULT;
+  const dueList = dueSorted.slice(0, reviewCap);
+  const deferredCount = dueAll.length - dueList.length;
   // 新句型要按"句型库"里看到的课程顺序发,不能按 PATTERNS 数组本身的原始顺序——
   // 补充句型(p.ext)大多是后来追加进数据文件的,在数组里排得靠后,如果直接按 PATTERNS
   // 顺序发新句型,会导致"明明是第3课的补充句型,却要等第50+课都学完才轮到它",
@@ -1593,7 +1727,9 @@ function AppInner() {
   const newDoneToday = db.meta.date === t ? db.meta.newDone : 0;
   // 待复习积压过多时暂停新句型引入,参照 Anki"复习优先于新卡"——阈值是新句型日配额的
   // NEW_PATTERN_PAUSE_RATIO 倍,门槛给宽松点,避免正常小波动就误伤新句型进度
-  const newPatternsPaused = dueList.length >= db.settings.newPerDay * NEW_PATTERN_PAUSE_RATIO;
+  // 注意这里必须用 dueAll(积压总量)而不是 dueList(截断后的当天量):
+  // dueList 被上限卡在 reviewCap 之后就再也涨不上去了,拿它比阈值会导致新句型永远不暂停
+  const newPatternsPaused = dueAll.length >= db.settings.newPerDay * NEW_PATTERN_PAUSE_RATIO;
   const newSlots = newPatternsPaused ? 0 : Math.max(0, db.settings.newPerDay - newDoneToday);
   const newList = unlearned.slice(0, newSlots);
   const learnedPatterns = PATTERNS.filter((p) => db.prog[p.id]);
@@ -1647,13 +1783,14 @@ function AppInner() {
   const startSession = () => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     const items = [
-      ...dueList.sort((a, b) => (db.prog[a.id].due < db.prog[b.id].due ? -1 : 1)).map((p) => ({ p, isNew: false })),
+      // dueList 已经按"最容易遗忘"排好序(见 sortedDueList),这里不要再重排
+      ...dueList.map((p) => ({ p, isNew: false })),
       ...newList.map((p) => ({ p, isNew: true })),
     ];
     if (!items.length) return;
     preGenRef.current = {};
     setQueue(items); setIdx(0); setFreeMode(false); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
-    setSessionStats({ ok: 0, partial: 0, wrong: 0 });
+    setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginItem(items[0], 0);
     // 后台批量预取"待复习"题目。跳过第0题(它已经在上面单独请求了,再算进来会重复生成、白花一次调用);
@@ -1668,7 +1805,7 @@ function AppInner() {
   const startFree = (p, mistakeId) => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     setQueue([{ p, isNew: false, mistakeId }]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
-    setSessionStats({ ok: 0, partial: 0, wrong: 0 });
+    setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     loadQuestion(p);
   };
@@ -1677,7 +1814,7 @@ function AppInner() {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     const item = { p, isNew: false, mistakeId };
     setQueue([item]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(true);
-    setSessionStats({ ok: 0, partial: 0, wrong: 0 });
+    setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginListenItem(item);
   };
@@ -1777,7 +1914,7 @@ function AppInner() {
     preGenRef.current = {};
     hwExtraPlanRef.current = null; // 新的一批作业,上一批没用掉的追加计划作废
     setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(true); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
-    setSessionStats({ ok: 0, partial: 0, wrong: 0, backlogOk: 0, backlogPartial: 0, backlogWrong: 0 });
+    setSessionStats({ ok: 0, partial: 0, wrong: 0, backlogOk: 0, backlogPartial: 0, backlogWrong: 0 }); setGradeStates({});
     setView("session");
     beginHomeworkItem(items[0], 0);
     setDb((d) => {
@@ -1851,7 +1988,7 @@ function AppInner() {
       ...weakPids.map((pid) => ({ sub: "weak", p: PATTERNS[pid] })),
     ];
     setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(true); setWeeklyFormal(true); setListenMode(false);
-    setSessionStats({ ok: 0, partial: 0, wrong: 0 });
+    setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginWeeklyItem(items[0]);
   };
@@ -1863,18 +2000,18 @@ function AppInner() {
     const shuffled = [...learned].sort(() => Math.random() - 0.5);
     const items = Array.from({ length: 8 }, (_, i) => ({ p: shuffled[i % shuffled.length], isNew: false }));
     setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(true);
-    setSessionStats({ ok: 0, partial: 0, wrong: 0 });
+    setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginListenItem(items[0]);
   };
 
   const beginListenItem = (item) => {
-    setAnswer(""); setResult(null);
+    setAnswer("");
     loadListeningQuestion(item.p);
   };
 
   const loadListeningQuestion = async (p) => {
-    setPhase("loadingQ"); setAnswer(""); setResult(null);
+    setPhase("loadingQ"); setAnswer("");
     try {
       const key = "listen_" + p.id;
       const avoid = recentTasks.current[key] || [];
@@ -1891,18 +2028,20 @@ function AppInner() {
   const startComboFree = (p1, p2, mistakeId) => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     setQueue([{ sub: "combo", p1, p2, mistakeId }]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(true); setWeeklyFormal(false); setListenMode(false);
-    setSessionStats({ ok: 0, partial: 0, wrong: 0 });
+    setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginWeeklyItem({ sub: "combo", p1, p2, mistakeId });
   };
 
   const beginItem = (item, qIdx) => {
-    setAnswer(""); setResult(null); setQ(null); setHintedWords([]); setExWords(null);
+    setAnswer(""); setQ(null); setHintedWords([]); setExWords(null);
     if (item.isNew) setPhase("intro");
     else {
-      const cached = qIdx != null ? preGenRef.current[qIdx] : null;
+      // 优先用会话内批量预取的结果,其次用首页预热的结果,都没有才现场出题
+      const cached = (qIdx != null ? preGenRef.current[qIdx] : null) || warmCache.get(item.p.id);
       if (cached) {
-        delete preGenRef.current[qIdx];
+        if (qIdx != null) delete preGenRef.current[qIdx];
+        warmCache.delete(item.p.id); // 用过就扔,免得下次复习又拿到同一道题
         setQ(cached);
         setPhase("question");
       } else {
@@ -1954,13 +2093,13 @@ function AppInner() {
   };
 
   const beginWeeklyItem = (item) => {
-    setAnswer(""); setResult(null); setHintedWords([]); setExWords(null);
+    setAnswer(""); setHintedWords([]); setExWords(null);
     if (item.sub === "combo") loadComboQuestion(item.p1, item.p2);
     else loadQuestion(item.p, "translation");
   };
 
   const loadComboQuestion = async (p1, p2) => {
-    setPhase("loadingQ"); setAnswer(""); setResult(null);
+    setPhase("loadingQ"); setAnswer("");
     try {
       const key = p1.id + "_" + p2.id;
       const avoid = recentTasks.current[key] || [];
@@ -1973,7 +2112,7 @@ function AppInner() {
   };
 
   const beginHomeworkItem = (item, qIdx) => {
-    setAnswer(""); setResult(null); setHintedWords([]); setExWords(null);
+    setAnswer(""); setHintedWords([]); setExWords(null);
     if (item.hw === "dialogue") {
       beginDialogueItem(item);
     } else if (item.sub === "combo") {
@@ -2083,7 +2222,7 @@ function AppInner() {
   };
 
   const loadQuestion = async (p, forceType) => {
-    setPhase("loadingQ"); setAnswer(""); setResult(null);
+    setPhase("loadingQ"); setAnswer("");
     try {
       const avoid = recentTasks.current[p.id] || [];
       const question = await genQuestion(p, avoid, forceType);
@@ -2094,52 +2233,90 @@ function AppInner() {
     }
   };
 
-  const submit = async () => {
-    const item = queue[idx];
-    if (!answer.trim()) return;
-    setPhase("grading");
-    try {
-      const g = (weeklyMode || homeworkMode) && item.sub === "combo"
-        ? await gradeCombo(item.p1, item.p2, q, answer.trim())
-        : q && q.type === "listening"
-        ? await gradeListening(item.p, q, answer.trim())
-        : await gradeAnswer(item.p, q, answer.trim(), hintedWords);
-      setResult(g);
-      applyResult(item, g);
-      setPhase("result");
-    } catch (e) {
-      setErrMsg("判卷失败:" + (e && e.message ? e.message : String(e))); setPhase("error");
-    }
+  /* 把"这道题"的全部上下文打包成快照。判卷是异步的,回来时用户可能已经翻到别的题了,
+     所以判卷需要的一切(题目/答案/题型/当时的模式)都必须在提交这一刻定格下来。 */
+  const snapshotCtx = (item, ansText, giveUpText) => ({
+    idx,
+    item,
+    q,
+    answer: ansText,
+    giveUpText: giveUpText || null,
+    hintedWords: [...hintedWords],
+    isCombo: (weeklyMode || homeworkMode) && item.sub === "combo",
+    isListening: !!(q && q.type === "listening"),
+    freeMode,
+    homeworkMode,
+  });
+
+  /* 判卷的实际调用,按题型分流。抽出来是因为 submit 和 giveUp 都要用。 */
+  const runGrade = (ctx, giveUpText) => {
+    const { item, q: cq, answer: cAnswer, hintedWords: cHints, isCombo, isListening } = ctx;
+    const ans = giveUpText || cAnswer;
+    if (isCombo) return gradeCombo(item.p1, item.p2, cq, ans);
+    if (isListening) return gradeListening(item.p, cq, ans);
+    return gradeAnswer(item.p, cq, ans, giveUpText ? undefined : cHints);
   };
 
-  const giveUp = () => {
-    // 不会写/听不懂:直接按 wrong 计,但需要参考答案 → 走判卷,答案标记为空
+  /* 提交一道题:不等判卷结果,立刻把任务丢进后台(并发池会控制同时在飞的数量),
+     然后马上让用户进入下一题。判卷时间就这样被"藏进"后面做题的过程里——
+     等做到最后一题时,前面几题大概率已经判完了。 */
+  const submitAsync = (giveUpText) => {
     const item = queue[idx];
-    setPhase("grading");
-    const gradeCall = (weeklyMode || homeworkMode) && item.sub === "combo"
-      ? gradeCombo(item.p1, item.p2, q, "(学生表示不会写,请给出参考答案和讲解)")
-      : q && q.type === "listening"
-      ? gradeListening(item.p, q, "(学生表示没听懂,请给出参考答案和讲解)")
-      : gradeAnswer(item.p, q, "(学生表示不会写,请给出参考答案和该句型的关键讲解)");
-    gradeCall.then((g) => {
-      // 主动"不会写/没听懂"就是句型本身没掌握,errorScope 强制按句型问题算,
-      // 不能让 AI 判成"只是句型之外的小错"从而照常拉长复习间隔
-      const r = { ...g, verdict: "wrong", errorScope: "pattern" };
-      setResult(r); applyResult(item, r); setPhase("result");
-    }).catch((e) => { setErrMsg("获取答案失败:" + (e && e.message ? e.message : String(e))); setPhase("error"); });
+    if (!giveUpText && !answer.trim()) return;
+    const ctx = snapshotCtx(item, answer.trim(), giveUpText);
+    setGradeStates((m) => ({ ...m, [ctx.idx]: { status: "grading", ctx } }));
+    runGrade(ctx, giveUpText)
+      .then((g) => {
+        // 主动"不会写/没听懂"一律按 wrong 计,而且 errorScope 强制算句型问题,
+        // 不能让 AI 判成"只是句型之外的小错"从而照常拉长复习间隔
+        const r = giveUpText ? { ...g, verdict: "wrong", errorScope: "pattern" } : g;
+        applyResult(ctx, r);
+        setGradeStates((m) => ({ ...m, [ctx.idx]: { status: "done", ctx, result: r } }));
+      })
+      .catch((e) => {
+        setGradeStates((m) => ({ ...m, [ctx.idx]: { status: "error", ctx, error: e && e.message ? e.message : String(e) } }));
+      });
+    next();
   };
 
-  const applyResult = (item, g) => {
+  const submit = () => submitAsync(null);
+  const giveUp = () => submitAsync(
+    q && q.type === "listening"
+      ? "(学生表示没听懂,请给出参考答案和讲解)"
+      : "(学生表示不会写,请给出参考答案和该句型的关键讲解)"
+  );
+
+  /* 判卷失败的题可以单独重试,不用整场重来 */
+  const retryGrade = (gi) => {
+    const st = gradeStates[gi];
+    if (!st || st.status !== "error") return;
+    const ctx = st.ctx;
+    setGradeStates((m) => ({ ...m, [gi]: { status: "grading", ctx } }));
+    runGrade(ctx, ctx.giveUpText)
+      .then((g0) => {
+        const g = ctx.giveUpText ? { ...g0, verdict: "wrong", errorScope: "pattern" } : g0;
+        applyResult(ctx, g);
+        setGradeStates((m) => ({ ...m, [gi]: { status: "done", ctx, result: g } }));
+      })
+      .catch((e) => {
+        setGradeStates((m) => ({ ...m, [gi]: { status: "error", ctx, error: e && e.message ? e.message : String(e) } }));
+      });
+  };
+
+  /* 判卷结果落库。ctx 是"这一道题"的完整上下文,必须由调用方在提交那一刻显式捕获后传进来,
+     不能像以前那样从闭包里读 q / answer / 各种 mode——判卷改成异步并行之后,结果回来时
+     用户很可能已经翻到后面几题了,闭包里的 q/answer 早就变成别的题的内容,
+     那样错题本会张冠李戴(记下 A 题的题目 + B 题的答案)。 */
+  const applyResult = (ctx, g) => {
+    const { item, q: cq, answer: cAnswer, isCombo, isListening, freeMode: cFree, homeworkMode: cHw } = ctx;
     const key = g.verdict === "correct" ? "ok" : g.verdict;
     // 每日作业结果页要拆开显示"今日新增/昨日遗留"各自的正确数,不能合并成一个笼统的完成度——
     // item.fromBacklog 是 startHomework 并入积压题时标的,只有作业模式下有意义
     const bkey = "backlog" + key[0].toUpperCase() + key.slice(1);
-    setSessionStats((s) => ({ ...s, [key]: s[key] + 1, ...(homeworkMode && item.fromBacklog ? { [bkey]: (s[bkey] || 0) + 1 } : {}) }));
+    setSessionStats((s) => ({ ...s, [key]: s[key] + 1, ...(cHw && item.fromBacklog ? { [bkey]: (s[bkey] || 0) + 1 } : {}) }));
     setDb((d) => {
       const nd = { ...d, prog: { ...d.prog }, meta: { ...d.meta }, stats: { ...d.stats }, listenStats: { ...d.listenStats }, mistakes: [...d.mistakes] };
       nd.stats.total += 1;
-      const isCombo = (weeklyMode || homeworkMode) && item.sub === "combo";
-      const isListening = q && q.type === "listening";
       if (isListening) nd.listenStats.total += 1;
       // AI 自我核验:verdict 是 correct 但 selfCheck 为 false,说明判定和讲解自相矛盾,
       // 存在"误判为 correct 导致漏检"的风险 → 不直接放行,继续留在错题本等人工复核
@@ -2155,7 +2332,7 @@ function AppInner() {
       const outsideOnly = g.errorScope === "outside" && g.verdict !== "correct";
       if (g.verdict !== "correct" || needsReview) {
         // 答错/需要复核:连续答对计数清零,刷新这条错题的最新内容
-        const base = { task: q.task, type: q.type, ans: answer.trim() || "(未作答)", ref: g.reference, exp: g.explanation, breakdown: g.breakdown || null, date: t, needsReview, streak: 0, nonPattern: outsideOnly };
+        const base = { task: cq.task, type: cq.type, ans: (cAnswer || "").trim() || "(未作答)", ref: g.reference, exp: g.explanation, breakdown: g.breakdown || null, date: t, needsReview, streak: 0, nonPattern: outsideOnly };
         const idPart = isCombo ? { pid: item.p1.id, pid2: item.p2.id } : { pid: item.p.id };
         if (item.mistakeId) {
           // 重练了还是不对/仍需复核:刷新原来那条记录,而不是再叠加一条新的
@@ -2178,7 +2355,7 @@ function AppInner() {
       }
       // 注意:复合题(combo)的 item 只有 p1/p2、没有 p。目前所有 combo 路径都是 freeMode(不影响排期),
       // 所以走不到这里;但加一道 item.p 的保险,免得将来改动时漏设 freeMode 直接崩掉。
-      if (!freeMode && item.p) {
+      if (!cFree && item.p) {
         const existed = nd.prog[item.p.id];
         const cur = existed ? { ...existed } : { lv: 0, ok: 0, ng: 0, learnedDate: t };
         let { lv } = cur;
@@ -2219,10 +2396,13 @@ function AppInner() {
     // 这样中断后重新进来续做也不会因为 ref 被重置而又追加一轮
     if (queue.some((it) => it.isExtra)) return false;
     if (queue.some((it) => it.fromBacklog)) return false;
-    const done = sessionStats.ok + sessionStats.partial + sessionStats.wrong;
-    if (done === 0) return false;
+    // 正确率从 gradeStates 里现算,而不是读 sessionStats:判卷是异步的,
+    // sessionStats 由各个判卷回调分别累加,此刻可能还没加完
+    const graded = Object.values(gradeStates).filter((st) => st.status === "done");
+    if (!graded.length) return false;
+    const okCount = graded.filter((st) => st.result && st.result.verdict === "correct").length;
     // 只把完全答对的算进正确率:partial 说明还有小错,不该被当成"做得顺"
-    if (sessionStats.ok / done < HW_EXTRA_ACCURACY) return false;
+    if (okCount / graded.length < HW_EXTRA_ACCURACY) return false;
     return hwExtraCandidates().length > 0;
   };
   const buildHwExtras = () => hwExtraCandidates()
@@ -2256,17 +2436,38 @@ function AppInner() {
       setIdx(nextIdx);
       beginHomeworkItem(extras[0], nextIdx);
     } else {
-      setDb((d) => {
-        const nd = { ...d, meta: { ...d.meta }, session: null };
-        // 走到这里说明整批(含并入的积压题)都做完了,没有残留——债务已经还清,
-        // 不清掉 hwBacklog 的话,它记的"已经欠了几个批次"会在下次真正产生新积压时被误继承
-        if (homeworkMode) { nd.meta.hwDate = t; nd.hwBacklog = null; }
-        if (weeklyFormal) nd.meta.weekKey = mondayOf(t);
-        return nd;
-      });
-      setPhase("done");
+      // 队尾:可能还有几题的判卷在后台飞着,先进 waiting 等它们回来。
+      // 追加题要不要出、以及最终统计,都得等判卷齐了才能算准(见下面那个 useEffect)。
+      setPhase("waiting");
     }
   };
+
+  /* 队尾等判卷:所有判卷都落地之后,再决定是追加题目还是真的收尾。
+     必须等齐才判断——追加的条件看的是正确率,判卷没回来时正确率是不准的。 */
+  useEffect(() => {
+    if (phase !== "waiting") return;
+    const pending = Object.values(gradeStates).some((st) => st.status === "grading");
+    if (pending) return;
+    if (shouldAppendHwExtra()) {
+      const extras = hwExtraPlanRef.current && hwExtraPlanRef.current.length ? hwExtraPlanRef.current : buildHwExtras();
+      hwExtraPlanRef.current = null;
+      const nextIdx = queue.length;
+      setQueue([...queue, ...extras]);
+      setIdx(nextIdx);
+      beginHomeworkItem(extras[0], nextIdx);
+      return;
+    }
+    setDb((d) => {
+      const nd = { ...d, meta: { ...d.meta }, session: null };
+      // 走到这里说明整批(含并入的积压题)都做完了,没有残留——债务已经还清,
+      // 不清掉 hwBacklog 的话,它记的"已经欠了几个批次"会在下次真正产生新积压时被误继承
+      if (homeworkMode) { nd.meta.hwDate = t; nd.hwBacklog = null; }
+      if (weeklyFormal) nd.meta.weekKey = mondayOf(t);
+      return nd;
+    });
+    setPhase("done");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, gradeStates]);
 
   const retry = () => {
     const item = queue[idx];
@@ -2277,18 +2478,12 @@ function AppInner() {
       else if (dialoguePhase === "reviewing") finishDialogue(dialogueHistory);
       else setPhase("dialogue"); // 单纯是continueDialogue失败,回到聊天界面,用户重发一次就行
     } else if ((weeklyMode || homeworkMode) && item.sub === "combo") {
-      if (!q) loadComboQuestion(item.p1, item.p2);
-      else if (result === null && answer.trim()) submit();
-      else loadComboQuestion(item.p1, item.p2);
+      loadComboQuestion(item.p1, item.p2);
     } else if (listenMode) {
-      if (!q) loadListeningQuestion(item.p);
-      else if (result === null && answer.trim()) submit();
-      else loadListeningQuestion(item.p);
+      loadListeningQuestion(item.p);
     } else {
       const ft = (weeklyMode && item.sub === "weak") || (homeworkMode && item.hw === "trans") ? "translation" : undefined;
-      if (!q) loadQuestion(item.p, ft);
-      else if (result === null && answer.trim()) submit();
-      else loadQuestion(item.p, ft);
+      loadQuestion(item.p, ft);
     }
   };
 
@@ -2739,11 +2934,26 @@ function AppInner() {
 
           <section className="today-card">
             <div className="today-nums">
-              <div className="num-block"><div className="num shu">{dueList.length}</div><div className="num-label">待复习</div></div>
+              <div className="num-block">
+                <div className="num shu">{dueList.length}{deferredCount > 0 && <span className="num-total">/{dueAll.length}</span>}</div>
+                <div className="num-label">待复习</div>
+              </div>
               <div className="num-block"><div className="num ai-c">{newList.length}</div><div className="num-label">新句型</div></div>
               <div className="num-block"><div className="num">{learnedIds.length}<span className="num-total">/{PATTERNS.length}</span></div><div className="num-label">已学</div></div>
             </div>
+            {deferredCount > 0 && (
+              <div className="pause-hint">
+                📥 到期共 {dueAll.length} 题,按每日上限 {reviewCap} 题安排,其余 {deferredCount} 题顺延——
+                优先做的是间隔最短、逾期最久的(最容易忘的那些)
+              </div>
+            )}
             {newPatternsPaused && <div className="pause-hint">⏸ 待复习积压较多,已暂停引入新句型,先把复习消化完</div>}
+            {db.meta.autoDowngradedAt === t && (
+              <div className="pause-hint">
+                ⚙️ 连续多天复习上限用满,已自动把每日新句型下调到 {db.settings.newPerDay} 个,
+                先消化积压。想调回去可以在设置里改。
+              </div>
+            )}
             {dueList.length + newList.length > 0 ? (
               <button className="btn-main" onClick={startSession}>開始 · 今日の学習</button>
             ) : (
@@ -2835,14 +3045,29 @@ function AppInner() {
             )}
           </section>
 
+          {/* 注意这里必须展开 ...d.settings:以前写成 settings:{newPerDay:...} 会把整个
+              settings 换掉,顺手把已选的听力语音(voiceURI)清空 */}
           <section className="settings-row">
             <span>每天新学句型</span>
             <div className="stepper">
-              <button onClick={() => setDb((d) => ({ ...d, settings: { newPerDay: Math.max(0, d.settings.newPerDay - 1) } }))}>−</button>
+              <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, newPerDay: Math.max(0, d.settings.newPerDay - 1) } }))}>−</button>
               <b>{db.settings.newPerDay}</b>
-              <button onClick={() => setDb((d) => ({ ...d, settings: { newPerDay: Math.min(10, d.settings.newPerDay + 1) } }))}>＋</button>
+              <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, newPerDay: Math.min(20, d.settings.newPerDay + 1) } }))}>＋</button>
             </div>
           </section>
+
+          <section className="settings-row">
+            <span>每天复习上限</span>
+            <div className="stepper">
+              <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, reviewCap: Math.max(10, (d.settings.reviewCap || REVIEW_CAP_DEFAULT) - 5) } }))}>−</button>
+              <b>{db.settings.reviewCap || REVIEW_CAP_DEFAULT}</b>
+              <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, reviewCap: Math.min(200, (d.settings.reviewCap || REVIEW_CAP_DEFAULT) + 5) } }))}>＋</button>
+            </div>
+          </section>
+          <div className="settings-note">
+            超出上限的到期句型会顺延到之后,不会消失。进入 N3/N2 之后句子变长、单题更费时,
+            可以把这个数字调低。
+          </div>
 
           {db.stats.total > 0 && (
             <div className="mini-stats">累计答题 {db.stats.total} · 正确率 {Math.round((db.stats.ok / db.stats.total) * 100)}%</div>
@@ -2901,6 +3126,12 @@ function AppInner() {
             </div>
           )}
 
+          {/* 提交完就进下一题了,这里让你看到后台正在判几题——不然会以为提交没生效 */}
+          {phase !== "done" && phase !== "waiting" && (() => {
+            const g = Object.values(gradeStates).filter((st) => st.status === "grading").length;
+            return g > 0 ? <div className="bg-grading">⏳ {g} 题正在后台判卷,做完最后一题会一起给出讲评</div> : null;
+          })()}
+
           {phase !== "done" && (
             <div className="pattern-head">
               <span className={"tag " + (weeklyMode ? "tag-wk" : homeworkMode ? "tag-hw" : listenMode ? "tag-ls" : cur.isNew ? "tag-new" : "tag-rev")}>
@@ -2935,10 +3166,10 @@ function AppInner() {
             </section>
           )}
 
-          {(phase === "loadingQ" || phase === "grading") && (
+          {phase === "loadingQ" && (
             <section className="card loading-card">
               <div className="dots"><span /><span /><span /></div>
-              <div className="loading-text">{phase === "loadingQ" ? "先生が問題を作っています…" : "先生が採点しています…"}</div>
+              <div className="loading-text">先生が問題を作っています…</div>
             </section>
           )}
 
@@ -3019,7 +3250,7 @@ function AppInner() {
             </section>
           )}
 
-          {(phase === "question" || phase === "result") && q && (
+          {phase === "question" && q && (
             <section className="card">
               <div className="q-type">{q.label || (q.type === "translation" ? "翻訳 · 把下面的中文译成日语" : "作文 · 根据场景用该句型造句")}</div>
               {q.type === "listening" ? (
@@ -3033,7 +3264,7 @@ function AppInner() {
                 </div>
               )}
 
-              {phase === "question" && (
+              {(
                 <>
                   <textarea
                     className="answer-box serif"
@@ -3058,24 +3289,19 @@ function AppInner() {
                   </div>
                 </>
               )}
+            </section>
+          )}
 
-              {phase === "result" && result && (
-                <div className="result-wrap">
-                  <Stamp verdict={result.verdict} />
-                  {result.verdict === "correct" && result.selfCheck === false && (
-                    <div className="review-flag">⚠️ 建议复核 · AI判定与讲解有出入,已留在错题本</div>
-                  )}
-                  {result.verdict !== "correct" && result.errorScope === "outside" && (
-                    <div className="scope-flag">✓ 句型本身用对了 · 错的是句型之外的词/助词,这个句型的复习间隔照常拉长,错的地方单独记进错题本</div>
-                  )}
-                  {answer.trim() && <div className="your-ans"><label>你的答案</label><div className="serif">{answer}</div></div>}
-                  <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{furiganaify(result.reference)}</div></div>
-                  <div className="exp-block"><label>先生の講評</label><div>{result.explanation}</div></div>
-                  <BreakdownBlock breakdown={result.breakdown} />
-                  <FollowUpAsk key={idx} contextSummary={buildFollowUpContext(cur, q, answer, result)} />
-                  <button className="btn-main" onClick={next}>{nextBtnLabel()}</button>
-                </div>
-              )}
+          {phase === "waiting" && (
+            <section className="card done-card">
+              <div className="done-title serif">採点中…</div>
+              <p className="done-note">
+                前面几题的判卷是你做题的时候在后台跑的,现在只剩最后几题还没回来。
+              </p>
+              <div className="grading-progress">
+                已判完 {Object.values(gradeStates).filter((st) => st.status !== "grading").length} / {Object.keys(gradeStates).length} 题
+              </div>
+              <div className="dlg-typing"><span></span><span></span><span></span></div>
             </section>
           )}
 
@@ -3103,6 +3329,59 @@ function AppInner() {
                 <div className="done-extra-note">今天做得不错,额外追加了 {queue.filter((it) => it.isExtra).length} 道错题本里的题</div>
               )}
               <p className="done-note">{weeklyMode ? "本周综合挑战已完成,做错的组合题/弱点题已收入錯題本。" : homeworkMode ? "今日作业已完成,做对的错题已自动清除。" : listenMode ? "聴解練習已完成,没听懂的已收入錯題本。" : "答对的句型间隔已拉长,答错的明天会再次出现。"}</p>
+              <button className="btn-main" onClick={() => setView("home")}>返回首页</button>
+            </section>
+          )}
+
+          {/* 判卷结果统一在最后展示。判卷是你做题时在后台并行跑的,所以中间不用等;
+              这里按题号顺序把每道题的讲评列出来,每条都能单独追问。 */}
+          {phase === "done" && Object.keys(gradeStates).length > 0 && (
+            <section className="card">
+              <div className="results-head">全部讲评({Object.keys(gradeStates).length} 题)</div>
+              {Object.keys(gradeStates).map(Number).sort((a, b) => a - b).map((gi) => {
+                const st = gradeStates[gi];
+                const c = st.ctx;
+                if (st.status === "error") {
+                  return (
+                    <div key={gi} className="result-item">
+                      <div className="result-item-head">第 {gi + 1} 题</div>
+                      <div className="cf-err">判卷失败:{st.error}</div>
+                      <button className="btn-mini" onClick={() => retryGrade(gi)}>重新判这道题</button>
+                    </div>
+                  );
+                }
+                if (st.status !== "done") {
+                  return (
+                    <div key={gi} className="result-item">
+                      <div className="result-item-head">第 {gi + 1} 题</div>
+                      <div className="followup-loading">判卷中…</div>
+                    </div>
+                  );
+                }
+                const r = st.result;
+                return (
+                  <div key={gi} className="result-item">
+                    <div className="result-item-head">
+                      第 {gi + 1} 题
+                      <span className={"result-item-verdict rv-" + r.verdict}>
+                        {r.verdict === "correct" ? "◎ 正解" : r.verdict === "partial" ? "△ 接近" : "✗ 再来"}
+                      </span>
+                    </div>
+                    <div className="result-item-q serif">{c.isListening ? "🎧 " + (c.q.jp || "") : c.q.task}</div>
+                    {r.verdict === "correct" && r.selfCheck === false && (
+                      <div className="review-flag">⚠️ 建议复核 · AI判定与讲解有出入,已留在错题本</div>
+                    )}
+                    {r.verdict !== "correct" && r.errorScope === "outside" && (
+                      <div className="scope-flag">✓ 句型本身用对了 · 错的是句型之外的词/助词,这个句型的复习间隔照常拉长,错的地方单独记进错题本</div>
+                    )}
+                    {c.answer && <div className="your-ans"><label>你的答案</label><div className="serif">{c.answer}</div></div>}
+                    <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{furiganaify(r.reference)}</div></div>
+                    <div className="exp-block"><label>先生の講評</label><div>{r.explanation}</div></div>
+                    <BreakdownBlock breakdown={r.breakdown} />
+                    <FollowUpAsk key={gi} contextSummary={buildFollowUpContext(c.item, c.q, c.answer, r)} />
+                  </div>
+                );
+              })}
               <button className="btn-main" onClick={() => setView("home")}>返回首页</button>
             </section>
           )}
@@ -3864,6 +4143,16 @@ function Style() {
 .d-ok{color:var(--shu);font-weight:700}.d-pt{color:var(--stat-partial)}.d-ng{color:var(--ink-soft)}
 .done-breakdown{background:var(--tint-panel);border-radius:10px;padding:10px 14px;margin:0 0 14px;font-size:13px;color:var(--ink-soft);text-align:left}
 .done-breakdown-row{line-height:1.8}
+.bg-grading{font-size:11px;color:var(--ai);background:var(--tint-blue-bg);border-radius:8px;padding:6px 10px;margin-bottom:10px}
+.settings-note{font-size:11px;color:var(--ink-soft);line-height:1.6;margin:-4px 0 10px}
+.grading-progress{font-size:13px;color:var(--ink-soft);margin:10px 0}
+.results-head{font-size:13px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:4px}
+.result-item{padding:16px 0;border-bottom:1px dashed var(--line)}
+.result-item:last-of-type{border-bottom:none}
+.result-item-head{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-soft);margin-bottom:6px}
+.result-item-verdict{font-weight:700}
+.rv-correct{color:var(--shu)}.rv-partial{color:var(--stat-partial)}.rv-wrong{color:var(--ink-soft)}
+.result-item-q{font-size:15px;color:var(--ink);line-height:1.7;margin-bottom:4px}
 .done-extra-note{font-size:12px;color:var(--tint-green-fg);background:var(--tint-green-bg);border-radius:10px;padding:8px 12px;margin-bottom:12px}
 .done-note{font-size:13px;color:var(--ink-soft);margin-bottom:8px}
 

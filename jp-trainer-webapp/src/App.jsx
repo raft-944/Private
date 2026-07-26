@@ -1485,6 +1485,10 @@ function AppInner() {
   const [homeworkMode, setHomeworkMode] = useState(false);
   const [weeklyMode, setWeeklyMode] = useState(false);
   const [listenMode, setListenMode] = useState(false);
+  /* 錯題本"一键练习":一次性把多条错题(可能混着普通句型/複合作文/聴解)排成一个队列。
+     和 homeworkMode 一样是"队列里每道题自己的形状决定怎么出题",不是同一种题型贯穿全场,
+     所以需要一个独立的 mode 标记,好在 combo/listening 判断里加进去。 */
+  const [drillMode, setDrillMode] = useState(false);
   /* 判卷结果出来后"针对这道题追问"要用的上下文摘要,按题型把句型/题目/答案/参考/讲解拼一份
      给 askFollowUp。item 是 queue[idx](即 cur),g 是判卷结果(result)。 */
   const buildFollowUpContext = (item, question, ans, g) => {
@@ -1937,8 +1941,9 @@ function AppInner() {
     for (let i = fromIdx; i < Math.min(fromIdx + LOOKAHEAD, q.length); i++) {
       const it = q[i];
       // 只有"单句型 + 需要AI出题"的题位能预取:新句型要等你读完介绍页、
-      // 造句题是固定文案、複合作文和情景对话各有自己的生成路径
-      if (!it || !it.p || it.isNew || it.sub === "combo" || it.hw === "dialogue" || it.hw === "comp") continue;
+      // 造句题是固定文案、複合作文和情景对话各有自己的生成路径、聴解(drillKind==="listen",
+      // 錯題本一键练习里混进来的听力题)也是独立的生成器
+      if (!it || !it.p || it.isNew || it.sub === "combo" || it.hw === "dialogue" || it.hw === "comp" || it.drillKind === "listen") continue;
       want.push({ idx: i, p: it.p });
     }
     if (!want.length) return;
@@ -1958,7 +1963,7 @@ function AppInner() {
     preGenRef.current = {};
     prefetchingRef.current.clear();
     prefetchFailRef.current = 0;
-    setQueue(items); setIdx(0); setFreeMode(false); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
+    setQueue(items); setIdx(0); setFreeMode(false); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginItem(items[0], 0);
@@ -1973,7 +1978,7 @@ function AppInner() {
 
   const startFree = (p, mistakeId) => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
-    setQueue([{ p, isNew: false, mistakeId }]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
+    setQueue([{ p, isNew: false, mistakeId }]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     loadQuestion(p);
@@ -1982,10 +1987,45 @@ function AppInner() {
   const startListenFree = (p, mistakeId) => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     const item = { p, isNew: false, mistakeId };
-    setQueue([item]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(true);
+    setQueue([item]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(true); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginListenItem(item);
+  };
+
+  /* 錯題本"一键练习全部":把錯題本里能直接重练的条目(排除練習帳来的——那些没有 pid,
+     要走各自的知识辨析/场景对话/邮件重练入口,没法塞进这个统一队列)一次性排成一个队列。
+     每道题的形状(combo/listening/普通)不一样,靠 beginDrillItem 按各自的形状分派——
+     和 beginHomeworkItem 是同一个思路,因为作业本身也是"一队里混着好几种题型"。
+     刻意设成 freeMode=true:这样 applyResult 里"排期更新"那段(靠 !freeMode 判断)
+     完全不会被这次练习碰到——不管这批错题答得好不好,都不影响任何句型的复习间隔,
+     也就不会改变"今日到期"的数量。真正会变化的只有 db.mistakes 本身:连续答对
+     MISTAKE_CLEAR_STREAK 次的题会被移出错题本,这条逻辑复用的是 applyResult 里
+     已经写好的"存在 item.mistakeId 就按错题处理"通用分支,不需要另写一套。 */
+  const startMistakeDrill = () => {
+    sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
+    const items = db.mistakes
+      .filter((m) => m.source !== "confusion") // 練習帳来的错题没有 pid,走它自己的重练入口
+      .map((m) => m.pid2 !== undefined
+        ? { sub: "combo", p1: PATTERNS[m.pid], p2: PATTERNS[m.pid2], mistakeId: m.id }
+        : m.type === "listening"
+        ? { p: PATTERNS[m.pid], mistakeId: m.id, drillKind: "listen" }
+        : { p: PATTERNS[m.pid], mistakeId: m.id });
+    if (!items.length) return;
+    preGenRef.current = {};
+    prefetchingRef.current.clear();
+    prefetchFailRef.current = 0;
+    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false); setDrillMode(true);
+    setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
+    setView("session");
+    beginDrillItem(items[0], 0);
+    // 后台批量预取普通句型题位(combo/听力各有自己的生成器,不走这条批量通道,
+    // 逻辑和 startSession/startHomework 里跳过 combo/対话的道理一样)
+    const plainIndexed = items
+      .map((it, idx) => ({ idx, p: it.p, sub: it.sub, drillKind: it.drillKind }))
+      .filter((it) => it.sub !== "combo" && it.drillKind !== "listen" && it.idx !== 0)
+      .map((it) => ({ ...it, type: Math.random() < 0.6 ? "translation" : "composition" }));
+    runPrefetch(plainIndexed, (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type }))));
   };
 
   /* 每日情景对话选场景:优先挑跟当前错题/薄弱句型(lv很低的)有关联的场景,
@@ -2084,7 +2124,7 @@ function AppInner() {
     prefetchingRef.current.clear();
     prefetchFailRef.current = 0;
     hwExtraPlanRef.current = null; // 新的一批作业,上一批没用掉的追加计划作废
-    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(true); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
+    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(true); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0, backlogOk: 0, backlogPartial: 0, backlogWrong: 0 }); setGradeStates({});
     setView("session");
     beginHomeworkItem(items[0], 0);
@@ -2158,7 +2198,7 @@ function AppInner() {
       ...combos.map(([p1, p2]) => ({ sub: "combo", p1, p2 })),
       ...weakPids.map((pid) => ({ sub: "weak", p: PATTERNS[pid] })),
     ];
-    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(true); setWeeklyFormal(true); setListenMode(false);
+    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(true); setWeeklyFormal(true); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginWeeklyItem(items[0]);
@@ -2170,7 +2210,7 @@ function AppInner() {
     if (learned.length === 0) return;
     const shuffled = [...learned].sort(() => Math.random() - 0.5);
     const items = Array.from({ length: 8 }, (_, i) => ({ p: shuffled[i % shuffled.length], isNew: false }));
-    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(true);
+    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(true); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginListenItem(items[0]);
@@ -2198,7 +2238,7 @@ function AppInner() {
 
   const startComboFree = (p1, p2, mistakeId) => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
-    setQueue([{ sub: "combo", p1, p2, mistakeId }]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(true); setWeeklyFormal(false); setListenMode(false);
+    setQueue([{ sub: "combo", p1, p2, mistakeId }]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(true); setWeeklyFormal(false); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginWeeklyItem({ sub: "combo", p1, p2, mistakeId });
@@ -2221,6 +2261,24 @@ function AppInner() {
     }
   };
 
+  /* 錯題本一键练习的队内分派:队列里混着 combo/听力/普通三种形状,按各自形状分派,
+     和 beginHomeworkItem 是同一个思路。普通题位复用 beginItem 那套预取缓存查找逻辑——
+     没有新句型这一支,錯題本里的条目不可能是"还没学过"的新句型。 */
+  const beginDrillItem = (item, qIdx) => {
+    setAnswer(""); setQ(null); setHintedWords([]); setExWords(null);
+    if (item.sub === "combo") { loadComboQuestion(item.p1, item.p2); return; }
+    if (item.drillKind === "listen") { loadListeningQuestion(item.p); return; }
+    const cached = (qIdx != null ? preGenRef.current[qIdx] : null) || warmCache.get(item.p.id);
+    if (cached) {
+      if (qIdx != null) delete preGenRef.current[qIdx];
+      warmCache.delete(item.p.id);
+      setQ(cached);
+      setPhase("question");
+    } else {
+      loadQuestion(item.p);
+    }
+  };
+
   const resumeSession = () => {
     const s = db.session;
     if (!s) return;
@@ -2236,7 +2294,7 @@ function AppInner() {
     else if (s.kind === "weekly") items = s.items.map((d) => d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId } : { sub: "weak", p: PATTERNS[d.pid], mistakeId: d.mistakeId });
     else items = s.items.map((d) => ({ p: PATTERNS[d.pid], isNew: d.isNew }));
     setQueue(items); setIdx(s.idx); setSessionStats(s.stats || { ok: 0, partial: 0, wrong: 0 });
-    setFreeMode(s.kind !== "srs"); setHomeworkMode(s.kind === "homework"); setWeeklyMode(s.kind === "weekly"); setWeeklyFormal(s.kind === "weekly"); setListenMode(s.kind === "listen");
+    setFreeMode(s.kind !== "srs"); setHomeworkMode(s.kind === "homework"); setWeeklyMode(s.kind === "weekly"); setWeeklyFormal(s.kind === "weekly"); setListenMode(s.kind === "listen"); setDrillMode(false);
     setView("session");
     const item = items[s.idx];
     if (s.kind === "weekly") beginWeeklyItem(item);
@@ -2435,7 +2493,7 @@ function AppInner() {
     answer: ansText,
     giveUpText: giveUpText || null,
     hintedWords: [...hintedWords],
-    isCombo: (weeklyMode || homeworkMode) && item.sub === "combo",
+    isCombo: (weeklyMode || homeworkMode || drillMode) && item.sub === "combo",
     isListening: !!(q && q.type === "listening"),
     freeMode,
     homeworkMode,
@@ -2621,6 +2679,7 @@ function AppInner() {
     if (weeklyMode) beginWeeklyItem(nextItem);
     else if (homeworkMode) beginHomeworkItem(nextItem, nextIdx);
     else if (listenMode) beginListenItem(nextItem);
+    else if (drillMode) beginDrillItem(nextItem, nextIdx);
     else beginItem(nextItem, nextIdx);
     // 刚翻到最后一题:如果这时候看起来会触发追加,就提前把追加题的题面在后台取好,
     // 等真的追加时直接命中缓存、不用干等。没取到也不影响(beginHomeworkItem 会退回现场请求)
@@ -2664,9 +2723,9 @@ function AppInner() {
       if (!dialogueScene) beginDialogueItem(item);
       else if (dialoguePhase === "reviewing") finishDialogue(dialogueHistory);
       else setPhase("dialogue"); // 单纯是continueDialogue失败,回到聊天界面,用户重发一次就行
-    } else if ((weeklyMode || homeworkMode) && item.sub === "combo") {
+    } else if ((weeklyMode || homeworkMode || drillMode) && item.sub === "combo") {
       loadComboQuestion(item.p1, item.p2);
-    } else if (listenMode) {
+    } else if (listenMode || item.drillKind === "listen") {
       loadListeningQuestion(item.p);
     } else {
       const ft = (weeklyMode && item.sub === "weak") || (homeworkMode && item.hw === "trans") ? "translation" : undefined;
@@ -3432,18 +3491,18 @@ function AppInner() {
           {/* 分段讲评页/等判卷页展示的是一整组题,顶上再挂"当前句型"就对不上了 */}
           {phase !== "done" && phase !== "waiting" && phase !== "chunk" && (
             <div className="pattern-head">
-              <span className={"tag " + (weeklyMode ? "tag-wk" : homeworkMode ? "tag-hw" : listenMode ? "tag-ls" : cur.isNew ? "tag-new" : "tag-rev")}>
-                {weeklyMode ? (cur.sub === "combo" ? "週間 · 複合作文" : "週間 · 弱点再測") : homeworkMode ? (cur.isExtra ? "作業 · 追加問題" : cur.hw === "dialogue" ? "作業 · 情景対話" : cur.sub === "combo" ? "作業 · 複合作文" : cur.hw === "comp" ? "作業 · 造句" : "作業 · 翻訳") : listenMode ? "聴解練習" : freeMode ? "自由练习" : cur.isNew ? "新句型" : "复习"}
+              <span className={"tag " + (weeklyMode ? "tag-wk" : homeworkMode ? "tag-hw" : listenMode ? "tag-ls" : drillMode ? "tag-mk" : cur.isNew ? "tag-new" : "tag-rev")}>
+                {weeklyMode ? (cur.sub === "combo" ? "週間 · 複合作文" : "週間 · 弱点再測") : homeworkMode ? (cur.isExtra ? "作業 · 追加問題" : cur.hw === "dialogue" ? "作業 · 情景対話" : cur.sub === "combo" ? "作業 · 複合作文" : cur.hw === "comp" ? "作業 · 造句" : "作業 · 翻訳") : listenMode ? "聴解練習" : drillMode ? "錯題本 · 重练" : freeMode ? "自由练习" : cur.isNew ? "新句型" : "复习"}
               </span>
               {cur.hw === "dialogue" && dialogueScene ? (
                 <span className="pattern-name serif">{dialogueScene.userRole} ↔ {dialogueScene.aiRole}</span>
-              ) : (weeklyMode || homeworkMode) && cur.sub === "combo" ? (
+              ) : (weeklyMode || homeworkMode || drillMode) && cur.sub === "combo" ? (
                 <>
                   <span className="pattern-name serif">{cur.p1.pattern}</span>
                   <span className="combo-plus">＋</span>
                   <span className="pattern-name serif">{cur.p2.pattern}</span>
                 </>
-              ) : listenMode && phase !== "result" ? (
+              ) : (listenMode || cur.drillKind === "listen") && phase !== "result" ? (
                 <span className="pattern-name serif">？？？</span>
               ) : (
                 <>
@@ -3652,7 +3711,7 @@ function AppInner() {
               {homeworkMode && queue.some((it) => it.isExtra) && (
                 <div className="done-extra-note">今天做得不错,额外追加了 {queue.filter((it) => it.isExtra).length} 道错题本里的题</div>
               )}
-              <p className="done-note">{weeklyMode ? "本周综合挑战已完成,做错的组合题/弱点题已收入錯題本。" : homeworkMode ? "今日作业已完成,做对的错题已自动清除。" : listenMode ? "聴解練習已完成,没听懂的已收入錯題本。" : "答对的句型间隔已拉长,答错的明天会再次出现。"}</p>
+              <p className="done-note">{weeklyMode ? "本周综合挑战已完成,做错的组合题/弱点题已收入錯題本。" : homeworkMode ? "今日作业已完成,做对的错题已自动清除。" : listenMode ? "聴解練習已完成,没听懂的已收入錯題本。" : drillMode ? "錯題重练已完成,连续答对达标的题目已自动移出錯題本;这次练习不影响任何句型的复习间隔,也不影响今天的学习任务量。" : "答对的句型间隔已拉长,答错的明天会再次出现。"}</p>
               {/* 预取失败会表现为"做题时不停看到现场出题的转圈",但从界面上完全看不出原因。
                   这里报一下次数,下次出现卡顿时就有据可查,不用靠猜 */}
               {prefetchFailRef.current > 0 && (
@@ -4117,11 +4176,21 @@ function AppInner() {
         <main className="page">
           <h2 className="page-title serif">錯題本</h2>
           {db.mistakes.length === 0 && <div className="center-msg">还没有错题。錯題は宝物です — 出错了才会来这里。</div>}
-          {db.mistakes.length > 0 && (
-            <div className="drill-bar">
-              <div className="drill-note">这些错题会优先混入「毎日の宿題」,做对了自动移除,不用额外再点什么</div>
-            </div>
-          )}
+          {db.mistakes.length > 0 && (() => {
+            // 練習帳来的错题没有 pid,进不了这条统一队列,只能在各自的卡片上点"重练"
+            const drillCount = db.mistakes.filter((m) => m.source !== "confusion").length;
+            return (
+              <div className="drill-bar">
+                <div className="drill-note">这些错题会优先混入「毎日の宿題」,做对了自动移除,不用额外再点什么</div>
+                {drillCount > 0 && (
+                  <>
+                    <button className="btn-outline" onClick={startMistakeDrill}>▶ 一键练习全部错题({drillCount})</button>
+                    <div className="drill-note drill-note-sub">不影响任何句型的复习进度,也不影响今天的学习任务量——连续答对{MISTAKE_CLEAR_STREAK}次会移出錯題本,答错会继续留着</div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
           {db.mistakes.map((m, i) => {
             // 練習帳(知识辨析/场景对话/书面邮件)来的错题不挂钩具体句型,没有 pid,用 m.label 兜底展示。
             // 練習帳的"重练"需要当初存下来的上下文(topicId/sceneId/emailTopicId等)才能重新出题——
@@ -4290,6 +4359,7 @@ html,body{overflow-x:hidden}
 .tag-hw{background:var(--tint-red-bg);color:var(--shu)}
 .tag-wk{background:var(--tint-purple-bg);color:var(--tint-purple-fg)}
 .tag-ls{background:var(--tint-green-bg);color:var(--tint-green-fg)}
+.tag-mk{background:var(--tint-amber-bg);color:var(--tint-amber-fg)}
 .combo-plus{font-size:18px;color:var(--ink-soft);margin:0 -2px}
 .wk-card{border-color:var(--tint-purple-border)}
 .ls-card{border-color:var(--tint-green-border)}
@@ -4512,8 +4582,9 @@ html,body{overflow-x:hidden}
 
 .drill-bar{margin-bottom:16px;padding:14px 16px;background:var(--tint-purple-panel);border:1px solid var(--tint-purple-border);border-radius:12px}
 .drill-note{font-size:12px;color:var(--tint-purple-fg);margin-bottom:0;line-height:1.6}
-.drill-bar .btn-outline{border-color:var(--tint-purple-fg);color:var(--tint-purple-fg)}
+.drill-bar .btn-outline{border-color:var(--tint-purple-fg);color:var(--tint-purple-fg);margin-top:10px}
 .drill-bar .btn-outline:hover{background:var(--tint-purple-bg)}
+.drill-note-sub{margin-top:6px;opacity:.85}
 .mistake-card{margin-bottom:12px;padding:16px}
 .mk-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:15px;font-weight:700;color:var(--ai-deep)}
 .mk-head-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap}

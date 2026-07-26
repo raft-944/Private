@@ -500,7 +500,12 @@ function setCachedWords(text, words) {
    - 翻译(每个词的日语说法)则完全按需:用户点开哪个词才现查那一个词,单词级别的请求
      又小又快,不会因为要顾及整句话的语境和剧透规则而被拖慢或漏答。 */
 const TASK_SEGMENTS_FIELD = `"taskSegments":["中文题面按查词单位切分后的片段1","片段2","..."]`;
-const TASK_SEGMENTS_RULE = `taskSegments 是必须给的字段,不能省略、不能给空数组:把 task 这句中文按适合点查的自然单位切分好(不用切太细),只需要切分,不用给日语说法。切分片段按顺序拼接起来必须和 task 原文一字不差,不能有遗漏、增补或改动。`;
+/* "不用切太细"这半句和"每段不超过约6个字"这条上限看着像互相矛盾,但要解决的是两个
+   不同方向的问题:太细(比如按单字切)会让常用搭配、固定短语被拆散,查出来的读音/释义
+   脱离语境;太粗(整个分句当一段)会让"点一个词"实际上是在查大半句话,界面上的读音/释义
+   提示膨胀到盖住旁边的字(真实出现过的 bug)。上限给一个具体数字比"适度"这种形容词
+   更管用,AI 对"适度"的理解一次一个样。 */
+const TASK_SEGMENTS_RULE = `taskSegments 是必须给的字段,不能省略、不能给空数组:把 task 这句中文按适合点查的自然单位切分好——通常是一个词或一个固定搭配,不用切到单字,但每一段最多不超过约6个汉字,不能把大半句话、更不能把一整个分句当成一段(这会导致点开一个片段却弹出一整句话的翻译,界面会溢出、盖住旁边的文字)。切分片段按顺序拼接起来必须和 task 原文一字不差,不能有遗漏、增补或改动。`;
 
 /* 纯前端的粗糙中文分词,不调AI、瞬间出结果——只在AI漏给 taskSegments 时兜底用,
    按标点断句,句内简单按两字一组切(不追求语言学意义上的准确,只求有得点)。 */
@@ -544,14 +549,26 @@ function setCachedWordTr(sentence, word, tr) {
     localStorage.setItem(WORD_TR_CACHE_KEY, JSON.stringify(store));
   } catch { /* 缓存失败不影响功能,忽略即可 */ }
 }
+/* 点词查读音/释义:只要「要查的词/短语」本身对应的日语说法,不是把整句话重新翻译一遍。
+   这条规则是补出来的——AI 有时会把「要查的词/短语」当成"这道题该怎么答"来处理,
+   连语气词、开场白都加上,给出一整句自然对话式的翻译。这种情况下 jp/yomi 会比原词
+   长好几倍,而 ChineseTaskText 是把结果塞进这个词自己的 <ruby><rt> 里显示的——
+   annotation 比 base 长很多时,视觉上就是一个词的读音提示膨胀成盖住半句话,
+   看起来像是点一个词却把整句答案标了出来。 */
 async function translateTaskWord(sentence, word, targetDesc) {
   const sys = `あなたは日本語教師です。请给出中文短语在给定语境下最贴切的日语说法和假名读音。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `完整句子: ${sentence}
 要查的词/短语: ${word}
 这道题涉及的语法点(仅供理解语境,不代表要考这个词): ${targetDesc || "(无)"}
-输出JSON: {"jp":"这个词在这句话语境下最贴切的日语说法(汉字/假名写法都可以,用最自然的那种)","yomi":"这个说法对应的假名读音;如果jp本来就是纯假名,yomi和jp写一样的就行"}`;
+重要:只需要给出"要查的词/短语"这一小段本身对应的日语说法,不是整句话的日语翻译,也不是这道题的参考答案。即使这个词/短语看起来接近一整句话,也只翻译这一段文字本身,不要额外补充原文里没有的开场白、语气词、寒暄语,不要把它扩写成一句完整的自然对话。
+输出JSON: {"jp":"这个词/短语在这句话语境下最贴切的日语说法(汉字/假名写法都可以,用最自然的那种,长度应该和原词大致相当,不要整句重写)","yomi":"这个说法对应的假名读音;如果jp本来就是纯假名,yomi和jp写一样的就行"}`;
   const r = await callAI(sys, user, 400);
   if (!r.jp) throw new Error("bad word translation");
+  // 兜底:提示词说了也不能保证每次都听话,返回结果明显比原词长很多(经验值:超过原词3倍
+  // 且超过一个安全长度)大概率是把整句话搭进去了,这种情况宁可显示"?"也不要把超长文本
+  // 糊到界面上——ruby 的 rt 没有固定宽度限制,长到离谱的内容会视觉溢出、盖住旁边的字。
+  const tooLong = (s) => s && s.length > 14 && s.length > word.length * 3;
+  if (tooLong(r.jp) || tooLong(r.yomi || "")) throw new Error("word translation too long, likely echoed the whole sentence");
   return { jp: r.jp, yomi: r.yomi || r.jp };
 }
 
@@ -657,7 +674,8 @@ async function genQuestion(p, avoid, forceType) {
 题目类型: ${type === "translation" ? "翻译题——给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用上述句型" : `造句题——请按以下要求出题:
 1. 场景(中文,25字以内)只能表达一个清晰、单一的意思,不能同时塞入两件不相关的信息(例如不要把"喜欢什么"和"东西放在哪里"混在同一个场景里)
 2. 场景要让人一眼就能看出应该表达什么内容、用什么结构回答,不能有歧义,不能让人猜"到底要写哪一层意思"
-3. 场景里包含的信息必须刚好等于、也只等于目标句型所需要表达的内容——不多给、也不少给`}
+3. 场景里包含的信息必须刚好等于、也只等于目标句型所需要表达的内容——不多给、也不少给
+4. 如果目标句型的用法会随"谁在说/在说谁"而变化(比如ほしい・たい・痛い这类情感形容词:说自己能直接陈述,问对方必须用疑问句,说第三方要用ほしがっている/たがっている这类がる形式),场景必须让人一眼看出这句话是关于谁的、该写陈述句还是疑问句——比如要明确写"你想问朋友是否…"而不能只含糊地写"某人想要…",否则学习者读了场景根本猜不出该往哪个方向写`}
 话题方向: ${topic}
 ${avoid && avoid.length ? "避免与这些题目雷同: " + avoid.join(" / ") : ""}${personInstruction(p)}
 ${TASK_SEGMENTS_RULE}
@@ -702,7 +720,8 @@ ${list}
 
 出题要求:
 - "翻译题":给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型
-- "造句题":场景(中文,25字以内)只能表达一个清晰、单一的意思,不能同时塞入两件不相关的信息,不多给也不少给信息
+- "造句题":场景(中文,25字以内)只能表达一个清晰、单一的意思,不能同时塞入两件不相关的信息,不多给也不少给信息,要让人一眼看出该表达什么内容、不能有歧义
+- "造句题"如果目标句型的用法会随"谁在说/在说谁"而变化(比如ほしい・たい・痛い这类情感形容词:说自己能直接陈述,问对方必须用疑问句,说第三方要用ほしがっている/たがっている这类がる形式),场景必须让人一眼看出这句话是关于谁的、该写陈述句还是疑问句,不能含糊地只写"某人想要…"
 - 各题之间内容不要相似雷同
 - ${TASK_SEGMENTS_RULE}
 
@@ -1485,6 +1504,10 @@ function AppInner() {
   const [homeworkMode, setHomeworkMode] = useState(false);
   const [weeklyMode, setWeeklyMode] = useState(false);
   const [listenMode, setListenMode] = useState(false);
+  /* 錯題本"一键练习":一次性把多条错题(可能混着普通句型/複合作文/聴解)排成一个队列。
+     和 homeworkMode 一样是"队列里每道题自己的形状决定怎么出题",不是同一种题型贯穿全场,
+     所以需要一个独立的 mode 标记,好在 combo/listening 判断里加进去。 */
+  const [drillMode, setDrillMode] = useState(false);
   /* 判卷结果出来后"针对这道题追问"要用的上下文摘要,按题型把句型/题目/答案/参考/讲解拼一份
      给 askFollowUp。item 是 queue[idx](即 cur),g 是判卷结果(result)。 */
   const buildFollowUpContext = (item, question, ans, g) => {
@@ -1937,8 +1960,9 @@ function AppInner() {
     for (let i = fromIdx; i < Math.min(fromIdx + LOOKAHEAD, q.length); i++) {
       const it = q[i];
       // 只有"单句型 + 需要AI出题"的题位能预取:新句型要等你读完介绍页、
-      // 造句题是固定文案、複合作文和情景对话各有自己的生成路径
-      if (!it || !it.p || it.isNew || it.sub === "combo" || it.hw === "dialogue" || it.hw === "comp") continue;
+      // 造句题是固定文案、複合作文和情景对话各有自己的生成路径、聴解(drillKind==="listen",
+      // 錯題本一键练习里混进来的听力题)也是独立的生成器
+      if (!it || !it.p || it.isNew || it.sub === "combo" || it.hw === "dialogue" || it.hw === "comp" || it.drillKind === "listen") continue;
       want.push({ idx: i, p: it.p });
     }
     if (!want.length) return;
@@ -1958,7 +1982,7 @@ function AppInner() {
     preGenRef.current = {};
     prefetchingRef.current.clear();
     prefetchFailRef.current = 0;
-    setQueue(items); setIdx(0); setFreeMode(false); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
+    setQueue(items); setIdx(0); setFreeMode(false); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginItem(items[0], 0);
@@ -1973,7 +1997,7 @@ function AppInner() {
 
   const startFree = (p, mistakeId) => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
-    setQueue([{ p, isNew: false, mistakeId }]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
+    setQueue([{ p, isNew: false, mistakeId }]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     loadQuestion(p);
@@ -1982,10 +2006,45 @@ function AppInner() {
   const startListenFree = (p, mistakeId) => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     const item = { p, isNew: false, mistakeId };
-    setQueue([item]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(true);
+    setQueue([item]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(true); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginListenItem(item);
+  };
+
+  /* 錯題本"一键练习全部":把錯題本里能直接重练的条目(排除練習帳来的——那些没有 pid,
+     要走各自的知识辨析/场景对话/邮件重练入口,没法塞进这个统一队列)一次性排成一个队列。
+     每道题的形状(combo/listening/普通)不一样,靠 beginDrillItem 按各自的形状分派——
+     和 beginHomeworkItem 是同一个思路,因为作业本身也是"一队里混着好几种题型"。
+     刻意设成 freeMode=true:这样 applyResult 里"排期更新"那段(靠 !freeMode 判断)
+     完全不会被这次练习碰到——不管这批错题答得好不好,都不影响任何句型的复习间隔,
+     也就不会改变"今日到期"的数量。真正会变化的只有 db.mistakes 本身:连续答对
+     MISTAKE_CLEAR_STREAK 次的题会被移出错题本,这条逻辑复用的是 applyResult 里
+     已经写好的"存在 item.mistakeId 就按错题处理"通用分支,不需要另写一套。 */
+  const startMistakeDrill = () => {
+    sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
+    const items = db.mistakes
+      .filter((m) => m.source !== "confusion") // 練習帳来的错题没有 pid,走它自己的重练入口
+      .map((m) => m.pid2 !== undefined
+        ? { sub: "combo", p1: PATTERNS[m.pid], p2: PATTERNS[m.pid2], mistakeId: m.id }
+        : m.type === "listening"
+        ? { p: PATTERNS[m.pid], mistakeId: m.id, drillKind: "listen" }
+        : { p: PATTERNS[m.pid], mistakeId: m.id });
+    if (!items.length) return;
+    preGenRef.current = {};
+    prefetchingRef.current.clear();
+    prefetchFailRef.current = 0;
+    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false); setDrillMode(true);
+    setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
+    setView("session");
+    beginDrillItem(items[0], 0);
+    // 后台批量预取普通句型题位(combo/听力各有自己的生成器,不走这条批量通道,
+    // 逻辑和 startSession/startHomework 里跳过 combo/対话的道理一样)
+    const plainIndexed = items
+      .map((it, idx) => ({ idx, p: it.p, sub: it.sub, drillKind: it.drillKind }))
+      .filter((it) => it.sub !== "combo" && it.drillKind !== "listen" && it.idx !== 0)
+      .map((it) => ({ ...it, type: Math.random() < 0.6 ? "translation" : "composition" }));
+    runPrefetch(plainIndexed, (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type }))));
   };
 
   /* 每日情景对话选场景:优先挑跟当前错题/薄弱句型(lv很低的)有关联的场景,
@@ -2084,7 +2143,7 @@ function AppInner() {
     prefetchingRef.current.clear();
     prefetchFailRef.current = 0;
     hwExtraPlanRef.current = null; // 新的一批作业,上一批没用掉的追加计划作废
-    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(true); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false);
+    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(true); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0, backlogOk: 0, backlogPartial: 0, backlogWrong: 0 }); setGradeStates({});
     setView("session");
     beginHomeworkItem(items[0], 0);
@@ -2158,7 +2217,7 @@ function AppInner() {
       ...combos.map(([p1, p2]) => ({ sub: "combo", p1, p2 })),
       ...weakPids.map((pid) => ({ sub: "weak", p: PATTERNS[pid] })),
     ];
-    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(true); setWeeklyFormal(true); setListenMode(false);
+    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(true); setWeeklyFormal(true); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginWeeklyItem(items[0]);
@@ -2170,7 +2229,7 @@ function AppInner() {
     if (learned.length === 0) return;
     const shuffled = [...learned].sort(() => Math.random() - 0.5);
     const items = Array.from({ length: 8 }, (_, i) => ({ p: shuffled[i % shuffled.length], isNew: false }));
-    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(true);
+    setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(true); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginListenItem(items[0]);
@@ -2198,7 +2257,7 @@ function AppInner() {
 
   const startComboFree = (p1, p2, mistakeId) => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
-    setQueue([{ sub: "combo", p1, p2, mistakeId }]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(true); setWeeklyFormal(false); setListenMode(false);
+    setQueue([{ sub: "combo", p1, p2, mistakeId }]); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(true); setWeeklyFormal(false); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginWeeklyItem({ sub: "combo", p1, p2, mistakeId });
@@ -2221,6 +2280,24 @@ function AppInner() {
     }
   };
 
+  /* 錯題本一键练习的队内分派:队列里混着 combo/听力/普通三种形状,按各自形状分派,
+     和 beginHomeworkItem 是同一个思路。普通题位复用 beginItem 那套预取缓存查找逻辑——
+     没有新句型这一支,錯題本里的条目不可能是"还没学过"的新句型。 */
+  const beginDrillItem = (item, qIdx) => {
+    setAnswer(""); setQ(null); setHintedWords([]); setExWords(null);
+    if (item.sub === "combo") { loadComboQuestion(item.p1, item.p2); return; }
+    if (item.drillKind === "listen") { loadListeningQuestion(item.p); return; }
+    const cached = (qIdx != null ? preGenRef.current[qIdx] : null) || warmCache.get(item.p.id);
+    if (cached) {
+      if (qIdx != null) delete preGenRef.current[qIdx];
+      warmCache.delete(item.p.id);
+      setQ(cached);
+      setPhase("question");
+    } else {
+      loadQuestion(item.p);
+    }
+  };
+
   const resumeSession = () => {
     const s = db.session;
     if (!s) return;
@@ -2236,7 +2313,7 @@ function AppInner() {
     else if (s.kind === "weekly") items = s.items.map((d) => d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId } : { sub: "weak", p: PATTERNS[d.pid], mistakeId: d.mistakeId });
     else items = s.items.map((d) => ({ p: PATTERNS[d.pid], isNew: d.isNew }));
     setQueue(items); setIdx(s.idx); setSessionStats(s.stats || { ok: 0, partial: 0, wrong: 0 });
-    setFreeMode(s.kind !== "srs"); setHomeworkMode(s.kind === "homework"); setWeeklyMode(s.kind === "weekly"); setWeeklyFormal(s.kind === "weekly"); setListenMode(s.kind === "listen");
+    setFreeMode(s.kind !== "srs"); setHomeworkMode(s.kind === "homework"); setWeeklyMode(s.kind === "weekly"); setWeeklyFormal(s.kind === "weekly"); setListenMode(s.kind === "listen"); setDrillMode(false);
     setView("session");
     const item = items[s.idx];
     if (s.kind === "weekly") beginWeeklyItem(item);
@@ -2435,7 +2512,7 @@ function AppInner() {
     answer: ansText,
     giveUpText: giveUpText || null,
     hintedWords: [...hintedWords],
-    isCombo: (weeklyMode || homeworkMode) && item.sub === "combo",
+    isCombo: (weeklyMode || homeworkMode || drillMode) && item.sub === "combo",
     isListening: !!(q && q.type === "listening"),
     freeMode,
     homeworkMode,
@@ -2621,6 +2698,7 @@ function AppInner() {
     if (weeklyMode) beginWeeklyItem(nextItem);
     else if (homeworkMode) beginHomeworkItem(nextItem, nextIdx);
     else if (listenMode) beginListenItem(nextItem);
+    else if (drillMode) beginDrillItem(nextItem, nextIdx);
     else beginItem(nextItem, nextIdx);
     // 刚翻到最后一题:如果这时候看起来会触发追加,就提前把追加题的题面在后台取好,
     // 等真的追加时直接命中缓存、不用干等。没取到也不影响(beginHomeworkItem 会退回现场请求)
@@ -2664,9 +2742,9 @@ function AppInner() {
       if (!dialogueScene) beginDialogueItem(item);
       else if (dialoguePhase === "reviewing") finishDialogue(dialogueHistory);
       else setPhase("dialogue"); // 单纯是continueDialogue失败,回到聊天界面,用户重发一次就行
-    } else if ((weeklyMode || homeworkMode) && item.sub === "combo") {
+    } else if ((weeklyMode || homeworkMode || drillMode) && item.sub === "combo") {
       loadComboQuestion(item.p1, item.p2);
-    } else if (listenMode) {
+    } else if (listenMode || item.drillKind === "listen") {
       loadListeningQuestion(item.p);
     } else {
       const ft = (weeklyMode && item.sub === "weak") || (homeworkMode && item.hw === "trans") ? "translation" : undefined;
@@ -3432,18 +3510,18 @@ function AppInner() {
           {/* 分段讲评页/等判卷页展示的是一整组题,顶上再挂"当前句型"就对不上了 */}
           {phase !== "done" && phase !== "waiting" && phase !== "chunk" && (
             <div className="pattern-head">
-              <span className={"tag " + (weeklyMode ? "tag-wk" : homeworkMode ? "tag-hw" : listenMode ? "tag-ls" : cur.isNew ? "tag-new" : "tag-rev")}>
-                {weeklyMode ? (cur.sub === "combo" ? "週間 · 複合作文" : "週間 · 弱点再測") : homeworkMode ? (cur.isExtra ? "作業 · 追加問題" : cur.hw === "dialogue" ? "作業 · 情景対話" : cur.sub === "combo" ? "作業 · 複合作文" : cur.hw === "comp" ? "作業 · 造句" : "作業 · 翻訳") : listenMode ? "聴解練習" : freeMode ? "自由练习" : cur.isNew ? "新句型" : "复习"}
+              <span className={"tag " + (weeklyMode ? "tag-wk" : homeworkMode ? "tag-hw" : listenMode ? "tag-ls" : drillMode ? "tag-mk" : cur.isNew ? "tag-new" : "tag-rev")}>
+                {weeklyMode ? (cur.sub === "combo" ? "週間 · 複合作文" : "週間 · 弱点再測") : homeworkMode ? (cur.isExtra ? "作業 · 追加問題" : cur.hw === "dialogue" ? "作業 · 情景対話" : cur.sub === "combo" ? "作業 · 複合作文" : cur.hw === "comp" ? "作業 · 造句" : "作業 · 翻訳") : listenMode ? "聴解練習" : drillMode ? "錯題本 · 重练" : freeMode ? "自由练习" : cur.isNew ? "新句型" : "复习"}
               </span>
               {cur.hw === "dialogue" && dialogueScene ? (
                 <span className="pattern-name serif">{dialogueScene.userRole} ↔ {dialogueScene.aiRole}</span>
-              ) : (weeklyMode || homeworkMode) && cur.sub === "combo" ? (
+              ) : (weeklyMode || homeworkMode || drillMode) && cur.sub === "combo" ? (
                 <>
                   <span className="pattern-name serif">{cur.p1.pattern}</span>
                   <span className="combo-plus">＋</span>
                   <span className="pattern-name serif">{cur.p2.pattern}</span>
                 </>
-              ) : listenMode && phase !== "result" ? (
+              ) : (listenMode || cur.drillKind === "listen") && phase !== "result" ? (
                 <span className="pattern-name serif">？？？</span>
               ) : (
                 <>
@@ -3652,7 +3730,7 @@ function AppInner() {
               {homeworkMode && queue.some((it) => it.isExtra) && (
                 <div className="done-extra-note">今天做得不错,额外追加了 {queue.filter((it) => it.isExtra).length} 道错题本里的题</div>
               )}
-              <p className="done-note">{weeklyMode ? "本周综合挑战已完成,做错的组合题/弱点题已收入錯題本。" : homeworkMode ? "今日作业已完成,做对的错题已自动清除。" : listenMode ? "聴解練習已完成,没听懂的已收入錯題本。" : "答对的句型间隔已拉长,答错的明天会再次出现。"}</p>
+              <p className="done-note">{weeklyMode ? "本周综合挑战已完成,做错的组合题/弱点题已收入錯題本。" : homeworkMode ? "今日作业已完成,做对的错题已自动清除。" : listenMode ? "聴解練習已完成,没听懂的已收入錯題本。" : drillMode ? "錯題重练已完成,连续答对达标的题目已自动移出錯題本;这次练习不影响任何句型的复习间隔,也不影响今天的学习任务量。" : "答对的句型间隔已拉长,答错的明天会再次出现。"}</p>
               {/* 预取失败会表现为"做题时不停看到现场出题的转圈",但从界面上完全看不出原因。
                   这里报一下次数,下次出现卡顿时就有据可查,不用靠猜 */}
               {prefetchFailRef.current > 0 && (
@@ -4117,11 +4195,21 @@ function AppInner() {
         <main className="page">
           <h2 className="page-title serif">錯題本</h2>
           {db.mistakes.length === 0 && <div className="center-msg">还没有错题。錯題は宝物です — 出错了才会来这里。</div>}
-          {db.mistakes.length > 0 && (
-            <div className="drill-bar">
-              <div className="drill-note">这些错题会优先混入「毎日の宿題」,做对了自动移除,不用额外再点什么</div>
-            </div>
-          )}
+          {db.mistakes.length > 0 && (() => {
+            // 練習帳来的错题没有 pid,进不了这条统一队列,只能在各自的卡片上点"重练"
+            const drillCount = db.mistakes.filter((m) => m.source !== "confusion").length;
+            return (
+              <div className="drill-bar">
+                <div className="drill-note">这些错题会优先混入「毎日の宿題」,做对了自动移除,不用额外再点什么</div>
+                {drillCount > 0 && (
+                  <>
+                    <button className="btn-outline" onClick={startMistakeDrill}>▶ 一键练习全部错题({drillCount})</button>
+                    <div className="drill-note drill-note-sub">不影响任何句型的复习进度,也不影响今天的学习任务量——连续答对{MISTAKE_CLEAR_STREAK}次会移出錯題本,答错会继续留着</div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
           {db.mistakes.map((m, i) => {
             // 練習帳(知识辨析/场景对话/书面邮件)来的错题不挂钩具体句型,没有 pid,用 m.label 兜底展示。
             // 練習帳的"重练"需要当初存下来的上下文(topicId/sceneId/emailTopicId等)才能重新出题——
@@ -4290,6 +4378,7 @@ html,body{overflow-x:hidden}
 .tag-hw{background:var(--tint-red-bg);color:var(--shu)}
 .tag-wk{background:var(--tint-purple-bg);color:var(--tint-purple-fg)}
 .tag-ls{background:var(--tint-green-bg);color:var(--tint-green-fg)}
+.tag-mk{background:var(--tint-amber-bg);color:var(--tint-amber-fg)}
 .combo-plus{font-size:18px;color:var(--ink-soft);margin:0 -2px}
 .wk-card{border-color:var(--tint-purple-border)}
 .ls-card{border-color:var(--tint-green-border)}
@@ -4512,8 +4601,9 @@ html,body{overflow-x:hidden}
 
 .drill-bar{margin-bottom:16px;padding:14px 16px;background:var(--tint-purple-panel);border:1px solid var(--tint-purple-border);border-radius:12px}
 .drill-note{font-size:12px;color:var(--tint-purple-fg);margin-bottom:0;line-height:1.6}
-.drill-bar .btn-outline{border-color:var(--tint-purple-fg);color:var(--tint-purple-fg)}
+.drill-bar .btn-outline{border-color:var(--tint-purple-fg);color:var(--tint-purple-fg);margin-top:10px}
 .drill-bar .btn-outline:hover{background:var(--tint-purple-bg)}
+.drill-note-sub{margin-top:6px;opacity:.85}
 .mistake-card{margin-bottom:12px;padding:16px}
 .mk-head{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:15px;font-weight:700;color:var(--ai-deep)}
 .mk-head-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap}

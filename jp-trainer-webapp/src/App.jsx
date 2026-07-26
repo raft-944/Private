@@ -1760,13 +1760,26 @@ function AppInner() {
     if (Object.keys(gradeStates).length === 0) setExpandedGrades((s) => (s.size ? new Set() : s));
   }, [gradeStates]);
 
-  /* --- 进入分段讲评页/结果页时回到顶部 ---
+  /* --- 进入分段讲评页/结果页/对话复盘时回到顶部 ---
      上一屏可能正停在答题框附近,直接换成一长串讲评列表的话,视口会落在中间某道题上,
-     看起来像"漏了前面几题"。
+     看起来像"漏了前面几题"。waiting 现在也展示讲评列表(见下方渲染),所以一并加入。
+     dialoguePhase 切到 reviewed 同理:结束对话时人往往已经把聊天记录翻到底部,
+     复盘的讲评内容却是从顶上开始写的。
+     顺带:iOS Safari 有个老毛病——页面高度在不触发滚动事件的情况下变化时(比如这里
+     从"一个按钮"变成"一长串列表"),position:fixed 的底部导航栏有时会按旧高度定位、
+     悬在半空而不是贴在真正的视口底部。这个 scrollTo 顺手充当了一次强制滚动,
+     能让浏览器重新计算 fixed 元素的位置,是缓解该问题的手段之一(不能保证根治,
+     因为这类 WebKit 渲染问题在这个沙盒环境里没有真机 Safari 可复现验证)。
      (和其它 effect 一样,必须写在 `if (!db) return` 之前——hooks 数量不能变) */
   useEffect(() => {
-    if (phase === "chunk" || phase === "done") window.scrollTo(0, 0);
+    if (phase === "chunk" || phase === "done" || phase === "waiting") window.scrollTo(0, 0);
   }, [phase]);
+  useEffect(() => {
+    if (dialoguePhase === "reviewed") window.scrollTo(0, 0);
+  }, [dialoguePhase]);
+  useEffect(() => {
+    if (cfDialoguePhase === "reviewed") window.scrollTo(0, 0);
+  }, [cfDialoguePhase]);
 
   const confirmFirstUse = () => {
     setDb({ ...DEFAULT_DB });
@@ -3479,48 +3492,46 @@ function AppInner() {
                 )}
               </div>
 
-              {dialoguePhase !== "reviewed" && (
-                <>
-                  <div className="dlg-bubbles">
-                    {dialogueHistory.map((h, i) => (
-                      <div key={i} className={"dlg-bubble serif " + (h.role === "user" ? "dlg-user" : "dlg-ai")}>
-                        <div className="dlg-bubble-text">{h.text}</div>
-                        {h.tag === "natural" && <div className="dlg-tag dlg-tag-good">✓ 很自然</div>}
-                        {h.tag === "stiff" && <div className="dlg-tag dlg-tag-soso">可以更地道</div>}
-                      </div>
-                    ))}
-                    {dialogueBusy && dialoguePhase === "chatting" && (
-                      <div className="dlg-bubble dlg-ai dlg-typing"><span /><span /><span /></div>
-                    )}
+              {/* 对话记录不再随"是否已复盘"隐藏——复盘完还想回看自己刚才说了什么、
+                  AI 怎么接的,尤其是被标了 stiff/需要改进的那几句,原来一复盘就整段消失了。 */}
+              <div className="dlg-bubbles">
+                {dialogueHistory.map((h, i) => (
+                  <div key={i} className={"dlg-bubble serif " + (h.role === "user" ? "dlg-user" : "dlg-ai")}>
+                    <div className="dlg-bubble-text">{h.text}</div>
+                    {h.tag === "natural" && <div className="dlg-tag dlg-tag-good">✓ 很自然</div>}
+                    {h.tag === "stiff" && <div className="dlg-tag dlg-tag-soso">可以更地道</div>}
                   </div>
+                ))}
+                {dialogueBusy && dialoguePhase === "chatting" && (
+                  <div className="dlg-bubble dlg-ai dlg-typing"><span /><span /><span /></div>
+                )}
+              </div>
 
-                  {dialoguePhase === "chatting" && (
-                    <>
-                      <textarea
-                        className="answer-box serif"
-                        value={dialogueInput}
-                        onChange={(e) => setDialogueInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); sendDialogueTurn(); }
-                        }}
-                        placeholder="ここに日本語で書いてください…(Enter 提交 / Shift+Enter 换行)"
-                        rows={2}
-                        disabled={dialogueBusy}
-                        autoFocus
-                      />
-                      <div className="btn-row">
-                        <button className="btn-ghost" disabled={dialogueBusy || dialogueHistory.length === 0} onClick={() => finishDialogue(dialogueHistory)}>結束対話</button>
-                        <button className="btn-main" disabled={dialogueBusy || !dialogueInput.trim()} onClick={sendDialogueTurn}>送信</button>
-                      </div>
-                    </>
-                  )}
-                  {dialoguePhase === "reviewing" && (
-                    <div className="dlg-reviewing">
-                      <div className="dots"><span /><span /><span /></div>
-                      <div className="loading-text">先生が講評をまとめています…</div>
-                    </div>
-                  )}
+              {dialoguePhase === "chatting" && (
+                <>
+                  <textarea
+                    className="answer-box serif"
+                    value={dialogueInput}
+                    onChange={(e) => setDialogueInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); sendDialogueTurn(); }
+                    }}
+                    placeholder="ここに日本語で書いてください…(Enter 提交 / Shift+Enter 换行)"
+                    rows={2}
+                    disabled={dialogueBusy}
+                    autoFocus
+                  />
+                  <div className="btn-row">
+                    <button className="btn-ghost" disabled={dialogueBusy || dialogueHistory.length === 0} onClick={() => finishDialogue(dialogueHistory)}>結束対話</button>
+                    <button className="btn-main" disabled={dialogueBusy || !dialogueInput.trim()} onClick={sendDialogueTurn}>送信</button>
+                  </div>
                 </>
+              )}
+              {dialoguePhase === "reviewing" && (
+                <div className="dlg-reviewing">
+                  <div className="dots"><span /><span /><span /></div>
+                  <div className="loading-text">先生が講評をまとめています…</div>
+                </div>
               )}
 
               {dialoguePhase === "reviewed" && dialogueReview && (
@@ -3598,18 +3609,25 @@ function AppInner() {
             );
           })()}
 
-          {phase === "waiting" && (
-            <section className="card done-card">
-              <div className="done-title serif">採点中…</div>
-              <p className="done-note">
-                前面几题的判卷是你做题的时候在后台跑的,现在只剩最后几题还没回来。
-              </p>
-              <div className="grading-progress">
-                已判完 {Object.values(gradeStates).filter((st) => st.status !== "grading").length} / {Object.keys(gradeStates).length} 题
-              </div>
-              <div className="dlg-typing"><span></span><span></span><span></span></div>
-            </section>
-          )}
+          {/* 队尾等判卷:以前是一个纯"採点中…"的空白等待页,要等全部判完才能看到任何一题的内容,
+              跟中间每一组"边判边看"的体验完全不一样,像是走进了另一个功能。
+              改成直接展示最后这一组的讲评列表——判完的题正常显示,没判完的显示"判卷中…",
+              和 phase==="chunk" 是同一份渲染逻辑(keys 范围也是同一个 chunkFrom~idx),
+              全部判完后上面那个 effect 会自动把 phase 切到 done,这个页面自己就不需要按钮。 */}
+          {phase === "waiting" && (() => {
+            const keys = gradedIdxInRange(chunkFrom, idx);
+            const pending = keys.filter((gi) => gradeStates[gi] && gradeStates[gi].status === "grading").length;
+            return (
+              <section className="card">
+                <div className="results-head">
+                  第 {chunkFrom + 1}–{idx + 1} 题讲评
+                  {pending > 0 && <span className="results-pending"> · {pending} 题还在判卷中,结果会自己填上</span>}
+                  {gradeExpandToggle(keys)}
+                </div>
+                {keys.map(renderGradeItem)}
+              </section>
+            );
+          })()}
 
           {phase === "done" && (
             <section className="card done-card">
@@ -3953,46 +3971,43 @@ function AppInner() {
 
             {cfDialogueErr && <div className="cf-err">{cfDialogueErr}</div>}
 
-            {cfDialoguePhase !== "reviewed" && (
-              <>
-                <div className="dlg-bubbles">
-                  {cfDialogueHistory.map((h, i) => (
-                    <div key={i} className={"dlg-bubble serif " + (h.role === "user" ? "dlg-user" : "dlg-ai")}>
-                      <div className="dlg-bubble-text">{h.text}</div>
-                      {h.tag === "natural" && <div className="dlg-tag dlg-tag-good">✓ 很自然</div>}
-                      {h.tag === "stiff" && <div className="dlg-tag dlg-tag-soso">可以更地道</div>}
-                    </div>
-                  ))}
-                  {cfDialogueBusy && cfDialoguePhase === "chatting" && (
-                    <div className="dlg-bubble dlg-ai dlg-typing"><span /><span /><span /></div>
-                  )}
+            {/* 对话记录不再随"是否已复盘"隐藏,理由同主线的情景対話 */}
+            <div className="dlg-bubbles">
+              {cfDialogueHistory.map((h, i) => (
+                <div key={i} className={"dlg-bubble serif " + (h.role === "user" ? "dlg-user" : "dlg-ai")}>
+                  <div className="dlg-bubble-text">{h.text}</div>
+                  {h.tag === "natural" && <div className="dlg-tag dlg-tag-good">✓ 很自然</div>}
+                  {h.tag === "stiff" && <div className="dlg-tag dlg-tag-soso">可以更地道</div>}
                 </div>
+              ))}
+              {cfDialogueBusy && cfDialoguePhase === "chatting" && (
+                <div className="dlg-bubble dlg-ai dlg-typing"><span /><span /><span /></div>
+              )}
+            </div>
 
-                {cfDialoguePhase === "chatting" && (
-                  <>
-                    <textarea
-                      className="answer-box serif"
-                      value={cfDialogueInput}
-                      onChange={(e) => setCfDialogueInput(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); sendConfusionDialogueTurn(); } }}
-                      placeholder="ここに日本語で書いてください…(Enter 提交 / Shift+Enter 换行)"
-                      rows={2}
-                      disabled={cfDialogueBusy}
-                      autoFocus
-                    />
-                    <div className="btn-row">
-                      <button className="btn-ghost" disabled={cfDialogueBusy || cfDialogueHistory.length === 0} onClick={() => finishConfusionDialogue(cfDialogueHistory)}>結束対話</button>
-                      <button className="btn-main" disabled={cfDialogueBusy || !cfDialogueInput.trim()} onClick={sendConfusionDialogueTurn}>送信</button>
-                    </div>
-                  </>
-                )}
-                {cfDialoguePhase === "reviewing" && (
-                  <div className="dlg-reviewing">
-                    <div className="dots"><span /><span /><span /></div>
-                    <div className="loading-text">先生が講評をまとめています…</div>
-                  </div>
-                )}
+            {cfDialoguePhase === "chatting" && (
+              <>
+                <textarea
+                  className="answer-box serif"
+                  value={cfDialogueInput}
+                  onChange={(e) => setCfDialogueInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); sendConfusionDialogueTurn(); } }}
+                  placeholder="ここに日本語で書いてください…(Enter 提交 / Shift+Enter 换行)"
+                  rows={2}
+                  disabled={cfDialogueBusy}
+                  autoFocus
+                />
+                <div className="btn-row">
+                  <button className="btn-ghost" disabled={cfDialogueBusy || cfDialogueHistory.length === 0} onClick={() => finishConfusionDialogue(cfDialogueHistory)}>結束対話</button>
+                  <button className="btn-main" disabled={cfDialogueBusy || !cfDialogueInput.trim()} onClick={sendConfusionDialogueTurn}>送信</button>
+                </div>
               </>
+            )}
+            {cfDialoguePhase === "reviewing" && (
+              <div className="dlg-reviewing">
+                <div className="dots"><span /><span /><span /></div>
+                <div className="loading-text">先生が講評をまとめています…</div>
+              </div>
             )}
 
             {cfDialoguePhase === "reviewed" && cfDialogueReview && (
@@ -4193,6 +4208,9 @@ function Style() {
   }
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+/* 兜底:任何一处文字算漏了 overflow-wrap 导致顶出边界,横向滚动也就止于裁切,
+   不会让整个页面出现可以左右滑动的横向滚动条(那样体验更差,而且会带偏底部导航栏的定位)。 */
+html,body{overflow-x:hidden}
 .app{min-height:100vh;min-height:100dvh;background:var(--paper);color:var(--ink);
   font-family:"Noto Sans JP","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
   max-width:640px;margin:0 auto;display:flex;flex-direction:column}
@@ -4324,7 +4342,11 @@ function Style() {
 .err-hint{background:var(--tint-cream);border-radius:10px;padding:12px;font-size:14px;line-height:1.7;color:var(--tint-amber-fg);margin-bottom:12px}
 
 .q-type{font-size:11px;letter-spacing:2px;color:var(--shu);margin-bottom:10px}
-.q-task{font-size:19px;line-height:1.7;margin-bottom:8px}
+/* overflow-wrap:anywhere 是保底:题面用 ChineseTaskText 逐词切分成一串 <ruby>,
+   AI 給的 taskSegments 有时会把一整个分句划成一整条(没切细),这一条本身没有空格、
+   不含常规换行点,遇到窄屏容易顶出边界。这条规则允许在没有更好断点时也强制换行,
+   命中就换、命中不到就什么都不做,不影响正常情况下的排版。 */
+.q-task{font-size:19px;line-height:1.7;margin-bottom:8px;overflow-wrap:anywhere}
 /* 造句题的「この文型…を使って、自由に文を作ってください」是固定的操作提示,不是要读的题面内容,
    给它小一号、颜色淡一点,省下的竖向空间让判卷结果里的「次へ」按钮更容易落在第一屏内。 */
 .q-task-instr{font-size:14px;line-height:1.6;color:var(--ink-soft)}
@@ -4570,7 +4592,14 @@ function Style() {
    visualViewport算出来的键盘遮挡高度)动态偏移,键盘弹起时导航栏跟着提到键盘上方,
    不会留出一大片空白。left/transform 是为了在宽屏上跟 .app 的居中对齐,
    手机端视口本来就比640px窄,效果等同于占满宽度。 */
-.nav{position:fixed;left:50%;transform:translateX(-50%);bottom:var(--kb-inset,0px);
+/* translateZ(0)+backface-visibility 是给 iOS Safari 的兜底:这类"position:fixed 的
+   元素在页面高度变化后飘在半空、没贴在真正视口底部"的问题是 WebKit 一个老毛病
+   (常见触发点:内容从矮变高/从高变矮,比如做完一组题后从答题框切到一整页讲评列表),
+   强制把导航栏提升成独立合成层,能让浏览器按视口而不是按上一次的文档流布局来定位它。
+   这是社区里公认的常见缓解手段,但这个沙盒环境没有真机 Safari,没法验证是否根治——
+   如果重新部署后这个问题还在,请告诉我具体是哪个操作触发的,我再针对性排查。 */
+.nav{position:fixed;left:50%;bottom:var(--kb-inset,0px);
+  transform:translateX(-50%) translateZ(0);-webkit-backface-visibility:hidden;backface-visibility:hidden;
   width:100%;max-width:640px;display:flex;flex:0 0 auto;
   background:var(--card);border-top:1px solid var(--line);padding:6px 0 max(6px, env(safe-area-inset-bottom));z-index:10}
 .nav-btn{flex:1;padding:12px 0;background:none;border:none;font-size:14px;color:var(--ink-soft);cursor:pointer;letter-spacing:2px}

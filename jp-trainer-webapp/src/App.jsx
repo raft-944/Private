@@ -460,9 +460,11 @@ const STYLE_CONSISTENCY_RULE = `文体一致性检查(重要):检查学生这句
 const ERROR_SCOPE_RULE = `错误范围归类(errorScope 字段,必须给):除了整体 verdict,还要判断这次的错误到底出在哪一层——
 - "none": 没有任何错误(verdict 为 correct 时给这个)
 - "pattern": 错误出在目标句型本身(句型没用、用错了形式、接续错、该句型的使用场景/文体用错)
-- "outside": 目标句型本身用得完全正确,错误只出在句型之外的地方(单词选错/写错、与句型无关的助词、时态、拼写、汉字错字等)
+- "outside": 目标句型本身用得完全正确,错误只出在句型之外的地方(单词选错/写错、与句型无关的助词、时态、拼写、汉字错字等),且这个词换错之后不影响这句话原本要表达的方向/语义关系
 - "both": 句型本身有问题,句型之外也有问题
-判断时请严格一点:只有目标句型的形态和用法完全挑不出毛病,才可以给 "outside"。这个字段只用来决定复习排期,不影响你在 explanation 里正常指出所有问题。`;
+判断时请严格一点:只有目标句型的形态和用法完全挑不出毛病,才可以给 "outside"。
+特别注意一种容易被漏判的情况:有些词换成方向相反的词(比如「貸す／借りる」〈借出/借入〉、「行く／来る」〈去/来〉、「教える／習う」〈教/学〉、あげる/もらう本身)表面上看只是"选错了一个词",但会把整句话该表达的方向/授受关系完全颠倒——这种不是无关紧要的用词小错,而是没有真正掌握该句型要表达的方向关系,必须算 "pattern"(或双重出错时算 "both"),不能算 "outside"。
+这个字段只用来决定复习排期,不影响你在 explanation 里正常指出所有问题。`;
 
 /* AI 没给或给了非法值时的兜底:答对就是 none,答错默认按最保守的 "pattern" 处理
    (宁可照旧缩短这个句型的间隔,也不要因为 AI 漏字段就误判成"跟句型无关"、放过真正的句型问题)。 */
@@ -3634,7 +3636,13 @@ function AppInner() {
                 </div>
               ) : (
                 <div className={"q-task serif" + (q.jpTask ? " q-task-instr" : "")}>
-                  <ChineseTaskText text={q.task} segments={taskSegmentsFor(q)} sentence={q.task} targetDesc={taskTargetDescFor(cur)} onReveal={markHinted} />
+                  {/* key 必须带上题目内容:不加 key 的话,换题时 React 会复用同一个组件实例,
+                     组件内部"哪些词点开显示了读音"的 entries 状态是按数组下标存的,
+                     不会跟着换题清空——上一题点开的词会原样"续命"到下一题同样下标的词上,
+                     哪怕两题词数不同也一样(表现就是上一题的提示还留在界面上没消失)。
+                     用 idx+task 而不是只用 idx:同一题号上"重试"重新出的题,内容也变了,
+                     同样需要清空。 */}
+                  <ChineseTaskText key={idx + ":" + q.task} text={q.task} segments={taskSegmentsFor(q)} sentence={q.task} targetDesc={taskTargetDescFor(cur)} onReveal={markHinted} />
                 </div>
               )}
 
@@ -3968,7 +3976,10 @@ function AppInner() {
             <section className="card">
               <div className="q-type">{cfQuiz.questions[cfQuizIdx].qtype} · {cfQuiz.items[cfQuizIdx].head}</div>
               <div className="q-task serif">
+                {/* key 同主线那处一样,按题号+题目内容区分,换题时强制这个组件重新挂载,
+                   避免"哪些词点开过"的内部状态跨题残留 */}
                 <ChineseTaskText
+                  key={cfQuizIdx + ":" + cfQuiz.questions[cfQuizIdx].task}
                   text={cfQuiz.questions[cfQuizIdx].task}
                   segments={Array.isArray(cfQuiz.questions[cfQuizIdx].taskSegments) && cfQuiz.questions[cfQuizIdx].taskSegments.length ? cfQuiz.questions[cfQuizIdx].taskSegments : naiveSegmentChinese(cfQuiz.questions[cfQuizIdx].task)}
                   sentence={cfQuiz.questions[cfQuizIdx].task}

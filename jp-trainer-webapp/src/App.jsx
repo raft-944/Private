@@ -3634,7 +3634,13 @@ function AppInner() {
                 </div>
               ) : (
                 <div className={"q-task serif" + (q.jpTask ? " q-task-instr" : "")}>
-                  <ChineseTaskText text={q.task} segments={taskSegmentsFor(q)} sentence={q.task} targetDesc={taskTargetDescFor(cur)} onReveal={markHinted} />
+                  {/* key 必须带上题目内容:不加 key 的话,换题时 React 会复用同一个组件实例,
+                     组件内部"哪些词点开显示了读音"的 entries 状态是按数组下标存的,
+                     不会跟着换题清空——上一题点开的词会原样"续命"到下一题同样下标的词上,
+                     哪怕两题词数不同也一样(表现就是上一题的提示还留在界面上没消失)。
+                     用 idx+task 而不是只用 idx:同一题号上"重试"重新出的题,内容也变了,
+                     同样需要清空。 */}
+                  <ChineseTaskText key={idx + ":" + q.task} text={q.task} segments={taskSegmentsFor(q)} sentence={q.task} targetDesc={taskTargetDescFor(cur)} onReveal={markHinted} />
                 </div>
               )}
 
@@ -3968,7 +3974,10 @@ function AppInner() {
             <section className="card">
               <div className="q-type">{cfQuiz.questions[cfQuizIdx].qtype} · {cfQuiz.items[cfQuizIdx].head}</div>
               <div className="q-task serif">
+                {/* key 同主线那处一样,按题号+题目内容区分,换题时强制这个组件重新挂载,
+                   避免"哪些词点开过"的内部状态跨题残留 */}
                 <ChineseTaskText
+                  key={cfQuizIdx + ":" + cfQuiz.questions[cfQuizIdx].task}
                   text={cfQuiz.questions[cfQuizIdx].task}
                   segments={Array.isArray(cfQuiz.questions[cfQuizIdx].taskSegments) && cfQuiz.questions[cfQuizIdx].taskSegments.length ? cfQuiz.questions[cfQuizIdx].taskSegments : naiveSegmentChinese(cfQuiz.questions[cfQuizIdx].task)}
                   sentence={cfQuiz.questions[cfQuizIdx].task}

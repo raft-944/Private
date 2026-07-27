@@ -170,6 +170,26 @@ function chunkStartIndex(queue, uptoIdx) {
   return from;
 }
 
+/* 讲评分组的终点(含 idx 本身,即"这一组最后一题的下标")。判断规则和 chunkStartIndex
+   完全一致(只是从"往前找起点"换成"往后找终点"),用来算"本组还剩几题"这类提示——
+   以前这个提示是直接拿 idx 对 REVIEW_CHUNK 取模算的,新句型的3题一组插进来之后
+   边界不再是均匀的,取模会算错(尤其是新句型组本身,组长是3不是5)。 */
+function chunkEndIndex(queue, idx) {
+  const from = chunkStartIndex(queue, idx);
+  for (let i = idx; i < queue.length; i++) {
+    const it = queue[i];
+    const nxt = queue[i + 1];
+    if (it.isNew) {
+      if (it.newRep === it.newReps - 1) return i;
+    } else if (nxt && nxt.isNew && nxt.newRep === 0) {
+      return i;
+    } else if (i + 1 - from >= REVIEW_CHUNK) {
+      return i;
+    }
+  }
+  return queue.length - 1;
+}
+
 /* 新句型一组3题答完后,综合这3次表现算出"整体算不算学会了"——不能按3次独立判卷
    各自推进排期,那样一次学习会话就能把间隔连续拉长3档,跳过"隔一晚还记不记得"
    这道最关键的检验。取"最差者优先":有一次判 wrong 就整体算 wrong(刚学的东西
@@ -2376,7 +2396,12 @@ function AppInner() {
      和到期复习题的批量预取是同一套缓存,беginItem 后续两题直接从这里取。
      命中 prefetchNextNewGroup 提前生成好的缓存时会跳过这次调用,直接秒开第1题。 */
   const beginNewPatternGroup = async (item, qIdx) => {
-    const cachedAll = Array.from({ length: NEW_PATTERN_REPS }, (_, i) => preGenRef.current[qIdx + i]).every(Boolean);
+    // 用 item.newReps 而不是硬编码的 NEW_PATTERN_REPS:断点续做的旧快照(部署当天正在
+    // 进行中、没有 newRep/newReps 字段)会被 resumeSession 兜底成 newReps=1(独立单题组),
+    // 这里如果还按 NEW_PATTERN_REPS=3 出题,会把后面 qIdx+1/qIdx+2 两个本不相关的队列位
+    // (旧快照里那是两道完全不同的题)也塞进 preGenRef,张冠李戴。
+    const reps = item.newReps;
+    const cachedAll = Array.from({ length: reps }, (_, i) => preGenRef.current[qIdx + i]).every(Boolean);
     if (cachedAll) {
       const first = preGenRef.current[qIdx];
       delete preGenRef.current[qIdx];
@@ -2385,7 +2410,7 @@ function AppInner() {
     }
     setPhase("loadingQ"); setAnswer("");
     try {
-      const types = Array.from({ length: NEW_PATTERN_REPS }, (_, i) => (i === NEW_PATTERN_REPS - 1 ? "composition" : "translation"));
+      const types = Array.from({ length: reps }, (_, i) => (i === reps - 1 ? "composition" : "translation"));
       const qs = await genQuestionBatch(types.map((type) => ({ p: item.p, type })));
       qs.forEach((q, i) => { if (q && q.task) preGenRef.current[qIdx + i] = q; });
       const first = preGenRef.current[qIdx];
@@ -2455,7 +2480,11 @@ function AppInner() {
     let items;
     if (s.kind === "homework") items = s.items.map((d) => d.hw === "dialogue" ? { hw: "dialogue", sceneId: d.sceneId, fromBacklog: !!d.fromBacklog } : d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId, fromBacklog: !!d.fromBacklog } : { p: PATTERNS[d.pid], hw: d.hw, mistakeId: d.mistakeId, fromBacklog: !!d.fromBacklog, isExtra: !!d.isExtra });
     else if (s.kind === "weekly") items = s.items.map((d) => d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId } : { sub: "weak", p: PATTERNS[d.pid], mistakeId: d.mistakeId });
-    else items = s.items.map((d) => ({ p: PATTERNS[d.pid], isNew: d.isNew, newRep: d.newRep, newReps: d.newReps }));
+    // newRep/newReps 是"新句型一次3题"上线后才有的字段:部署当天正在进行中的旧快照
+    // 没有这两个字段,续做时会读到 undefined,导致"新句型·NaN/undefined"、批量预取
+    // 判断(newRep!==0)失效退回现场单题生成——这里按老逻辑补默认值(0/1,当成独立的
+    // 单题组),让这条旧快照能正常续完,而不是带着 undefined 走完剩下的题。
+    else items = s.items.map((d) => ({ p: PATTERNS[d.pid], isNew: d.isNew, newRep: d.newRep ?? 0, newReps: d.newReps ?? 1 }));
     setQueue(items); setIdx(s.idx); setSessionStats(s.stats || { ok: 0, partial: 0, wrong: 0 });
     setFreeMode(s.kind !== "srs"); setHomeworkMode(s.kind === "homework"); setWeeklyMode(s.kind === "weekly"); setWeeklyFormal(s.kind === "weekly"); setListenMode(s.kind === "listen"); setDrillMode(false);
     setView("session");
@@ -3693,8 +3722,9 @@ function AppInner() {
           {phase !== "done" && phase !== "waiting" && phase !== "chunk" && (() => {
             const g = Object.values(gradeStates).filter((st) => st.status === "grading").length;
             if (!g) return null;
-            // 本组还剩几题(含当前这题):最后一组可能不满 REVIEW_CHUNK,用队列长度兜一下
-            const left = Math.min(REVIEW_CHUNK - (idx % REVIEW_CHUNK), queue.length - idx);
+            // 本组还剩几题(含当前这题):用 chunkEndIndex 按实际分组规则算,不能再对
+            // REVIEW_CHUNK 取模——新句型3题一组会把均匀的模数关系打破
+            const left = chunkEndIndex(queue, idx) - idx + 1;
             return <div className="bg-grading">⏳ {g} 题正在后台判卷 · 本组还剩 {left} 题,做完一起给出讲评</div>;
           })()}
 

@@ -15,6 +15,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 每次改动后检查 JSX 语法
 - 改完提醒我重新部署
 - 涉及出题/判卷提示词的改动，要说明改了哪条规则、解决什么问题
+- 改完直接合并到 main，不要留在 PR/预览阶段等我确认——我不懂代码，预览对我没用，
+  我只用真实部署的应用测试。除非我明确说"先别合并"，否则默认直接合并
+- 涉及排期(db.prog 的 lv/due)、错题本、每日配额这类计分/计数逻辑的改动，
+  处理前最好先用 headless Chromium 跑一遍造数据的验证(这个仓库里已经反复用过
+  这个方法)，而不是只凭读代码判断对不对——这类逻辑的边界条件很容易算错
 
 ## 句型库数据规范
 - 采用具名对象格式，字段定义见 schema-v2.js
@@ -43,12 +48,12 @@ There is no `/api` route in plain `vite dev` — the serverless function in `api
 
 ```bash
 npm install -g vercel
-vercel dev        # serves the app AND /api/generate together; prompts for GEMINI_API_KEY on first run
+vercel dev        # serves the app AND /api/generate together; prompts for DEEPSEEK_API_KEY on first run
 ```
 
 `vite.config.js` proxies `/api/*` to `http://localhost:3000` (where `vercel dev` listens), so run `vercel dev` (not `npm run dev`) whenever you need AI question generation/grading to work locally.
 
-Local env vars go in `.env` (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`) — `GEMINI_API_KEY` is server-only and configured through `vercel dev` / the Vercel project settings, never in `.env`.
+Local env vars go in `.env` (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`) — `DEEPSEEK_API_KEY` is server-only and configured through `vercel dev` / the Vercel project settings, never in `.env`.
 
 No test runner or lint script is configured in `package.json`.
 
@@ -63,11 +68,12 @@ No test runner or lint script is configured in `package.json`.
 
 ### AI call path
 
-Browser → `POST /api/generate` (`api/generate.js`, Vercel serverless function) → Google Gemini API. The frontend's `callAIRaw`/`callAI`/`callAIArray` (in `App.jsx`) speak in an Anthropic-Messages-API-shaped request/response (`{system, user, max_tokens}` → `{content: [{type:"text", text}]}`), and `api/generate.js` translates that shape to/from Gemini's `generateContent` format so the ported prompt/parsing code didn't need rewriting. Key details if touching this path:
+Browser → `POST /api/generate` (`api/generate.js`, Vercel serverless function) → **DeepSeek**(`deepseek-v4-flash`,OpenAI 兼容的 `/v1/chat/completions` 接口)。项目最早是接的 Google Gemini,后来换成了 DeepSeek——如果在别处(注释、旧文档)看到 "Gemini" 字样,那是没跟着改掉的历史遗留,不代表实际情况。前端的 `callAIRaw`/`callAI`/`callAIArray`(在 `App.jsx` 里)说的是 Anthropic-Messages-API 形状的请求/响应(`{system, user, max_tokens}` → `{content: [{type:"text", text}]}`),`api/generate.js` 负责把这个形状翻译成/从 DeepSeek 的 `messages`/`choices` 格式,这样移植过来的 prompt/解析逻辑不用重写。改这条链路时要注意:
 
-- `MODEL` is hardcoded in `api/generate.js`.
-- Client throttles all AI calls to one per `MIN_CALL_GAP_MS` (3.5s) globally, and retries 429s using Gemini's `RetryInfo.retryDelay` when present (see `callAIRaw`).
-- The server always requests at least 2048 output tokens regardless of what the client asked for, because Gemini's verbosity was truncating grading JSON.
+- `MODEL` 硬编码在 `api/generate.js` 里(当前是 `deepseek-v4-flash`)。
+- 服务端环境变量是 `DEEPSEEK_API_KEY`(不是 `GEMINI_API_KEY`),配在 Vercel 项目设置里,浏览器永远看不到。
+- 客户端有一个并发池(`MAX_CONCURRENT`)而不是纯串行节流,同时最多几个请求在飞,详见 `App.jsx` 里 `acquireSlot`/`releaseSlot` 附近的注释。429 重试时,等待秒数从 DeepSeek 响应头的 `Retry-After` 里取(OpenAI 兼容接口的惯例,不在 JSON body 里)。
+- 服务端不管客户端要多少 token,都保底给够 2048 输出 token,因为 DeepSeek 有时候比 Claude 更啰嗦,少了容易在写判卷讲解时把 JSON 截断。
 - Prompts explicitly forbid the AI from using straight double quotes inside JSON string values (must use 「」 or Chinese quotes) — this is a real recurring failure mode, not defensive boilerplate; don't relax it.
 - Responses are parsed by scanning for the first balanced `{...}` or `[...]` (`extractFirstJsonObject`/`extractFirstJsonArray`), not `JSON.parse` on the raw text, because the model sometimes wraps JSON in prose/Markdown despite instructions.
 

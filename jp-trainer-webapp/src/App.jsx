@@ -1603,6 +1603,13 @@ function AppInner() {
     }
     return `句型: ${item.p.pattern}(${item.p.conn} / ${item.p.meaning})\n题目(${question.type === "translation" ? "翻译题" : "造句题"}): ${question.task}\n学生的答案: ${ans}\n参考答案: ${g.reference}\n先生的讲评: ${g.explanation}`;
   };
+  /* 情景对话复盘后"针对这场对话追问"的上下文摘要,和 buildFollowUpContext 是同一个用途,
+     只是对话没有单一的"题目/答案/参考答案",要把场景设定和完整对话记录都摘进去。 */
+  const buildDialogueFollowUpContext = (scene, history, review) => {
+    if (!scene || !review) return "";
+    const historyText = (history || []).map((h) => `${h.role === "user" ? "学生" : scene.aiRole}: ${h.text}`).join("\n");
+    return `情景对话练习\n场景: ${scene.background}\n学生演: ${scene.userRole} / AI演: ${scene.aiRole}\n目标: ${scene.goal}\n对话记录:\n${historyText}\n先生的总评: ${review.summary}\n可以改进的地方: ${review.issues}${review.suggestions ? `\n更地道的说法: ${review.suggestions}` : ""}`;
+  };
   const [weeklyFormal, setWeeklyFormal] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -3840,6 +3847,7 @@ function AppInner() {
                   <div className="exp-block"><label>本场对话</label><div>{dialogueReview.summary}</div></div>
                   <div className="exp-block"><label>可以改进的地方</label><div>{dialogueReview.issues}</div></div>
                   {dialogueReview.suggestions && <div className="exp-block"><label>更地道的说法</label><div>{dialogueReview.suggestions}</div></div>}
+                  <FollowUpAsk key={dialogueScene.id} contextSummary={buildDialogueFollowUpContext(dialogueScene, dialogueHistory, dialogueReview)} />
                   <button className="btn-main" onClick={next}>{nextBtnLabel()}</button>
                 </div>
               )}
@@ -4325,6 +4333,7 @@ function AppInner() {
                 <div className="exp-block"><label>本场对话</label><div>{cfDialogueReview.summary}</div></div>
                 <div className="exp-block"><label>可以改进的地方</label><div>{cfDialogueReview.issues}</div></div>
                 {cfDialogueReview.suggestions && <div className="exp-block"><label>更地道的说法</label><div>{cfDialogueReview.suggestions}</div></div>}
+                <FollowUpAsk key={cfScene.id} contextSummary={buildDialogueFollowUpContext(cfScene, cfDialogueHistory, cfDialogueReview)} />
                 <button className="btn-main" onClick={exitConfusionDialogue}>返回練習帳</button>
               </div>
             )}
@@ -4737,6 +4746,9 @@ html,body{overflow-x:hidden}
 .result-wrap > .review-flag,
 .result-wrap > .scope-flag,
 .result-wrap > .your-ans{padding-right:112px}
+/* 情景对话/邮件复盘没有 your-ans,讲评(.exp-block)直接紧跟在印章后面,同样会被盖住——
+   用相邻兄弟选择器只框住"紧跟在印章后面那一个",不影响下面其他正常位置的 .exp-block */
+.stamp + .exp-block{padding-right:112px}
 
 .followup-block{margin-top:14px}
 .followup-toggle{background:none;border:1px dashed var(--line);border-radius:10px;padding:8px 12px;font-size:12px;color:var(--ai);cursor:pointer;width:100%;text-align:left}

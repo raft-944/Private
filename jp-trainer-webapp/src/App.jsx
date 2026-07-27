@@ -27,6 +27,21 @@ const warmCache = new Map(); // pid -> 已生成好的题目
 
 /* ================= 遗忘曲线参数 ================= */
 const INTERVALS = [1, 2, 4, 7, 15, 30, 60]; // 天
+
+/* 根据一次判卷结果算出某个句型下一次的 lv/due。抽成纯函数是因为现在有两处要用:
+   普通到期复习的单次判卷,以及新句型3道题综合表现后的"结一次账"——
+   两处必须是同一套间隔计算,写两份迟早会算出不一样的结果。
+   outsideOnly:句型本身没问题,只是句型之外的东西错了,排期按答对处理。 */
+function computeProgUpdate(existedProg, verdict, outsideOnly, t) {
+  const cur = existedProg ? { ...existedProg } : { lv: 0, ok: 0, ng: 0, learnedDate: t };
+  let { lv } = cur;
+  let due;
+  if (verdict === "correct" || outsideOnly) { due = addDays(t, INTERVALS[Math.min(lv, INTERVALS.length - 1)]); lv = Math.min(lv + 1, INTERVALS.length); cur.ok++; }
+  else if (verdict === "partial") { due = addDays(t, Math.max(1, Math.round(INTERVALS[Math.min(lv, INTERVALS.length - 1)] / 2))); cur.ok++; }
+  else { lv = Math.max(0, lv - 2); due = addDays(t, 1); cur.ng++; }
+  return { ...cur, lv, due };
+}
+
 const STORE_KEY = "jp_srs_v1";
 const TOPICS = ["日常生活","工作·公司","旅行","购物","天气·季节","家庭","饮食","兴趣爱好","交通·车站","健康·医院","学习·学校","朋友之间"];
 
@@ -123,6 +138,52 @@ const HW_EXTRA_MAX = 2;
    分段的取舍点在于:一组太小则频繁打断、判卷等待暴露得多(刚提交的那题必然还在飞);
    一组太大则反馈太迟。5 题一组时,看第1题讲评的时间足够第5题判完,基本感觉不到等待。 */
 const REVIEW_CHUNK = 5;
+
+/* 新句型每次学习一次性出几道题。以前是学完介绍就现场出1道题、答完就算学过了,
+   用户明确要求改成"一次出3道,同一个流程里连续做完,练得更扎实"。 */
+const NEW_PATTERN_REPS = 3;
+
+/* 讲评分组的边界计算。以前是纯粹的"每 REVIEW_CHUNK 题一组",直接用 idx 取模就行;
+   现在新句型的 NEW_PATTERN_REPS 道题必须完整地分成独立一组(不能被每5题的计数
+   从中间切开,也不能和前后的到期复习题混在同一组里),边界不再是均匀的,
+   所以要沿着队列把断点走一遍才能求出"当前这组是从哪个下标开始的"。
+   规则:
+   ①新句型组内部(不是这组的最后一题):不管攒了几题,绝不能断——3题必须连续做完;
+   ②新句型组的最后一题:强制断在这里,让这一组独立成一份讲评;
+   ③即将进入新句型组的前一题:也强制断在这里,不能让新句型的讲评混进前面的到期复习题;
+   ③④其余情况(纯到期复习题的连续段):按 REVIEW_CHUNK 计数,和以前一样。
+   chunkStartIndex 和 willBreakForChunk(在 AppInner 里)必须用同一套规则,
+   否则讲评页显示的范围和"该不该停下来"的判断会对不上。 */
+function chunkStartIndex(queue, uptoIdx) {
+  let from = 0;
+  for (let i = 0; i < uptoIdx; i++) {
+    const it = queue[i];
+    const nxt = queue[i + 1];
+    if (it.isNew) {
+      if (it.newRep === it.newReps - 1) from = i + 1;
+    } else if (nxt && nxt.isNew && nxt.newRep === 0) {
+      from = i + 1;
+    } else if (i + 1 - from >= REVIEW_CHUNK) {
+      from = i + 1;
+    }
+  }
+  return from;
+}
+
+/* 新句型一组3题答完后,综合这3次表现算出"整体算不算学会了"——不能按3次独立判卷
+   各自推进排期,那样一次学习会话就能把间隔连续拉长3档,跳过"隔一晚还记不记得"
+   这道最关键的检验。取"最差者优先":有一次判 wrong 就整体算 wrong(刚学的东西
+   一次都没答对,显然还没掌握);全部 correct(或只是句型之外的小错)才算 correct;
+   其余(有 partial、但没有 wrong)算 partial。宁可保守——错判的代价只是这个句型
+   多复习一次,而排期被吹得太靠后,会让一个没记牢的句型很久都不会再出现。 */
+function aggregateNewPatternVerdict(results) {
+  const adjusted = results.map((r) =>
+    r.verdict === "correct" || (r.errorScope === "outside" && r.verdict !== "correct") ? "correct" : r.verdict
+  );
+  if (adjusted.some((v) => v === "wrong")) return "wrong";
+  if (adjusted.every((v) => v === "correct")) return "correct";
+  return "partial";
+}
 
 /* 错题要连续答对这么多次才从错题本移除,而不是蒙对一次就当作掌握了——每条错题的
    streak 字段记录"目前连续答对了几次",答错/被判需要复核会清零,只有连续攒够这个
@@ -1544,6 +1605,11 @@ function AppInner() {
   const sessionGenRef = useRef(0); // 每次开始新的一组题就递增,防止上一轮延迟返回的批量结果写错地方
   const prefetchingRef = useRef(new Set()); // 正在预取中的题位下标,避免补取和开场预取重复请求同一题
   const prefetchFailRef = useRef(0); // 本场有几批预取彻底失败——结果页上提示一下,不然只能靠猜
+  /* 新句型一组3题的判卷结果,按句型id分桶累积:{ [patternId]: [{verdict,errorScope,...}, ...] }
+     攒够 newReps 条才一次性结账(见 finalizeNewPatternGroup)。
+     用 ref 而不是 state:这里只是"攒到齐了没"的中间记账,不需要触发重渲染,
+     真正影响界面的是 gradeStates(每题的判卷状态)和 db(结账后的排期/错题本)。 */
+  const newGroupResultsRef = useRef({});
   /* 提前预取的"追加题"清单。必须把清单本身也存下来,不能等到真要追加时再重新挑一遍:
      作业的最后一题是情景対話,它复盘完可能又往错题本前面插进新的错题,重新挑就会挑出
      另一批句型,和刚才预取好的题面对不上、白白浪费预取。 */
@@ -1704,7 +1770,7 @@ function AppInner() {
     const items = queue.map((it) => {
       if (kind === "homework") return it.hw === "dialogue" ? { hw: "dialogue", sceneId: it.sceneId, fromBacklog: !!it.fromBacklog } : it.sub === "combo" ? { sub: "combo", pid1: it.p1.id, pid2: it.p2.id, mistakeId: it.mistakeId, fromBacklog: !!it.fromBacklog } : { pid: it.p.id, hw: it.hw, mistakeId: it.mistakeId, fromBacklog: !!it.fromBacklog, isExtra: !!it.isExtra };
       if (kind === "weekly") return it.sub === "combo" ? { sub: "combo", pid1: it.p1.id, pid2: it.p2.id, mistakeId: it.mistakeId } : { sub: "weak", pid: it.p.id, mistakeId: it.mistakeId };
-      return { pid: it.p.id, isNew: it.isNew };
+      return { pid: it.p.id, isNew: it.isNew, newRep: it.newRep, newReps: it.newReps };
     });
     // date 记录这份快照是哪天生成的:今日学习/每日作业跨天后要判定失效,不能让旧快照
     // 冒充"今天的任务全貌"(旧快照更小,会把真实积压量吃掉,详见 startSession/startHomework 里的处理)
@@ -1771,7 +1837,7 @@ function AppInner() {
       const tag = e.target && e.target.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       const a = actionsRef.current;
-      if (phase === "intro" && a.cur && a.loadQuestion) { e.preventDefault(); a.loadQuestion(a.cur.p); }
+      if (phase === "intro" && a.cur && a.beginNewPatternGroup) { e.preventDefault(); a.beginNewPatternGroup(a.cur, a.idx); }
       else if (phase === "error" && a.retry) { e.preventDefault(); a.retry(); }
     };
     window.addEventListener("keydown", onKey);
@@ -1978,23 +2044,30 @@ function AppInner() {
     const items = [
       // dueList 已经按"最容易遗忘"排好序(见 sortedDueList),这里不要再重排
       ...dueList.map((p) => ({ p, isNew: false })),
-      ...newList.map((p) => ({ p, isNew: true })),
+      // 每个新句型占 NEW_PATTERN_REPS 个连续队列位,newRep 标着这是第几道(从0开始),
+      // 全组共享 newReps,用来判断"是不是这一组的最后一题"(见 chunkStartIndex)
+      ...newList.flatMap((p) => Array.from({ length: NEW_PATTERN_REPS }, (_, i) => ({ p, isNew: true, newRep: i, newReps: NEW_PATTERN_REPS }))),
     ];
     if (!items.length) return;
     preGenRef.current = {};
     prefetchingRef.current.clear();
     prefetchFailRef.current = 0;
+    newGroupResultsRef.current = {};
     setQueue(items); setIdx(0); setFreeMode(false); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginItem(items[0], 0);
     // 后台批量预取"待复习"题目。跳过第0题(它已经在上面单独请求了,再算进来会重复生成、白花一次调用);
-    // 新句型也不预取(要等你点开介绍页读完才需要出题)
+    // 新句型不走这条批量通道(它是同一个句型出3道,逻辑不一样),交给下面的 prefetchNextNewGroup
     const dueIndexed = items
       .map((it, idx) => ({ idx, p: it.p, isNew: it.isNew }))
       .filter((it) => !it.isNew && it.idx !== 0)
       .map((it) => ({ ...it, type: Math.random() < 0.6 ? "translation" : "composition" }));
     runPrefetch(dueIndexed, (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type }))));
+    // 万一到期复习题是空的、队列一开始就是新句型:没有前面的讲评页可以顺便触发预取,
+    // 这里兜底起个头。正常情况下(前面有到期复习题)会在进入讲评页时被 next() 里那次调用覆盖到,
+    // 这里再调一次是空操作(prefetchingRef/preGenRef 已经在处理中或已完成)。
+    prefetchNextNewGroup(0);
   };
 
   const startFree = (p, mistakeId) => {
@@ -2267,9 +2340,23 @@ function AppInner() {
 
   const beginItem = (item, qIdx) => {
     setAnswer(""); setQ(null); setHintedWords([]); setExWords(null);
-    if (item.isNew) setPhase("intro");
-    else {
-      // 优先用会话内批量预取的结果,其次用首页预热的结果,都没有才现场出题
+    if (item.isNew && item.newRep === 0) {
+      // 一组3题的第1题:先看介绍页,点"読めた"之后才触发 beginNewPatternGroup 出题
+      setPhase("intro");
+    } else if (item.isNew) {
+      // 一组3题的第2/3题:不用再看介绍页,直接出题。题面理应已经在读介绍页/答前一题的
+      // 时候被 beginNewPatternGroup 一次性批量生成好、放进了 preGenRef,这里命中缓存;
+      // 没命中(批量生成失败、或缓存被别的会话清掉)就退回单题现场生成,不会卡死
+      const cached = qIdx != null ? preGenRef.current[qIdx] : null;
+      if (cached) {
+        delete preGenRef.current[qIdx];
+        setQ(cached);
+        setPhase("question");
+      } else {
+        loadQuestion(item.p);
+      }
+    } else {
+      // 到期复习题:优先用会话内批量预取的结果,其次用首页预热的结果,都没有才现场出题
       const cached = (qIdx != null ? preGenRef.current[qIdx] : null) || warmCache.get(item.p.id);
       if (cached) {
         if (qIdx != null) delete preGenRef.current[qIdx];
@@ -2279,6 +2366,61 @@ function AppInner() {
       } else {
         loadQuestion(item.p);
       }
+    }
+  };
+
+  /* 新句型介绍页点"読めた"之后触发:一次性给这个句型出 NEW_PATTERN_REPS 道题
+     (复用批量出题的 genQuestionBatch,同一个句型重复 N 次、题型混着来,
+     它自带的"各题之间内容不要相似雷同"这条要求正好保证3道题不会太像)。
+     qIdx 是这一组第1题在队列里的下标,3道题依次存进 preGenRef[qIdx]/[qIdx+1]/[qIdx+2]——
+     和到期复习题的批量预取是同一套缓存,беginItem 后续两题直接从这里取。
+     命中 prefetchNextNewGroup 提前生成好的缓存时会跳过这次调用,直接秒开第1题。 */
+  const beginNewPatternGroup = async (item, qIdx) => {
+    const cachedAll = Array.from({ length: NEW_PATTERN_REPS }, (_, i) => preGenRef.current[qIdx + i]).every(Boolean);
+    if (cachedAll) {
+      const first = preGenRef.current[qIdx];
+      delete preGenRef.current[qIdx];
+      setAnswer(""); setQ(first); setPhase("question");
+      return;
+    }
+    setPhase("loadingQ"); setAnswer("");
+    try {
+      const types = Array.from({ length: NEW_PATTERN_REPS }, (_, i) => (i === NEW_PATTERN_REPS - 1 ? "composition" : "translation"));
+      const qs = await genQuestionBatch(types.map((type) => ({ p: item.p, type })));
+      qs.forEach((q, i) => { if (q && q.task) preGenRef.current[qIdx + i] = q; });
+      const first = preGenRef.current[qIdx];
+      if (!first) throw new Error("出题失败,一道题都没生成出来");
+      delete preGenRef.current[qIdx];
+      setQ(first);
+      setPhase("question");
+    } catch (e) {
+      setErrMsg("出题失败:" + (e && e.message ? e.message : String(e)));
+      setPhase("error");
+    }
+  };
+
+  /* 在队列里找"从 fromIdx 往后最近的一个新句型组",把它的3道题提前批量生成好放进
+     preGenRef——目的是让你在看前一组的讲评、或者读介绍页的这段时间,题目已经在后台
+     生成完了,真正点开始做题时不用等。只找最近的一组,不会一次性把后面所有新句型都
+     预取掉(那样只是白白提前占用并发名额,对这一刻没有帮助)。 */
+  const prefetchNextNewGroup = (fromIdx) => {
+    for (let i = fromIdx; i < queue.length; i++) {
+      const it = queue[i];
+      if (!it || !it.isNew || it.newRep !== 0) continue;
+      const already = Array.from({ length: it.newReps }, (_, k) => preGenRef.current[i + k]).every(Boolean);
+      const fetching = prefetchingRef.current.has(i);
+      if (already || fetching) return;
+      prefetchingRef.current.add(i);
+      const myGen = sessionGenRef.current;
+      const types = Array.from({ length: it.newReps }, (_, k) => (k === it.newReps - 1 ? "composition" : "translation"));
+      genQuestionBatch(types.map((type) => ({ p: it.p, type })))
+        .then((qs) => {
+          if (sessionGenRef.current !== myGen) return; // 已经切到别的会话,这批结果作废
+          qs.forEach((q, k) => { if (q && q.task) preGenRef.current[i + k] = q; });
+        })
+        .catch(() => { prefetchFailRef.current += 1; })
+        .finally(() => { prefetchingRef.current.delete(i); });
+      return;
     }
   };
 
@@ -2313,7 +2455,7 @@ function AppInner() {
     let items;
     if (s.kind === "homework") items = s.items.map((d) => d.hw === "dialogue" ? { hw: "dialogue", sceneId: d.sceneId, fromBacklog: !!d.fromBacklog } : d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId, fromBacklog: !!d.fromBacklog } : { p: PATTERNS[d.pid], hw: d.hw, mistakeId: d.mistakeId, fromBacklog: !!d.fromBacklog, isExtra: !!d.isExtra });
     else if (s.kind === "weekly") items = s.items.map((d) => d.sub === "combo" ? { sub: "combo", p1: PATTERNS[d.pid1], p2: PATTERNS[d.pid2], mistakeId: d.mistakeId } : { sub: "weak", p: PATTERNS[d.pid], mistakeId: d.mistakeId });
-    else items = s.items.map((d) => ({ p: PATTERNS[d.pid], isNew: d.isNew }));
+    else items = s.items.map((d) => ({ p: PATTERNS[d.pid], isNew: d.isNew, newRep: d.newRep, newReps: d.newReps }));
     setQueue(items); setIdx(s.idx); setSessionStats(s.stats || { ok: 0, partial: 0, wrong: 0 });
     setFreeMode(s.kind !== "srs"); setHomeworkMode(s.kind === "homework"); setWeeklyMode(s.kind === "weekly"); setWeeklyFormal(s.kind === "weekly"); setListenMode(s.kind === "listen"); setDrillMode(false);
     setView("session");
@@ -2336,6 +2478,9 @@ function AppInner() {
       runPrefetch(
         rest.filter((it) => !it.isNew).map((it) => ({ ...it, type: Math.random() < 0.6 ? "translation" : "composition" })),
         (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type }))));
+      // 续做当前这一题如果正好是新句型组的第2/3题(第1题的批量结果没能跨会话保留下来),
+      // beginItem 会退回单题现场生成;这里顺手把"下一组新句型"预取上,不受这个边界情况影响
+      prefetchNextNewGroup(s.idx + 1);
     }
   };
 
@@ -2586,13 +2731,33 @@ function AppInner() {
     // item.fromBacklog 是 startHomework 并入积压题时标的,只有作业模式下有意义
     const bkey = "backlog" + key[0].toUpperCase() + key.slice(1);
     setSessionStats((s) => ({ ...s, [key]: s[key] + 1, ...(cHw && item.fromBacklog ? { [bkey]: (s[bkey] || 0) + 1 } : {}) }));
+    const needsReview = g.verdict === "correct" && g.selfCheck === false;
+    /* 新句型一组3题:这一题只算总正确率统计,不当场写排期/错题本——3题攒齐之后
+       在 finalizeNewPatternGroup 里按整体表现结一次账。原因见 aggregateNewPatternVerdict
+       上面的注释:3次独立判卷各自推进排期,会让一个刚学的句型在同一次学习里
+       被连续拉长3档复习间隔,跳过"隔一晚还记不记得"这道最关键的检验。 */
+    if (item.isNew) {
+      setDb((d) => {
+        const nd = { ...d, stats: { ...d.stats } };
+        nd.stats.total += 1;
+        if (g.verdict === "correct") nd.stats.ok += 1;
+        return nd;
+      });
+      const list = newGroupResultsRef.current[item.p.id] || [];
+      list.push({ verdict: g.verdict, errorScope: g.errorScope, needsReview, task: cq.task, type: cq.type, ans: (cAnswer || "").trim() || "(未作答)", ref: g.reference, exp: g.explanation, breakdown: g.breakdown || null });
+      newGroupResultsRef.current[item.p.id] = list;
+      if (list.length >= item.newReps) {
+        finalizeNewPatternGroup(item.p, list);
+        delete newGroupResultsRef.current[item.p.id];
+      }
+      return;
+    }
     setDb((d) => {
       const nd = { ...d, prog: { ...d.prog }, meta: { ...d.meta }, stats: { ...d.stats }, listenStats: { ...d.listenStats }, mistakes: [...d.mistakes] };
       nd.stats.total += 1;
       if (isListening) nd.listenStats.total += 1;
       // AI 自我核验:verdict 是 correct 但 selfCheck 为 false,说明判定和讲解自相矛盾,
       // 存在"误判为 correct 导致漏检"的风险 → 不直接放行,继续留在错题本等人工复核
-      const needsReview = g.verdict === "correct" && g.selfCheck === false;
       if (g.verdict === "correct") {
         nd.stats.ok += 1;
         if (isListening) nd.listenStats.ok += 1;
@@ -2628,19 +2793,28 @@ function AppInner() {
       // 注意:复合题(combo)的 item 只有 p1/p2、没有 p。目前所有 combo 路径都是 freeMode(不影响排期),
       // 所以走不到这里;但加一道 item.p 的保险,免得将来改动时漏设 freeMode 直接崩掉。
       if (!cFree && item.p) {
-        const existed = nd.prog[item.p.id];
-        const cur = existed ? { ...existed } : { lv: 0, ok: 0, ng: 0, learnedDate: t };
-        let { lv } = cur;
-        let due;
-        // outsideOnly:句型本身没问题,排期按答对走(错的那个词已经单独记进错题本了)
-        if (g.verdict === "correct" || outsideOnly) { due = addDays(t, INTERVALS[Math.min(lv, INTERVALS.length - 1)]); lv = Math.min(lv + 1, INTERVALS.length); cur.ok++; }
-        else if (g.verdict === "partial") { due = addDays(t, Math.max(1, Math.round(INTERVALS[Math.min(lv, INTERVALS.length - 1)] / 2))); cur.ok++; }
-        else { lv = Math.max(0, lv - 2); due = addDays(t, 1); cur.ng++; }
-        nd.prog[item.p.id] = { ...cur, lv, due };
-        if (item.isNew) {
-          if (nd.meta.date !== t) { nd.meta.date = t; nd.meta.newDone = 0; }
-          nd.meta.newDone += 1;
-        }
+        nd.prog[item.p.id] = computeProgUpdate(nd.prog[item.p.id], outsideOnly ? "correct" : g.verdict, outsideOnly, t);
+      }
+      return nd;
+    });
+  };
+
+  /* 新句型一组 NEW_PATTERN_REPS 题全部判完后结账:排期只在这里更新一次
+     (逻辑同普通到期复习,只是 verdict 换成整组的综合表现),newDone 也只加1次
+     (不是每题各加1次——否则学1个新句型会把当天新句型配额吃掉3个的量)。
+     错题本最多写1条:3题里"最后一次没做对"的那道最有代表性,不是每道错的都各存一条。 */
+  const finalizeNewPatternGroup = (p, results) => {
+    const verdict = aggregateNewPatternVerdict(results);
+    const anyNeedsReview = results.some((r) => r.needsReview);
+    setDb((d) => {
+      const nd = { ...d, prog: { ...d.prog }, meta: { ...d.meta }, mistakes: [...d.mistakes] };
+      nd.prog[p.id] = computeProgUpdate(nd.prog[p.id], verdict, false, t);
+      if (nd.meta.date !== t) { nd.meta.date = t; nd.meta.newDone = 0; }
+      nd.meta.newDone += 1;
+      if (verdict !== "correct" || anyNeedsReview) {
+        const bad = [...results].reverse().find((r) => r.verdict !== "correct" || r.needsReview) || results[results.length - 1];
+        nd.mistakes.unshift({ task: bad.task, type: bad.type, ans: bad.ans, ref: bad.ref, exp: bad.exp, breakdown: bad.breakdown, pid: p.id, date: t, needsReview: bad.needsReview, streak: 0 });
+        nd.mistakes = nd.mistakes.slice(0, 100);
       }
       return nd;
     });
@@ -2681,13 +2855,26 @@ function AppInner() {
     .slice(0, HW_EXTRA_MAX)
     .map((m) => ({ p: PATTERNS[m.pid], hw: "trans", mistakeId: m.id, isExtra: true }));
   /* 刚答完第 idx 题之后,是不是该停下来看这一组的讲评。
-     队尾不算——最后一组走的是 waiting → done,讲评在结果页上给。 */
+     队尾不算——最后一组走的是 waiting → done,讲评在结果页上给。
+     边界规则和 chunkStartIndex(模块顶部)必须完全一致,否则"该不该停"和
+     "讲评页该展示哪个范围"会对不上:
+     ①新句型组内部(不是这组最后一题):绝不能停,3题必须连续做完;
+     ②新句型组的最后一题:强制停,让这一组独立成一份讲评;
+     ③下一题是新句型组的开头:也要在这里先停一下,不能让新句型的讲评
+       和前面的到期复习题混在同一份里;
+     ④其余情况:按 REVIEW_CHUNK 计数,和以前一样。 */
   const willBreakForChunk = () => {
-    if ((idx + 1) % REVIEW_CHUNK !== 0 || idx + 1 >= queue.length) return false;
+    if (idx + 1 >= queue.length) return false;
+    const cur = queue[idx];
+    const nxt = queue[idx + 1];
+    const from = chunkStartIndex(queue, idx);
+    const hasGrade = () => Object.keys(gradeStates).some((k) => Number(k) >= from && Number(k) <= idx);
+    if (cur.isNew) return cur.newRep === cur.newReps - 1 && hasGrade();
+    if (nxt.isNew && nxt.newRep === 0) return hasGrade();
+    if (idx + 1 - from < REVIEW_CHUNK) return false;
     // 这一组一条判卷记录都没有就别停(理论上只可能整组都是情景对话——
     // 对话的讲评是在对话页上当场给的,不走 gradeStates,停下来会是一张空白页)
-    const from = Math.floor(idx / REVIEW_CHUNK) * REVIEW_CHUNK;
-    return Object.keys(gradeStates).some((k) => Number(k) >= from && Number(k) <= idx);
+    return hasGrade();
   };
   /* 最后一题的按钮文案:如果按下去其实还会追加题目,就不能写"完成",不然点了以后
      又冒出新题会显得莫名其妙;按下去是去看讲评时同理,要说清楚 */
@@ -2718,8 +2905,9 @@ function AppInner() {
 
   const next = () => {
     if (idx + 1 < queue.length) {
-      // 做满一组就先去看讲评,不直接翻下一题
-      if (willBreakForChunk()) { setPhase("chunk"); return; }
+      // 做满一组就先去看讲评,不直接翻下一题。趁你在看这组讲评的时候,
+      // 顺手把下一个新句型组的题目在后台生成好——不用等你翻到介绍页才现场出题
+      if (willBreakForChunk()) { prefetchNextNewGroup(idx + 1); setPhase("chunk"); return; }
       advanceTo(idx + 1);
     } else if (shouldAppendHwExtra()) {
       // 优先用预取时定下的那份清单(题面已经在缓存里),没有才现挑
@@ -3265,16 +3453,17 @@ function AppInner() {
     );
   };
 
-  /* 讲评分组:第 gi 题属于第 Math.floor(gi / REVIEW_CHUNK) 组。
-     用 idx 直接算而不另存 state,免得两者不同步。 */
-  const chunkFrom = Math.floor(idx / REVIEW_CHUNK) * REVIEW_CHUNK;
+  /* 讲评分组的起点。边界不再是均匀的每 REVIEW_CHUNK 题(新句型的3题一组会插进来
+     打破整齐的模数关系),用 chunkStartIndex 沿队列走一遍断点规则求出来,
+     不能再用 idx 直接取模。用 idx 现算而不另存 state,免得两者不同步。 */
+  const chunkFrom = chunkStartIndex(queue, idx);
   /* 结果页只展示最后一组(前面的组在做题过程中已经逐组看过了),
      想回看全部有"展开本次全部讲评"的开关 */
-  const lastChunkFrom = queue.length ? Math.floor((queue.length - 1) / REVIEW_CHUNK) * REVIEW_CHUNK : 0;
+  const lastChunkFrom = queue.length ? chunkStartIndex(queue, queue.length - 1) : 0;
   const gradedIdxInRange = (from, to) =>
     Object.keys(gradeStates).map(Number).filter((gi) => gi >= from && gi <= to).sort((a, b) => a - b);
   const cur = queue[idx];
-  actionsRef.current = { cur, next, retry, loadQuestion };
+  actionsRef.current = { cur, idx, next, retry, loadQuestion, beginNewPatternGroup };
   const lessons = [...new Set(PATTERNS.map((p) => p.lesson))];
 
   return (
@@ -3513,7 +3702,7 @@ function AppInner() {
           {phase !== "done" && phase !== "waiting" && phase !== "chunk" && (
             <div className="pattern-head">
               <span className={"tag " + (weeklyMode ? "tag-wk" : homeworkMode ? "tag-hw" : listenMode ? "tag-ls" : drillMode ? "tag-mk" : cur.isNew ? "tag-new" : "tag-rev")}>
-                {weeklyMode ? (cur.sub === "combo" ? "週間 · 複合作文" : "週間 · 弱点再測") : homeworkMode ? (cur.isExtra ? "作業 · 追加問題" : cur.hw === "dialogue" ? "作業 · 情景対話" : cur.sub === "combo" ? "作業 · 複合作文" : cur.hw === "comp" ? "作業 · 造句" : "作業 · 翻訳") : listenMode ? "聴解練習" : drillMode ? "錯題本 · 重练" : freeMode ? "自由练习" : cur.isNew ? "新句型" : "复习"}
+                {weeklyMode ? (cur.sub === "combo" ? "週間 · 複合作文" : "週間 · 弱点再測") : homeworkMode ? (cur.isExtra ? "作業 · 追加問題" : cur.hw === "dialogue" ? "作業 · 情景対話" : cur.sub === "combo" ? "作業 · 複合作文" : cur.hw === "comp" ? "作業 · 造句" : "作業 · 翻訳") : listenMode ? "聴解練習" : drillMode ? "錯題本 · 重练" : freeMode ? "自由练习" : cur.isNew ? `新句型 · ${cur.newRep + 1}/${cur.newReps}` : "复习"}
               </span>
               {cur.hw === "dialogue" && dialogueScene ? (
                 <span className="pattern-name serif">{dialogueScene.userRole} ↔ {dialogueScene.aiRole}</span>
@@ -3540,7 +3729,8 @@ function AppInner() {
               <div className="intro-row"><label>意味</label><div>{cur.p.meaning}</div></div>
               <div className="intro-row"><label>例文</label><div><div className="serif ex-jp"><WordHintText text={cur.p.exJP} words={exWords} onHintWord={markHinted} /></div><div className="ex-cn">{cur.p.exCN}</div></div></div>
               {exWords && <div className="wh-tip-note">生词不认识?点一下看读音,再点一下看释义</div>}
-              <button className="btn-main" onClick={() => loadQuestion(cur.p)}>読めた,开始做题 →</button>
+              <p className="intro-reps-note">读完点开始,这个句型连续出 {cur.newReps} 道题,做完一起看讲评</p>
+              <button className="btn-main" onClick={() => beginNewPatternGroup(cur, idx)}>読めた,开始做题 →</button>
             </section>
           )}
 
@@ -4431,6 +4621,7 @@ html,body{overflow-x:hidden}
 .intro-row{display:flex;gap:14px;margin-bottom:14px;font-size:15px;line-height:1.7}
 .intro-row label{flex:0 0 40px;font-size:12px;color:var(--shu);letter-spacing:2px;padding-top:3px}
 .ex-jp{font-size:16px} .ex-cn{font-size:13px;color:var(--ink-soft);margin-top:2px}
+.intro-reps-note{font-size:12px;color:var(--ink-soft);margin-bottom:10px}
 .intro-card .btn-main{margin-top:8px}
 
 .loading-card{text-align:center;padding:44px 20px}

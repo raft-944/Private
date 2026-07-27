@@ -1632,6 +1632,11 @@ function AppInner() {
   const sessionGenRef = useRef(0); // 每次开始新的一组题就递增,防止上一轮延迟返回的批量结果写错地方
   const prefetchingRef = useRef(new Set()); // 正在预取中的题位下标,避免补取和开场预取重复请求同一题
   const prefetchFailRef = useRef(0); // 本场有几批预取彻底失败——结果页上提示一下,不然只能靠猜
+  /* 标记"内存里这一场可续做的会话还活着":存下开场时的 sessionGenRef 和 kind。
+     所有 start*(自由练习/一键练习/每日作业…)都会递增 sessionGenRef,所以只要 gen 还相等,
+     就说明内存里的 queue/idx/当前题面/判卷状态都还是这一场的,没被别的场次顶掉——
+     这种情况下"继续做"可以原地切回视图,不必重建队列、更不必重新出题(见 resumeSession)。 */
+  const liveSessionRef = useRef(null);
   /* 新句型一组3题的判卷结果,按句型id分桶累积:{ [patternId]: [{verdict,errorScope,...}, ...] }
      攒够 newReps 条才一次性结账(见 finalizeNewPatternGroup)。
      用 ref 而不是 state:这里只是"攒到齐了没"的中间记账,不需要触发重渲染,
@@ -1799,12 +1804,26 @@ function AppInner() {
       if (kind === "weekly") return it.sub === "combo" ? { sub: "combo", pid1: it.p1.id, pid2: it.p2.id, mistakeId: it.mistakeId } : { sub: "weak", pid: it.p.id, mistakeId: it.mistakeId };
       return { pid: it.p.id, isNew: it.isNew, newRep: it.newRep, newReps: it.newReps };
     });
+    // 分段讲评页上第 idx 题已经答完了,快照要记 idx+1,否则中断后续做会让这题重做一遍
+    const resumeIdx = phase === "chunk" ? idx + 1 : idx;
+    /* 已经生成好的题面也一起存进快照,按队列下标记({[下标]:{pid,q}})。
+       不存的话,一旦关掉网页(iOS 上把 PWA 切到后台一会儿就会被系统回收)或者
+       中途开过别的场次,这些已经花掉 AI 额度生成好的题就全丢了,续做时每道都要重新出题。
+       只存 resumeIdx 及其之后的:前面的题已经答完了,续做不会再用到。
+       连 pid 一起存,续做时用来校验这个下标还是不是同一个句型(见 resumeSession)。 */
+    const qs = {};
+    const putQ = (i, question) => {
+      const it = queue[i];
+      if (i < resumeIdx || !question || !question.task || !it || !it.p) return;
+      qs[i] = { pid: it.p.id, q: question };
+    };
+    Object.keys(preGenRef.current).forEach((k) => putQ(Number(k), preGenRef.current[k]));
+    putQ(idx, q); // 当前这道已经出好、正在答的题(它不在 preGenRef 里,取出来时就删掉了)
     // date 记录这份快照是哪天生成的:今日学习/每日作业跨天后要判定失效,不能让旧快照
     // 冒充"今天的任务全貌"(旧快照更小,会把真实积压量吃掉,详见 startSession/startHomework 里的处理)
-    // 分段讲评页上第 idx 题已经答完了,快照要记 idx+1,否则中断后续做会让这题重做一遍
-    setDb((d) => ({ ...d, session: { kind, items, idx: phase === "chunk" ? idx + 1 : idx, stats: sessionStats, date: t } }));
+    setDb((d) => ({ ...d, session: { kind, items, idx: resumeIdx, stats: sessionStats, date: t, qs } }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [queue, idx, sessionStats, phase, view, weeklyMode, weeklyFormal, homeworkMode, listenMode, freeMode]);
+  }, [queue, idx, q, sessionStats, phase, view, weeklyMode, weeklyFormal, homeworkMode, listenMode, freeMode]);
 
   /* --- 首页预热:后台先把当天头几题生成好 ---
      和上面那个盘点 effect 一样,必须写在 `if (!db) return` 之前,所以这里自己算到期队列。
@@ -2080,6 +2099,7 @@ function AppInner() {
     prefetchingRef.current.clear();
     prefetchFailRef.current = 0;
     newGroupResultsRef.current = {};
+    liveSessionRef.current = { gen: sessionGenRef.current, kind: "srs" };
     setQueue(items); setIdx(0); setFreeMode(false); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
@@ -2245,6 +2265,7 @@ function AppInner() {
     prefetchingRef.current.clear();
     prefetchFailRef.current = 0;
     hwExtraPlanRef.current = null; // 新的一批作业,上一批没用掉的追加计划作废
+    liveSessionRef.current = { gen: sessionGenRef.current, kind: "homework" };
     setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(true); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0, backlogOk: 0, backlogPartial: 0, backlogWrong: 0 }); setGradeStates({});
     setView("session");
@@ -2319,6 +2340,7 @@ function AppInner() {
       ...combos.map(([p1, p2]) => ({ sub: "combo", p1, p2 })),
       ...weakPids.map((pid) => ({ sub: "weak", p: PATTERNS[pid] })),
     ];
+    liveSessionRef.current = { gen: sessionGenRef.current, kind: "weekly" };
     setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(true); setWeeklyFormal(true); setListenMode(false); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
@@ -2331,6 +2353,7 @@ function AppInner() {
     if (learned.length === 0) return;
     const shuffled = [...learned].sort(() => Math.random() - 0.5);
     const items = Array.from({ length: 8 }, (_, i) => ({ p: shuffled[i % shuffled.length], isNew: false }));
+    liveSessionRef.current = { gen: sessionGenRef.current, kind: "listen" };
     setQueue(items); setIdx(0); setFreeMode(true); setHomeworkMode(false); setWeeklyMode(false); setWeeklyFormal(false); setListenMode(true); setDrillMode(false);
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
@@ -2474,9 +2497,22 @@ function AppInner() {
     }
   };
 
+  /* 内存里这一场还活着(只是视图被切走了,比如误点了底部导航去錯題本/句型库):
+     这时"继续做"根本不用续做——queue/idx/当前那道已经出好的题/已填的答案/判卷状态
+     全都还在内存里,直接切回 session 视图就是原样,一次 AI 调用都不用花。
+     gen 不相等说明中间开过别的场次(自由练习、錯題本一键练习…),内存里的状态
+     已经被那一场顶掉了,这时必须走下面完整的续做流程。 */
+  const canResumeInPlace = () => {
+    const s = db.session;
+    const live = liveSessionRef.current;
+    return !!(s && live && live.gen === sessionGenRef.current && live.kind === s.kind
+      && queue.length > 0 && phase !== "done" && phase !== "idle");
+  };
+
   const resumeSession = () => {
     const s = db.session;
     if (!s) return;
+    if (canResumeInPlace()) { setView("session"); return; }
     // 续做也要走一遍"新会话"的初始化:递增 sessionGenRef 让上一轮延迟返回的预取结果作废,
     // 清掉 preGenRef——上一轮留下的题面是按上一轮的队列下标存的,续做的队列虽然是同一批题,
     // 但如果中间开过别的场次(每日作业/自由练习),那些下标就对不上了,照用会张冠李戴
@@ -2492,6 +2528,19 @@ function AppInner() {
     // 判断(newRep!==0)失效退回现场单题生成——这里按老逻辑补默认值(0/1,当成独立的
     // 单题组),让这条旧快照能正常续完,而不是带着 undefined 走完剩下的题。
     else items = s.items.map((d) => ({ p: PATTERNS[d.pid], isNew: d.isNew, newRep: d.newRep ?? 0, newReps: d.newReps ?? 1 }));
+    /* 还原快照里存下的题面(见存档 effect 里的 qs):这些题已经花过 AI 额度生成好了,
+       关掉网页/切走再回来不该重新出一遍。每条都要校验"这个下标现在还是同一个句型"——
+       快照里的 items 和 qs 是同一次写进去的、下标天然对得上,但校验一下更保险,
+       万一队列被改过(比如作业追加了题)也不会把题安到别人身上。
+       runPrefetch 自己会跳过 preGenRef 里已有的下标,所以下面的批量预取不会重复请求。 */
+    const savedQs = s.qs && typeof s.qs === "object" ? s.qs : {};
+    Object.keys(savedQs).forEach((k) => {
+      const i = Number(k);
+      const rec = savedQs[k];
+      const it = items[i];
+      if (!rec || !rec.q || !rec.q.task || !it || !it.p || it.p.id !== rec.pid) return;
+      preGenRef.current[i] = rec.q;
+    });
     setQueue(items); setIdx(s.idx); setSessionStats(s.stats || { ok: 0, partial: 0, wrong: 0 });
     setFreeMode(s.kind !== "srs"); setHomeworkMode(s.kind === "homework"); setWeeklyMode(s.kind === "weekly"); setWeeklyFormal(s.kind === "weekly"); setListenMode(s.kind === "listen"); setDrillMode(false);
     setView("session");

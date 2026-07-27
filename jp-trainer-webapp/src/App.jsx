@@ -112,7 +112,7 @@ const REVIEW_CAP_DEFAULT = 40;
    就自动下调每日新句型数,把资源让给消化积压。参数留在这里方便按实际学习数据调整。 */
 const CAP_STREAK_FOR_DOWNGRADE = 5;
 
-const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null, reviewCap: REVIEW_CAP_DEFAULT }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, session: null, studyTime: {}, hwBacklog: null };
+const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null, reviewCap: REVIEW_CAP_DEFAULT, dialogueTier: null }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, dialogueStats: { total: 0, clean: 0 }, session: null, studyTime: {}, hwBacklog: null };
 
 /* 待复习积压达到"新句型日配额"的这么多倍时,暂停当天新句型引入,先把复习债还上——
    参照 Anki"复习优先于新卡"的思路,但阈值给宽松点,避免正常的小波动就误伤新句型进度。 */
@@ -222,10 +222,63 @@ function mergeDb(saved) {
     meta: { ...DEFAULT_DB.meta, ...(s.meta || {}) },
     stats: { ...DEFAULT_DB.stats, ...(s.stats || {}) },
     listenStats: { ...DEFAULT_DB.listenStats, ...(s.listenStats || {}) },
+    dialogueStats: { ...DEFAULT_DB.dialogueStats, ...(s.dialogueStats || {}) },
     prog: s.prog || {},
     mistakes: Array.isArray(s.mistakes) ? s.mistakes : [],
     studyTime: s.studyTime && typeof s.studyTime === "object" ? s.studyTime : {},
   };
+}
+
+/* 情景对话的难度档位。
+   原来对话普遍两三轮就结束,根因不在轮数上限(DIALOGUE_MAX_TURNS 从来没被触发过),
+   而在于每个场景只写了一个 goal("点好餐并确认餐点内容"),而续对话的 done 规则是
+   "目标达成就可以收尾"——单一小目标本来就两轮就达成了。所以真正的解法是把目标拆成
+   多个必经阶段(scene.stages,含结账/收尾),done 改成"所有阶段都走完才允许收尾",
+   再按档位往里加意外(scene.twists)、调整AI的说话方式和闲聊。
+
+   三档的区别只在"啰嗦程度和临场变数",不在语法难度——低档也要走完整个流程(包括结账),
+   只是每个阶段一来一回就推进、不出意外;高档才会追问细节、抛意外、用缩约形省略主语。
+   maxTurns 是硬上限(防AI一直不给done),按档位放宽:阶段多了,8轮根本不够走完。 */
+const DIALOGUE_TIERS = [
+  {
+    key: "easy", name: "やさしい", cn: "轻松",
+    maxTurns: 10, twists: 0,
+    pace: "说话要短、清楚、一句一个意思,用完整的です・ます或简体(按场景语域),不要用缩约形、不要省略主语,不要一次问两件事。学习者听不懂或答得不对时,换一种更简单的说法再问一遍,不要放弃这个阶段。",
+    stageStyle: "每个阶段一来一回就推进到下一个阶段,不要在同一个阶段反复追问细节。",
+    smallTalk: "不要闲聊,专心把流程走完。",
+  },
+  {
+    key: "normal", name: "ふつう", cn: "普通",
+    maxTurns: 16, twists: 1,
+    pace: "用自然的日常口语速度和长度说话,可以有轻微的省略,但不要太快太碎。",
+    stageStyle: "每个阶段可以追问一个具体细节(比如份量、时间、要不要加什么),问完就推进到下一个阶段。",
+    smallTalk: "整场对话可以插一句和当下情境有关的寒暄或闲聊(比如天气、店里的招牌、最近很忙),不要多。",
+  },
+  {
+    key: "hard", name: "むずかしい", cn: "挑战",
+    maxTurns: 22, twists: 2,
+    pace: "像对日本人那样自然地说:可以用口语缩约形(〜ちゃう/〜とく/〜てる/〜んだけど)、省略主语和助词、用短促的应答(えっと、あ、はい),偶尔反问学习者一句。不要为了迁就学习者而放慢或简化。",
+    stageStyle: "每个阶段可以追问一两个细节,也可以主动提出学习者没想到的选项,让他必须临场判断。",
+    smallTalk: "整场对话主动插一到两句题外的闲聊或寒暄,需要学习者接得住。",
+  },
+];
+
+/* 当前该用哪一档:settings.dialogueTier 有手动设定就用它(0/1/2),
+   否则按"复盘没被指出问题的对话场次"自动升档——和听力的 listenTier 是同一套思路。
+   手动设定是黏性的(一直生效到你自己调回自动),不是只管当次。 */
+function dialogueTier(db) {
+  const manual = db && db.settings ? db.settings.dialogueTier : null;
+  if (manual === 0 || manual === 1 || manual === 2) return DIALOGUE_TIERS[manual];
+  const clean = (db && db.dialogueStats && db.dialogueStats.clean) || 0;
+  if (clean >= 12) return DIALOGUE_TIERS[2];
+  if (clean >= 5) return DIALOGUE_TIERS[1];
+  return DIALOGUE_TIERS[0];
+}
+
+/* 场景的阶段清单。老场景数据没有 stages 字段,就退回"只有一个目标"的老行为
+   (goal 当成唯一阶段),这样漏写 stages 的场景不会变成没有阶段可走。 */
+function sceneStages(scene) {
+  return Array.isArray(scene.stages) && scene.stages.length ? scene.stages : [scene.goal];
 }
 
 /* 听力难度分级:根据听力累计答对次数自动升级句子的长度/结构复杂度。
@@ -850,22 +903,51 @@ function dialogueRegisterNote(scene) {
     : "";
 }
 
+/* 阶段清单写进提示词的样子。带编号是为了让AI能在 stage 字段里回一个编号,
+   前端拿它显示"走到第几段了",不用自己去猜对话进行到哪儿。 */
+function dialogueStagesText(scene) {
+  return sceneStages(scene).map((s, i) => `${i + 1}. ${s}`).join("\n");
+}
+
+/* 意外情况写进提示词的样子。档位的 twists 是 0 时整段都不给AI看,
+   免得它明明被要求"不要出意外"却还是被列表带着跑。 */
+function dialogueTwistsText(scene, tier) {
+  const list = Array.isArray(scene.twists) ? scene.twists : [];
+  if (!tier.twists || !list.length) return "";
+  return `
+
+【可以抛出的意外情况】这场对话里你最多可以引入 ${tier.twists} 个意外(从下面挑,不要自己另编),
+在流程进行到一半、学习者已经顺利说了几句之后再抛出来,不要一开口就抛:
+${list.map((x) => `- ${x}`).join("\n")}
+抛出意外之后要像真人一样等学习者应对,他应对完了再继续往下走剩下的阶段。
+看一眼上面的对话记录,如果你已经抛过 ${tier.twists} 个意外了,就不要再抛新的了。`;
+}
+
 /* AI先开口的场景,进对话前先要一句开场白(角色口吻,不含任何评价/元信息) */
-async function genDialogueOpening(scene) {
+async function genDialogueOpening(scene, tier) {
+  const tr = tier || DIALOGUE_TIERS[0];
   const sys = `あなたは日本語教師です。请扮演场景里的「${scene.aiRole}」这个角色,用自然、符合该角色身份的口语说第一句话,不要出戏、不要加任何括号说明或旁白。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `场景背景: ${scene.background}
 你扮演: ${scene.aiRole}
 对方(学习者)扮演: ${scene.userRole}
-对话目标: ${scene.goal}
-请说出这场对话里「${scene.aiRole}」要说的第一句话,简短自然,像日常口语,不要长篇大论。${dialogueRegisterNote(scene)}
+这场对话要依次走完的阶段:
+${dialogueStagesText(scene)}
+
+【你的说话方式】${tr.pace}
+请说出这场对话里「${scene.aiRole}」要说的第一句话——只是第一阶段的开场,不要把后面阶段的事一次说完。简短自然,像日常口语,不要长篇大论。${dialogueRegisterNote(scene)}
 输出JSON: {"text":"第一句话(日语)"}`;
   const r = await callAI(sys, user);
   if (!r.text) throw new Error("bad dialogue opening");
   return r.text;
 }
 
-/* 续写对话:AI扮演角色回一句,同时暗中给学习者刚才那句话一个轻量标记,并判断是否可以自然收尾了 */
-async function continueDialogue(scene, history, userMessage) {
+/* 续写对话:AI扮演角色回一句,同时暗中给学习者刚才那句话一个轻量标记,
+   报一下现在走到第几个阶段,并判断是否可以自然收尾了。
+   done 的规则是这个功能的关键:必须"所有阶段都走完"才允许收尾。
+   以前只写"对话目标达成就可以收尾",而场景又只有一个小目标,于是两三轮就结束了。 */
+async function continueDialogue(scene, history, userMessage, tier) {
+  const tr = tier || DIALOGUE_TIERS[0];
+  const stages = sceneStages(scene);
   const sys = `あなたは日本語教師です。请扮演场景里的「${scene.aiRole}」这个角色,和学习者(扮演「${scene.userRole}」)自然对话,不要出戏。同时你要暗中评估学习者刚才那句话说得自然不自然(这部分只体现在tag字段里,绝对不能在对话内容reply里评价或纠正对方,要像真人对话一样只管接话)。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const registerTagHint = scene.register === "casual"
     ? "(这个场景该用简体,如果学习者习惯性地切回です・ます敬体,即使语法没错也算不够自然)"
@@ -873,19 +955,30 @@ async function continueDialogue(scene, history, userMessage) {
   const user = `场景背景: ${scene.background}
 你扮演: ${scene.aiRole}
 对方(学习者)扮演: ${scene.userRole}
-对话目标: ${scene.goal}
+
+【这场对话要依次走完的阶段】必须一个一个走,不能跳过、不能合并、更不能提前收尾:
+${dialogueStagesText(scene)}
+
+【你的说话方式】${tr.pace}
+【推进节奏】${tr.stageStyle}
+【闲聊】${tr.smallTalk}${dialogueTwistsText(scene, tr)}
 
 到目前为止的对话:
 ${formatDialogueHistory(scene, history)}
 ${scene.userRole}: ${userMessage}
 
-请以「${scene.aiRole}」的身份自然地回应这最后一句话,简短口语化,像真实对话,不要长篇大论、不要一次性说完所有信息。${dialogueRegisterNote(scene)}
+请以「${scene.aiRole}」的身份自然地回应这最后一句话,简短口语化,像真实对话,不要长篇大论、不要一次性把后面阶段的事都说完。${dialogueRegisterNote(scene)}
 tag字段:如果学习者刚才那句日语说得自然、地道${registerTagHint},给"natural";如果有点生硬、不够地道但还能听懂,给"stiff";如果不确定或不需要特别评价,给null。
-done字段:如果这句回复说完之后,对话目标已经达成(该问到的问到了、该确认的确认了),接下来只需要道谢/道别就能自然结束,就给true;否则给false。
-输出JSON: {"reply":"你的回应(日语)","tag":"natural|stiff|null","done":true|false}`;
+stage字段:你这句回复说完之后,对话正处在上面第几个阶段(填阶段编号,1~${stages.length}的整数)。
+done字段:只有当上面**全部 ${stages.length} 个阶段都已经走完**(最后一个阶段也完成了、只剩道谢道别)时才给true。
+  只要还有任何一个阶段没走到,哪怕当下这件事已经聊完了,也必须给false,并且要主动把话头引到下一个阶段去
+  (比如该结账了就主动说金额、该确认细节了就主动问细节),不要停在原地、也不要提前说さようなら。
+输出JSON: {"reply":"你的回应(日语)","tag":"natural|stiff|null","stage":阶段编号(数字),"done":true|false}`;
   const r = await callAI(sys, user);
   if (!r.reply) throw new Error("bad dialogue reply");
-  return { reply: r.reply, tag: r.tag === "natural" || r.tag === "stiff" ? r.tag : null, done: !!r.done };
+  // stage 只用来显示进度,AI 给了越界的值就当没给,不影响对话本身
+  const stage = typeof r.stage === "number" && r.stage >= 1 && r.stage <= stages.length ? r.stage : null;
+  return { reply: r.reply, tag: r.tag === "natural" || r.tag === "stiff" ? r.tag : null, stage, done: !!r.done };
 }
 
 /* 整场对话结束后的复盘:总结用了哪些句型、哪里生硬、敬体简体有没有混用,
@@ -901,7 +994,8 @@ async function reviewDialogue(scene, history, candidatePatterns) {
     ? "这场对话的人物关系亲近(朋友/熟悉的平级同事),应该全程用简体(タメ口),不是敬体——如果学习者中途切回です・ます,即使语法没错,也要在issues里指出"
     : "这场对话是相对正式或不太熟的关系,应该全程用敬体(です・ます),不是简体——如果学习者中途说了简体,也要在issues里指出";
   const user = `场景背景: ${scene.background}
-对话目标: ${scene.goal}
+这场对话本该依次走完的阶段:
+${dialogueStagesText(scene)}
 学习者扮演: ${scene.userRole},对方扮演: ${scene.aiRole}
 场景语域: ${registerLine}
 
@@ -909,7 +1003,7 @@ async function reviewDialogue(scene, history, candidatePatterns) {
 ${formatDialogueHistory(scene, history)}
 
 请对学习者(${scene.userRole}那些发言)做整体复盘:
-1. summary:简短总结整体表现和用到的句型/表达(用中文,100字以内)
+1. summary:简短总结整体表现和用到的句型/表达(用中文,100字以内)。如果这场对话中途出现了意外情况(比如东西卖完了、不能刷卡),要评价一句他应对得怎么样
 2. issues:指出哪些地方表达生硬、不够地道,或者敬体简体的使用不符合上面"场景语域"的要求,没有就写"没有明显问题"
 3. suggestions:给出1~2个更地道的说法建议,没有就留空字符串""
 
@@ -1191,7 +1285,8 @@ async function reviewConfusionDialogue(scene, history, stageBenchmark) {
     ? "这场对话的人物关系亲近(朋友/熟悉的平级同事),应该全程用简体(タメ口),不是敬体——如果学习者中途切回です・ます,即使语法没错,也要在issues里指出"
     : "这场对话是相对正式或不太熟的关系,应该全程用敬体(です・ます),不是简体——如果学习者中途说了简体,也要在issues里指出";
   const user = `场景背景: ${scene.background}
-对话目标: ${scene.goal}
+这场对话本该依次走完的阶段:
+${dialogueStagesText(scene)}
 学习者扮演: ${scene.userRole},对方扮演: ${scene.aiRole}
 学习者水平: ${stageBenchmark}
 场景语域: ${registerLine}
@@ -1428,6 +1523,59 @@ function FollowUpAsk({ contextSummary }) {
   );
 }
 
+/* ================= 情景对话的场景卡(每日作业 / 練習帳 两处共用) =================
+   抽成组件是因为这两处的场景卡本来就长得一样,以前是两份拷贝,加了阶段进度和难度切换之后
+   再各写一份迟早会漂移(这个仓库里已经踩过一次:讲评样式两份拷贝改了一处没改另一处)。
+
+   stage 是 AI 每轮报回来的"现在走到第几个阶段",用来显示流程进度——让你知道
+   后面还有几步、都是什么(比如还没结账),不会觉得对话莫名其妙没完。
+   难度只在开口之前能改:改档位会换掉AI的说话方式和意外数量,聊到一半换不合理。
+   手动选中的档位是黏性的(存进 settings.dialogueTier),一直生效到你自己调回"自动"。 */
+function DialogueSceneCard({ scene, stage, db, onTierChange, tierLocked }) {
+  const stages = sceneStages(scene);
+  const tier = dialogueTier(db);
+  const manual = db.settings.dialogueTier;
+  const isAuto = manual !== 0 && manual !== 1 && manual !== 2;
+  return (
+    <div className="dlg-scene-card">
+      <div className="dlg-scene-bg">{scene.background}</div>
+      <div className="dlg-scene-roles">你演 {scene.userRole} · AI演 {scene.aiRole}</div>
+      <div className="dlg-stages">
+        <div className="dlg-stages-head">
+          流程 {Math.min(stage, stages.length)}/{stages.length}
+          <span className="dlg-stages-note">走完全部流程才会结束</span>
+        </div>
+        {stages.map((s, i) => {
+          const n = i + 1;
+          const state = n < stage ? "done" : n === stage ? "now" : "todo";
+          return (
+            <div key={i} className={"dlg-stage dlg-stage-" + state}>
+              <span className="dlg-stage-no">{state === "done" ? "✓" : n}</span>
+              <span className="dlg-stage-txt">{s}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="dlg-tier">
+        <span className="dlg-tier-label">难度</span>
+        <div className="dlg-tier-btns">
+          <button className={"dlg-tier-btn" + (isAuto ? " on" : "")} disabled={tierLocked} onClick={() => onTierChange(null)}>自动</button>
+          {DIALOGUE_TIERS.map((tr, i) => (
+            <button key={tr.key} className={"dlg-tier-btn" + (manual === i ? " on" : "")} disabled={tierLocked} onClick={() => onTierChange(i)}>{tr.name}</button>
+          ))}
+        </div>
+      </div>
+      <div className="dlg-tier-hint">
+        {isAuto ? `自动:按你的对话表现,现在是「${tier.name}」` : `手动固定在「${tier.name}」,想跟着表现自动升降就点「自动」`}
+        {tierLocked ? " · 对话已经开始,下一场再改" : ""}
+      </div>
+      {scene.register === "casual" && (
+        <div className="dlg-scene-register">💬 关系亲近,请用简体(タメ口)对话,不用敬体です・ます</div>
+      )}
+    </div>
+  );
+}
+
 /* ================= 印章组件(签名元素) ================= */
 function Stamp({ verdict }) {
   const cfg = {
@@ -1555,7 +1703,7 @@ function AppInner() {
   const [dialogueReview, setDialogueReview] = useState(null);
   const [dialogueInput, setDialogueInput] = useState("");
   const [dialogueBusy, setDialogueBusy] = useState(false); // 等AI回复/复盘时,禁用输入
-  const DIALOGUE_MAX_TURNS = 8; // 硬上限:防止AI一直不给done、对话无限聊下去
+  const [dialogueStage, setDialogueStage] = useState(1); // AI 报回来的"现在走到第几个阶段",只用于显示进度
 
   /* intro 阶段的课本例句逐词标注:优先查本地缓存,没有才现调一次AI,失败就静默放弃
      (这是锦上添花的辅助功能,不能因为它挂了就卡住正常做题流程)。 */
@@ -1672,6 +1820,7 @@ function AppInner() {
   const [cfDialogueHistory, setCfDialogueHistory] = useState([]);
   const [cfDialoguePhase, setCfDialoguePhase] = useState("chatting"); // chatting|reviewing|reviewed
   const [cfDialogueReview, setCfDialogueReview] = useState(null);
+  const [cfDialogueStage, setCfDialogueStage] = useState(1); // 同 dialogueStage,練習帳这一套独立
   const [cfDialogueInput, setCfDialogueInput] = useState("");
   const [cfDialogueBusy, setCfDialogueBusy] = useState(false);
   const [cfDialogueErr, setCfDialogueErr] = useState("");
@@ -2642,10 +2791,11 @@ function AppInner() {
     setDialogueReview(null);
     setDialogueInput("");
     setDialoguePhase("chatting");
+    setDialogueStage(1);
     setPhase("dialogue");
     if (scene.initiator === "ai") {
       setDialogueBusy(true);
-      genDialogueOpening(scene)
+      genDialogueOpening(scene, dialogueTier(db))
         .then((text) => setDialogueHistory([{ role: "ai", text }]))
         .catch((e) => { setErrMsg("对话开场失败:" + (e && e.message ? e.message : String(e))); setPhase("error"); })
         .finally(() => setDialogueBusy(false));
@@ -2660,7 +2810,8 @@ function AppInner() {
     setDialogueInput("");
     setDialogueBusy(true);
     const userTurns = historyBeforeReply.filter((h) => h.role === "user").length;
-    continueDialogue(dialogueScene, dialogueHistory, text)
+    const tier = dialogueTier(db);
+    continueDialogue(dialogueScene, dialogueHistory, text, tier)
       .then((r) => {
         const historyAfterReply = [
           ...historyBeforeReply.slice(0, -1),
@@ -2668,7 +2819,9 @@ function AppInner() {
           { role: "ai", text: r.reply },
         ];
         setDialogueHistory(historyAfterReply);
-        if (r.done || userTurns >= DIALOGUE_MAX_TURNS) finishDialogue(historyAfterReply);
+        if (r.stage) setDialogueStage(r.stage);
+        // 轮数上限按档位走(阶段变多之后,原来固定的8轮根本走不完整个流程)
+        if (r.done || userTurns >= tier.maxTurns) finishDialogue(historyAfterReply);
         else setDialogueBusy(false);
       })
       .catch((e) => {
@@ -2707,6 +2860,8 @@ function AppInner() {
     setSessionStats((s) => ({ ...s, [key]: s[key] + 1, ...(homeworkMode && item.fromBacklog ? { [bkey]: (s[bkey] || 0) + 1 } : {}) }));
     setDb((d) => {
       const nd = { ...d, mistakes: [...d.mistakes] };
+      // 对话累计:clean 是"复盘没挑出问题"的场次,难度自动升档就看它(见 dialogueTier)
+      nd.dialogueStats = { total: (d.dialogueStats.total || 0) + 1, clean: (d.dialogueStats.clean || 0) + (hasIssues ? 0 : 1) };
       for (const f of review.flaggedIssues) {
         const base = {
           pid: f.pid, type: "dialogue", sceneId: scene.id,
@@ -3290,8 +3445,6 @@ function AppInner() {
   /* ================= 練習帳:场景对话 =================
      流程和 SRS 那边的情景对话(beginDialogueItem/sendDialogueTurn/finishDialogue)几乎一样,
      但状态、复盘函数、错题写入方式都是独立的一套,互不影响。 */
-  const CF_DIALOGUE_MAX_TURNS = 8;
-
   const startConfusionDialogue = (scene, retryMistakeId) => {
     setCfScene(scene);
     setCfDialogueHistory([]);
@@ -3300,10 +3453,11 @@ function AppInner() {
     setCfDialoguePhase("chatting");
     setCfDialogueErr("");
     setCfDialogueRetryId(retryMistakeId || null);
+    setCfDialogueStage(1);
     setConfusionSub("dialogue");
     if (scene.initiator === "ai") {
       setCfDialogueBusy(true);
-      genDialogueOpening(scene)
+      genDialogueOpening(scene, dialogueTier(db))
         .then((text) => setCfDialogueHistory([{ role: "ai", text }]))
         .catch((e) => setCfDialogueErr("对话开场失败:" + (e && e.message ? e.message : String(e))))
         .finally(() => setCfDialogueBusy(false));
@@ -3318,7 +3472,8 @@ function AppInner() {
     setCfDialogueInput("");
     setCfDialogueBusy(true);
     const userTurns = historyBeforeReply.filter((h) => h.role === "user").length;
-    continueDialogue(cfScene, cfDialogueHistory, text)
+    const tier = dialogueTier(db);
+    continueDialogue(cfScene, cfDialogueHistory, text, tier)
       .then((r) => {
         const historyAfterReply = [
           ...historyBeforeReply.slice(0, -1),
@@ -3326,7 +3481,8 @@ function AppInner() {
           { role: "ai", text: r.reply },
         ];
         setCfDialogueHistory(historyAfterReply);
-        if (r.done || userTurns >= CF_DIALOGUE_MAX_TURNS) finishConfusionDialogue(historyAfterReply);
+        if (r.stage) setCfDialogueStage(r.stage);
+        if (r.done || userTurns >= tier.maxTurns) finishConfusionDialogue(historyAfterReply);
         else setCfDialogueBusy(false);
       })
       .catch((e) => {
@@ -3345,6 +3501,11 @@ function AppInner() {
         setCfDialogueReview(review);
         setCfDialoguePhase("reviewed");
         setCfDialogueBusy(false);
+        // 練習帳的对话也计入难度自动升档的累计(和每日作业的情景対話共用同一套档位)
+        setDb((d) => ({ ...d, dialogueStats: {
+          total: (d.dialogueStats.total || 0) + 1,
+          clean: (d.dialogueStats.clean || 0) + (review.grammarMistakes.length === 0 ? 1 : 0),
+        } }));
         if (retryId) {
           // 重练:这次对话里还有没有被挑出语法问题,决定这条错题的连续答对计数往上走还是清零,
           // 不额外新开错题记录
@@ -3839,14 +4000,13 @@ function AppInner() {
 
           {phase === "dialogue" && dialogueScene && (
             <section className="card dialogue-card">
-              <div className="dlg-scene-card">
-                <div className="dlg-scene-bg">{dialogueScene.background}</div>
-                <div className="dlg-scene-roles">你演 {dialogueScene.userRole} · AI演 {dialogueScene.aiRole}</div>
-                <div className="dlg-scene-goal">目标:{dialogueScene.goal}</div>
-                {dialogueScene.register === "casual" && (
-                  <div className="dlg-scene-register">💬 关系亲近,请用简体(タメ口)对话,不用敬体です・ます</div>
-                )}
-              </div>
+              <DialogueSceneCard
+                scene={dialogueScene}
+                stage={dialogueStage}
+                db={db}
+                tierLocked={dialogueHistory.some((h) => h.role === "user")}
+                onTierChange={(v) => setDb((d) => ({ ...d, settings: { ...d.settings, dialogueTier: v } }))}
+              />
 
               {/* 对话记录不再随"是否已复盘"隐藏——复盘完还想回看自己刚才说了什么、
                   AI 怎么接的,尤其是被标了 stiff/需要改进的那几句,原来一复盘就整段消失了。 */}
@@ -4326,14 +4486,13 @@ function AppInner() {
             <span className="pattern-name serif">{cfScene.userRole} ↔ {cfScene.aiRole}</span>
           </div>
           <section className="card dialogue-card">
-            <div className="dlg-scene-card">
-              <div className="dlg-scene-bg">{cfScene.background}</div>
-              <div className="dlg-scene-roles">你演 {cfScene.userRole} · AI演 {cfScene.aiRole}</div>
-              <div className="dlg-scene-goal">目标:{cfScene.goal}</div>
-              {cfScene.register === "casual" && (
-                <div className="dlg-scene-register">💬 关系亲近,请用简体(タメ口)对话,不用敬体です・ます</div>
-              )}
-            </div>
+            <DialogueSceneCard
+              scene={cfScene}
+              stage={cfDialogueStage}
+              db={db}
+              tierLocked={cfDialogueHistory.some((h) => h.role === "user")}
+              onTierChange={(v) => setDb((d) => ({ ...d, settings: { ...d.settings, dialogueTier: v } }))}
+            />
 
             {cfDialogueErr && <div className="cf-err">{cfDialogueErr}</div>}
 
@@ -4745,8 +4904,30 @@ html,body{overflow-x:hidden}
 .dlg-scene-card{background:var(--tint-cream);border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:13px;line-height:1.7}
 .dlg-scene-bg{color:var(--ink);margin-bottom:4px}
 .dlg-scene-roles{color:var(--ai-deep);font-weight:600;margin-bottom:2px}
-.dlg-scene-goal{color:var(--ink-soft)}
 .dlg-scene-register{color:var(--ai);font-size:12px;margin-top:6px}
+/* 流程进度:已完成的打勾压暗,当前那一段加深加粗,还没到的压得更淡——
+   一眼能看出"后面还有结账",不会以为对话该结束了却还没完 */
+.dlg-stages{margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+.dlg-stages-head{font-size:11px;color:var(--ink-soft);letter-spacing:1px;margin-bottom:5px}
+.dlg-stages-note{margin-left:8px;letter-spacing:0}
+.dlg-stage{display:flex;gap:6px;align-items:baseline;font-size:12px;line-height:1.6;margin:2px 0}
+.dlg-stage-no{flex:0 0 auto;width:15px;height:15px;border-radius:50%;display:inline-flex;align-items:center;
+  justify-content:center;font-size:9px;border:1px solid var(--line);color:var(--ink-soft);margin-top:2px}
+.dlg-stage-txt{flex:1;min-width:0}
+.dlg-stage-done{color:var(--ink-soft)}
+.dlg-stage-done .dlg-stage-no{border-color:var(--tint-green-border);color:var(--tint-green-fg)}
+.dlg-stage-now{color:var(--ink);font-weight:600}
+.dlg-stage-now .dlg-stage-no{border-color:var(--ai);background:var(--ai);color:#fff}
+.dlg-stage-todo{color:var(--ink-soft);opacity:.6}
+/* 难度切换:开口之后 disabled(聊到一半换档位不合理),但仍然显示当前档位 */
+.dlg-tier{display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:8px;border-top:1px solid var(--line);flex-wrap:wrap}
+.dlg-tier-label{font-size:11px;color:var(--ink-soft);letter-spacing:1px}
+.dlg-tier-btns{display:flex;gap:4px;flex-wrap:wrap}
+.dlg-tier-btn{padding:3px 9px;font-size:11px;border:1px solid var(--line);background:var(--card);color:var(--ink-soft);
+  border-radius:7px;cursor:pointer;font-family:inherit}
+.dlg-tier-btn.on{border-color:var(--ai);background:var(--ai);color:#fff;font-weight:600}
+.dlg-tier-btn:disabled{cursor:not-allowed;opacity:.55}
+.dlg-tier-hint{font-size:11px;color:var(--ink-soft);margin-top:5px;line-height:1.6}
 .cf-scene-register-badge{margin-left:6px;vertical-align:middle}
 .dlg-bubbles{display:flex;flex-direction:column;gap:10px;margin-bottom:12px;max-height:50vh;overflow-y:auto}
 .dlg-bubble{max-width:82%;padding:10px 14px;border-radius:14px;font-size:15px;line-height:1.6}

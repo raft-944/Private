@@ -42,6 +42,42 @@ function computeProgUpdate(existedProg, verdict, outsideOnly, t) {
   return { ...cur, lv, due };
 }
 
+/* qHist 的 key。普通句型题直接用句型 id;複合作文(两个句型)和聴解(听写句子)
+   各有自己的题库,得和普通题分开记,否则听力的句子会被当成翻译题的题面去避重。 */
+const comboHistKey = (p1, p2) => `c${p1.id}_${p2.id}`;
+const listenHistKey = (p) => `l${p.id}`;
+function qHistKeyOf(item, q) {
+  if (!item) return null;
+  if (item.sub === "combo") return item.p1 && item.p2 ? comboHistKey(item.p1, item.p2) : null;
+  if (!item.p) return null;
+  if (q && q.type === "listening") return listenHistKey(item.p);
+  return String(item.p.id);
+}
+
+/* 某个句型最近出过的题面。传给出题提示词当"别再出这些"的清单。 */
+function seenTasksOf(db, key) {
+  const h = db && db.qHist ? db.qHist[key] : null;
+  return h && Array.isArray(h.tasks) ? h.tasks : [];
+}
+
+/* 这个句型这次该出什么题型:和上次出过的换着来(翻译↔造句),没有记录就随机。
+   以前是每次都 Math.random()<0.6,同一个句型连着几次都是翻译题很常见——
+   题面本来就容易撞,题型再一样就更像"又是这道题"。 */
+function pickQType(db, pid) {
+  const h = db && db.qHist ? db.qHist[pid] : null;
+  const last = h && h.lastType;
+  if (last === "translation") return "composition";
+  if (last === "composition") return "translation";
+  return Math.random() < 0.6 ? "translation" : "composition";
+}
+
+/* 出题提示词里"避免和这些重复"的那一段。没有历史就返回空串(不给 AI 添无用的话)。 */
+function avoidText(avoid) {
+  const list = (avoid || []).filter(Boolean);
+  if (!list.length) return "";
+  return `\n  ※这个句型以前出过下面这些题,这次必须换一个明显不同的场景/内容,不要重复也不要只改几个字:${list.map((t) => `「${t}」`).join("、")}`;
+}
+
 const STORE_KEY = "jp_srs_v1";
 const TOPICS = ["日常生活","工作·公司","旅行","购物","天气·季节","家庭","饮食","兴趣爱好","交通·车站","健康·医院","学习·学校","朋友之间"];
 
@@ -112,7 +148,17 @@ const REVIEW_CAP_DEFAULT = 40;
    就自动下调每日新句型数,把资源让给消化积压。参数留在这里方便按实际学习数据调整。 */
 const CAP_STREAK_FOR_DOWNGRADE = 5;
 
-const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null, reviewCap: REVIEW_CAP_DEFAULT, dialogueTier: null }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, dialogueStats: { total: 0, clean: 0 }, session: null, studyTime: {}, hwBacklog: null };
+const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null, reviewCap: REVIEW_CAP_DEFAULT, dialogueTier: null }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, dialogueStats: { total: 0, clean: 0 }, session: null, studyTime: {}, hwBacklog: null, qHist: {}, hwRecent: [] };
+
+/* 每个句型记住最近出过的几道题面,出新题时作为"别再出这些"的清单发给 AI。
+   为什么必须存进 db 而不是内存:以前只有一个 useRef(recentTasks)记最近4条,而且
+   ①只在"现场单题出题"那条退路上用得到,批量出题(现在的主力路径)根本没有避重机制;
+   ②一刷新页面就清空。结果像「Vてください」这种句型,AI 每次都从零开始想,
+   每次都想到课本那句「窓を開けてください」,同一道题反复刷到。
+   条数不宜太多:发给 AI 的提示词会变长,而且太久以前做过的题再出一次本来也无妨。 */
+const SEEN_TASKS_PER_PATTERN = 6;
+/* 每日作业记住最近抽过哪些句型,再抽的时候降权,避免连着几天都抽到同一批。 */
+const HW_RECENT_MAX = 24;
 
 /* 待复习积压达到"新句型日配额"的这么多倍时,暂停当天新句型引入,先把复习债还上——
    参照 Anki"复习优先于新卡"的思路,但阈值给宽松点,避免正常的小波动就误伤新句型进度。 */
@@ -226,6 +272,8 @@ function mergeDb(saved) {
     prog: s.prog || {},
     mistakes: Array.isArray(s.mistakes) ? s.mistakes : [],
     studyTime: s.studyTime && typeof s.studyTime === "object" ? s.studyTime : {},
+    qHist: s.qHist && typeof s.qHist === "object" ? s.qHist : {},
+    hwRecent: Array.isArray(s.hwRecent) ? s.hwRecent : [],
   };
 }
 
@@ -583,8 +631,20 @@ function styleTagsCompatible(a, b) {
 
 /* 判卷时统一插入的"文体前后一致"规则。不依赖句型有没有标签——查的是学习者自己
    写出来的这句话内部是否文体统一(前半句です・ます、后半句だ/である这种混用),
-   这是很常见又容易被"语法没错"放过去的问题,所以单独作为一条判卷规则写死。 */
-const STYLE_CONSISTENCY_RULE = `文体一致性检查(重要):检查学生这句话内部的文体是否统一——同一个句子(或同一段对话中同一个说话人的话)里不能敬体(です・ます)和简体(だ/である/辞書形結び)混用。如果发现前后文体不一致(例如前半句用「です」后半句用「だ」),即使语法本身没有错,也必须在 explanation 里明确指出是文体不一致、具体哪里不一致、应该统一成哪一种,并且 verdict 最高只能给 "partial",不能给 "correct"。若该句型本身有文体限制(见上面【文体限制】),学生用了不符合的文体,同样按这条处理。`;
+   这是很常见又容易被"语法没错"放过去的问题,所以单独作为一条判卷规则写死。
+
+   下面那一大段"从属节豁免"是后来补的,不能删:原来的规则只说"同一个句子里不能混用",
+   没说清楚只看句末,结果 AI 把它套到了条件节上——「もし明日雨が降ったら、行きません。」
+   这种完全正确的句子被判成"前半句简体、后半句敬体,文体不一致",还建议改成
+   「降りましたら」。而日语的实际规则正好相反:从属节本来就该用普通形,文体只由句末决定,
+   句型库里 〜たら(条件) 自带的教材例句「雨が降ったら、出かけません。」就是这个结构。
+   误判的后果不只是分数:verdict 被压到 partial 之后,一个完全正确的答案会被写进错题本。 */
+const STYLE_CONSISTENCY_RULE = `文体一致性检查(重要):检查学生这句话内部的文体是否统一——同一个句子(或同一段对话中同一个说话人的话)里不能敬体(です・ます)和简体(だ/である/辞書形結び)混用。如果发现前后文体不一致(例如前半句用「です」后半句用「だ」),即使语法本身没有错,也必须在 explanation 里明确指出是文体不一致、具体哪里不一致、应该统一成哪一种,并且 verdict 最高只能给 "partial",不能给 "correct"。若该句型本身有文体限制(见上面【文体限制】),学生用了不符合的文体,同样按这条处理。
+但是这条检查只针对句末(主節)的谓语,以下情况一律不算文体混用,绝对不能因此扣分或提出修改建议:
+- 从属节用普通形是日语的常态,不是错误。条件节(〜たら/〜ば/〜と/〜なら)、时间节(〜とき/〜まえに/〜あとで)、原因节(〜から/〜ので 的前半)、连体修饰节(修饰名词的小句)、引用节(〜と思います/〜と言いました 的引用部分)、并列节(〜が、/〜けど、)——这些位置本来就用普通形,和句末是不是です・ます无关。
+- 例如「明日雨が降ったら、行きません。」「駅に着いたら、電話してください。」「これは私が買った本です。」「行くと思います」全都是完全正确、教科书标准的句子,必须判 correct,不许说它们文体不一致。
+- 更不许建议学生把从属节改成敬体(例如把「降ったら」改成「降りましたら」)。那是服务业播音、商务文书才用的加倍郑重说法,在普通句子里反而不自然。
+只有当句末(主節)的谓语自己前后矛盾、或者同一说话人在同一段话里句末忽敬体忽简体时,才算文体不一致。`;
 
 /* 判卷时要求 AI 把错误归类到"是不是目标句型的问题"。
    这条解决的问题:以前一句话里句型用对了、只是某个单词或助词写错,整句判 partial 会
@@ -849,7 +909,7 @@ function alignBatch(arr, count, build) {
 
 async function genQuestionBatch(items) {
   const sys = "あなたは日本語教師です。这批题目里每道题都会单独标注该题句型对应的 JLPT 难度基准(如 N4、N3〜N2),请严格按各自的标注出题,不要用同一个难度套所有题目,更不要把简单句型的题也拉到难句型的水平。出题词汇和语法必须符合各题标注的难度范围。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
-  const list = items.map((it, i) => `第${i + 1}题 — 句型:${it.p.pattern}(${it.p.conn} / ${it.p.meaning}) — 【難易度基準】${levelBenchmark(it.p.level)} — 题型:${it.type === "translation" ? "翻译题" : "造句题"}${styleTagText(it.p)}${explainBriefText(it.p)}${personInstruction(it.p)}`).join("\n");
+  const list = items.map((it, i) => `第${i + 1}题 — 句型:${it.p.pattern}(${it.p.conn} / ${it.p.meaning}) — 【難易度基準】${levelBenchmark(it.p.level)} — 题型:${it.type === "translation" ? "翻译题" : "造句题"}${styleTagText(it.p)}${explainBriefText(it.p)}${personInstruction(it.p)}${avoidText(it.avoid)}`).join("\n");
   const user = `请一次性为下面这 ${items.length} 道题各自出题,每题的句型和题型已经指定好,请严格按顺序对应,不要弄混、不要跳过任何一题、不要合并。
 
 ${list}
@@ -871,17 +931,18 @@ ${list}
 
 /* 批量版(纯翻译题):专门给"每日作业"里那些必须是翻译题的题位用,
    比genQuestionBatch更简单,因为不用在提示词里区分题型 */
-async function genTranslationBatch(patterns) {
+async function genTranslationBatch(items) {
+  const patterns = items.map((it) => it.p);
   const sys = "あなたは日本語教師です。这批题目里每道题都会单独标注该题句型对应的 JLPT 难度基准(如 N4、N3〜N2),请严格按各自的标注出题,不要用同一个难度套所有题目,更不要把简单句型的题也拉到难句型的水平。出题词汇和语法必须符合各题标注的难度范围。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。";
-  const list = patterns.map((p, i) => `第${i + 1}题 — 句型:${p.pattern}(${p.conn} / ${p.meaning}) — 【難易度基準】${levelBenchmark(p.level)}${styleTagText(p)}${explainBriefText(p)}${personInstruction(p)}`).join("\n");
-  const user = `请一次性为下面这 ${patterns.length} 个句型各出一道翻译题,顺序必须和句型编号一一对应,不要弄混、不要跳过、不要合并。
+  const list = items.map((it, i) => `第${i + 1}题 — 句型:${it.p.pattern}(${it.p.conn} / ${it.p.meaning}) — 【難易度基準】${levelBenchmark(it.p.level)}${styleTagText(it.p)}${explainBriefText(it.p)}${personInstruction(it.p)}${avoidText(it.avoid)}`).join("\n");
+  const user = `请一次性为下面这 ${items.length} 个句型各出一道翻译题,顺序必须和句型编号一一对应,不要弄混、不要跳过、不要合并。
 
 ${list}
 
 每一题:给出一句自然的中文短句(15字以内),该句翻译成日语时必须使用对应的目标句型。各题之间内容不要相似雷同。
 ${TASK_SEGMENTS_RULE}
 
-按顺序输出一个JSON数组,长度必须正好是 ${patterns.length},每个元素格式: {"n":题号(就是上面的第几题,整数),"task":"题目内容(中文)",${TASK_SEGMENTS_FIELD}}`;
+按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"n":题号(就是上面的第几题,整数),"task":"题目内容(中文)",${TASK_SEGMENTS_FIELD}}`;
   const arr = await callAIArray(sys, user, patterns.length, true);
   return alignBatch(arr, patterns.length, (q) => ({
     type: "translation", task: q.task,
@@ -1862,7 +1923,6 @@ function AppInner() {
   const [errMsg, setErrMsg] = useState("");
   const [openLesson, setOpenLesson] = useState(null);
   const actionsRef = useRef({});
-  const recentTasks = useRef({});
   const preGenRef = useRef({}); // 批量出题的结果缓存,key是题目在当前队列里的下标
   const sessionGenRef = useRef(0); // 每次开始新的一组题就递增,防止上一轮延迟返回的批量结果写错地方
   const prefetchingRef = useRef(new Set()); // 正在预取中的题位下标,避免补取和开场预取重复请求同一题
@@ -2025,6 +2085,28 @@ function AppInner() {
     return () => { cancelled = true; };
   }, [db]);
 
+  /* --- 出过的题记进 db(qHist),下次出题时当"别再出这些"的清单 ---
+     记在"题目真正展示给你"的这一刻,而不是生成的时候:预取了但最后没用上的题
+     (换题、中断、会话作废)不该被算成"做过",否则那些题以后永远不会再出现。
+     同一道题重渲染不会重复记(末尾相同就原样返回,React 会跳过这次更新)。
+     这个 effect 和其它的一样必须写在 `if (!db) return` 之前——hooks 数量不能变。 */
+  useEffect(() => {
+    if (!db || !loaded.current || view !== "session" || !q) return;
+    const item = queue[idx];
+    const key = qHistKeyOf(item, q);
+    const text = q.type === "listening" ? q.jp : q.task;
+    if (!key || !text) return;
+    setDb((d) => {
+      const prev = (d.qHist && d.qHist[key]) || { tasks: [], lastType: null };
+      const tasks = prev.tasks || [];
+      if (tasks[tasks.length - 1] === text && prev.lastType === (q.type || prev.lastType)) return d;
+      // 同一句题面如果以前出现过,先去掉旧的再追加,保证清单里不重复、且最近的排最后
+      const next = [...tasks.filter((t) => t !== text), text].slice(-SEEN_TASKS_PER_PATTERN);
+      return { ...d, qHist: { ...d.qHist, [key]: { tasks: next, lastType: q.type || prev.lastType } } };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, idx, view]);
+
   /* --- 断点快照:每次题号/队列变化时,把"做到第几题"写入 db.session --- */
   useEffect(() => {
     // waiting 阶段所有题都已提交、只在等判卷回来,没必要再刷快照
@@ -2074,7 +2156,7 @@ function AppInner() {
     const head = sortedDueList(db, t2).slice(0, cap).slice(0, WARM_COUNT).filter((p) => !warmCache.has(p.id));
     if (!head.length) return;
     warmedRef.current = true;
-    const items = head.map((p) => ({ p, type: Math.random() < 0.6 ? "translation" : "composition" }));
+    const items = head.map((p) => ({ p, type: pickQType(db, p.id), avoid: seenTasksOf(db, p.id) }));
     genQuestionBatch(items)
       .then((qs) => qs.forEach((q, i) => { if (q && q.task) warmCache.set(head[i].id, q); }))
       .catch(() => { /* 预热失败无所谓,做题时会照常现场出题 */ });
@@ -2316,9 +2398,9 @@ function AppInner() {
       want.push({ idx: i, p: it.p });
     }
     if (!want.length) return;
-    if (homeworkMode) runPrefetch(want, (chunk) => genTranslationBatch(chunk.map((c) => c.p)));
-    else runPrefetch(want.map((w) => ({ ...w, type: Math.random() < 0.6 ? "translation" : "composition" })),
-      (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type }))));
+    if (homeworkMode) runPrefetch(want, (chunk) => genTranslationBatch(chunk.map((c) => ({ p: c.p, avoid: seenTasksOf(db, c.p.id) }))));
+    else runPrefetch(want.map((w) => ({ ...w, type: pickQType(db, w.p.id) })),
+      (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type, avoid: seenTasksOf(db, c.p.id) }))));
   };
 
   const startSession = () => {
@@ -2345,8 +2427,8 @@ function AppInner() {
     const dueIndexed = items
       .map((it, idx) => ({ idx, p: it.p, isNew: it.isNew }))
       .filter((it) => !it.isNew && it.idx !== 0)
-      .map((it) => ({ ...it, type: Math.random() < 0.6 ? "translation" : "composition" }));
-    runPrefetch(dueIndexed, (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type }))));
+      .map((it) => ({ ...it, type: pickQType(db, it.p.id) }));
+    runPrefetch(dueIndexed, (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type, avoid: seenTasksOf(db, c.p.id) }))));
     // 万一到期复习题是空的、队列一开始就是新句型:没有前面的讲评页可以顺便触发预取,
     // 这里兜底起个头。正常情况下(前面有到期复习题)会在进入讲评页时被 next() 里那次调用覆盖到,
     // 这里再调一次是空操作(prefetchingRef/preGenRef 已经在处理中或已完成)。
@@ -2401,8 +2483,8 @@ function AppInner() {
     const plainIndexed = items
       .map((it, idx) => ({ idx, p: it.p, sub: it.sub, drillKind: it.drillKind }))
       .filter((it) => it.sub !== "combo" && it.drillKind !== "listen" && it.idx !== 0)
-      .map((it) => ({ ...it, type: Math.random() < 0.6 ? "translation" : "composition" }));
-    runPrefetch(plainIndexed, (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type }))));
+      .map((it) => ({ ...it, type: pickQType(db, it.p.id) }));
+    runPrefetch(plainIndexed, (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type, avoid: seenTasksOf(db, c.p.id) }))));
   };
 
   /* 每日情景对话选场景:优先挑跟当前错题/薄弱句型(lv很低的)有关联的场景,
@@ -2431,10 +2513,40 @@ function AppInner() {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     const learned = PATTERNS.filter((p) => db.prog[p.id]);
     if (learned.length === 0) return;
+    // 错题本里出现过的句型(非句型类错误不算——那是词写错了,不代表这个句型没掌握)
+    const mistakePids = new Set(db.mistakes.filter((m) => m.pid !== undefined && !m.nonPattern).map((m) => m.pid));
+    /* 加权抽题(不放回)。以前是纯随机洗牌:你已经背得很熟的句型和刚学完还很虚的句型
+       被抽中的概率一模一样,再加上最近抽过的也不降权,于是同一批句型隔几天就又来一遍。
+       现在按"越不熟越该练"给权重:
+       ①排期档位 lv 越低权重越高(lv0/1 是刚学或刚答错的,最该练);
+       ②在错题本里的额外加权;
+       ③最近几批作业已经抽过的降权(db.hwRecent),避免连着几天撞同一批。
+       注意只是"降权"不是"排除"——池子小的时候还得靠它们凑数。 */
+    const recentSet = new Set(db.hwRecent || []);
+    const weightOf = (p) => {
+      const prog = db.prog[p.id];
+      const lv = prog ? prog.lv : 0;
+      let w = lv <= 1 ? 6 : lv <= 3 ? 3 : 1;
+      if (mistakePids.has(p.id)) w *= 2;
+      if (recentSet.has(p.id)) w *= 0.25;
+      return w;
+    };
     const pickN = (n, pool) => {
-      const shuffled = [...pool].sort(() => Math.random() - 0.5);
+      const rest = [...pool];
       const out = [];
-      for (let i = 0; i < n; i++) out.push(shuffled[i % shuffled.length]);
+      for (let i = 0; i < n; i++) {
+        if (!rest.length) { // 池子被抽空了(要的题比已学句型还多),从头再来一轮
+          rest.push(...pool);
+          if (!rest.length) break;
+        }
+        const weights = rest.map(weightOf);
+        const total = weights.reduce((a, b) => a + b, 0);
+        let r = Math.random() * total;
+        let k = 0;
+        while (k < rest.length - 1 && r > weights[k]) { r -= weights[k]; k++; }
+        out.push(rest[k]);
+        rest.splice(k, 1);
+      }
       return out;
     };
 
@@ -2508,6 +2620,9 @@ function AppInner() {
     beginHomeworkItem(items[0], 0);
     setDb((d) => {
       const nd = { ...d, hwBacklog: hasBacklog ? { days: backlogDays } : null };
+      // 记下这批抽了哪些句型,下批抽题时降权,免得连着几天都是同一批(见 pickN 的 weightOf)
+      const usedPids = items.filter((it) => it.p).map((it) => it.p.id);
+      nd.hwRecent = [...(d.hwRecent || []).filter((id) => !usedPids.includes(id)), ...usedPids].slice(-HW_RECENT_MAX);
       if (flushedItems.length) {
         nd.mistakes = [...d.mistakes];
         for (const it of flushedItems) {
@@ -2537,7 +2652,7 @@ function AppInner() {
     const transIndexed = items
       .map((it, idx) => ({ idx, ...it }))
       .filter((it) => it.sub !== "combo" && it.hw === "trans" && it.idx !== 0);
-    runPrefetch(transIndexed, (chunk) => genTranslationBatch(chunk.map((c) => c.p)));
+    runPrefetch(transIndexed, (chunk) => genTranslationBatch(chunk.map((c) => ({ p: c.p, avoid: seenTasksOf(db, c.p.id) }))));
   };
 
   const startWeekly = () => {
@@ -2604,11 +2719,8 @@ function AppInner() {
   const loadListeningQuestion = async (p) => {
     setPhase("loadingQ"); setAnswer("");
     try {
-      const key = "listen_" + p.id;
-      const avoid = recentTasks.current[key] || [];
       const tier = listenTier(db.listenStats.ok);
-      const s = await genListeningSentence(p, avoid, tier);
-      recentTasks.current[key] = [...avoid, s.jp].slice(-4);
+      const s = await genListeningSentence(p, seenTasksOf(db, listenHistKey(p)), tier);
       setQ({ type: "listening", jp: s.jp, yomi: s.yomi || s.jp, cnRef: s.cn, task: "", label: `聴解(聴き取り・${tier.name}) · 只听声音,写出你听到的日语(仮名でもOK)` });
       setPhase("question");
     } catch (e) {
@@ -2794,11 +2906,11 @@ function AppInner() {
       .filter((it) => it.idx > s.idx);
     if (s.kind === "homework") {
       runPrefetch(rest.filter((it) => it.sub !== "combo" && it.hw === "trans"),
-        (chunk) => genTranslationBatch(chunk.map((c) => c.p)));
+        (chunk) => genTranslationBatch(chunk.map((c) => ({ p: c.p, avoid: seenTasksOf(db, c.p.id) }))));
     } else if (s.kind === "srs") {
       runPrefetch(
-        rest.filter((it) => !it.isNew).map((it) => ({ ...it, type: Math.random() < 0.6 ? "translation" : "composition" })),
-        (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type }))));
+        rest.filter((it) => !it.isNew).map((it) => ({ ...it, type: pickQType(db, it.p.id) })),
+        (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type, avoid: seenTasksOf(db, c.p.id) }))));
       // 续做当前这一题如果正好是新句型组的第2/3题(第1题的批量结果没能跨会话保留下来),
       // beginItem 会退回单题现场生成;这里顺手把"下一组新句型"预取上,不受这个边界情况影响
       prefetchNextNewGroup(s.idx + 1);
@@ -2839,10 +2951,7 @@ function AppInner() {
   const loadComboQuestion = async (p1, p2) => {
     setPhase("loadingQ"); setAnswer("");
     try {
-      const key = p1.id + "_" + p2.id;
-      const avoid = recentTasks.current[key] || [];
-      const question = await genComboQuestion(p1, p2, avoid);
-      recentTasks.current[key] = [...avoid, question.task].slice(-4);
+      const question = await genComboQuestion(p1, p2, seenTasksOf(db, comboHistKey(p1, p2)));
       setQ(question); setPhase("question");
     } catch (e) {
       setErrMsg("出题失败:" + (e && e.message ? e.message : String(e))); setPhase("error");
@@ -2968,9 +3077,9 @@ function AppInner() {
   const loadQuestion = async (p, forceType) => {
     setPhase("loadingQ"); setAnswer("");
     try {
-      const avoid = recentTasks.current[p.id] || [];
-      const question = await genQuestion(p, avoid, forceType);
-      recentTasks.current[p.id] = [...avoid, question.task].slice(-4);
+      // 避重清单和题型轮换都从 db 取(见 seenTasksOf/pickQType),和批量出题走同一套,
+      // 不再用只存内存、刷新就丢的 recentTasks
+      const question = await genQuestion(p, seenTasksOf(db, p.id), forceType || pickQType(db, p.id));
       setQ(question); setPhase("question");
     } catch (e) {
       setErrMsg("出题失败:" + (e && e.message ? e.message : String(e))); setPhase("error");
@@ -3221,7 +3330,7 @@ function AppInner() {
     if (nextIdx + 1 === queue.length && shouldAppendHwExtra()) {
       const extras = buildHwExtras();
       hwExtraPlanRef.current = extras;
-      runPrefetch(extras.map((it, i) => ({ idx: queue.length + i, p: it.p })), (chunk) => genTranslationBatch(chunk.map((c) => c.p)));
+      runPrefetch(extras.map((it, i) => ({ idx: queue.length + i, p: it.p })), (chunk) => genTranslationBatch(chunk.map((c) => ({ p: c.p, avoid: seenTasksOf(db, c.p.id) }))));
     }
     // 顺手把后面几题缺的题面补上——开场批量预取留下的空洞就是在这里被填掉的
     topUpAhead(nextIdx + 1);

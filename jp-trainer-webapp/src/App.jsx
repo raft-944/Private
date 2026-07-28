@@ -23,7 +23,15 @@ function sortedDueList(db, t) {
    这是"凌晨 Cron 预生成"的轻量替代——不需要给 Vercel 加 Supabase 的 service_role 密钥、
    不需要把排队逻辑在服务端重写一遍、不学的日子也不会白烧额度(不打开就不生成)。 */
 const WARM_COUNT = 5;
-const warmCache = new Map(); // pid -> 已生成好的题目
+/* pid -> 已生成好的题目。除了内存 Map 还落一份到 localStorage:以前重开/刷新一次网页
+   就重烧一批预热题——手机上 iOS 会把切到后台的 PWA 回收掉,一天开几次就烧几批,
+   而这些题绝大多数根本没被用上。落盘的那份带日期,只在当天有效:第二天到期的句型
+   已经换了一批,留着旧题反而会拿到不该出的题。
+   (读盘要用到 today(),而 today 是在下面用 const 定义的,module 初始化时还在暂时性死区,
+   所以不能在这里直接 new Map(读盘结果),改成第一次用到时再 hydrate。) */
+const WARM_CACHE_KEY = "jp_warm_cache_v1";
+const warmCache = new Map();
+let warmHydrated = false;
 
 /* ================= 遗忘曲线参数 ================= */
 const INTERVALS = [1, 2, 4, 7, 15, 30, 60]; // 天
@@ -137,6 +145,27 @@ const today = () => new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0
 const addDays = (d, n) => { const t = new Date(d + "T00:00:00Z"); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
 const mondayOf = (d) => { const dt = new Date(d + "T00:00:00Z"); const day = dt.getUTCDay(); dt.setUTCDate(dt.getUTCDate() + (day === 0 ? -6 : 1) - day); return dt.toISOString().slice(0, 10); };
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+/* 预热缓存的读盘/落盘(声明在 today 之后,见 warmCache 那里的说明)。
+   hydrate 只做一次,在第一次用到预热缓存的时候。 */
+function hydrateWarmCache() {
+  if (warmHydrated) return;
+  warmHydrated = true;
+  try {
+    const raw = JSON.parse(localStorage.getItem(WARM_CACHE_KEY) || "null");
+    if (!raw || raw.date !== today() || !raw.items) return;
+    for (const [pid, q] of Object.entries(raw.items)) {
+      if (q && q.task) warmCache.set(Number(pid), q);
+    }
+  } catch { /* 读不出来就当没有,顶多是重新预热一次 */ }
+}
+function saveWarmCache() {
+  try {
+    const items = {};
+    for (const [pid, q] of warmCache) items[pid] = q;
+    localStorage.setItem(WARM_CACHE_KEY, JSON.stringify({ date: today(), items }));
+  } catch { /* 存不下就算了,只是下次重开要重新预热 */ }
+}
 
 /* ---- 每日复习量控制 ---- */
 /* 每天最多安排多少道复习题。超出的顺延(它们的 due 没变,还留在到期队列里,
@@ -291,23 +320,23 @@ const DIALOGUE_TIERS = [
   {
     key: "easy", name: "やさしい", cn: "轻松",
     maxTurns: 10, twists: 0,
-    pace: "说话要短、清楚、一句一个意思,用完整的です・ます或简体(按场景语域),不要用缩约形、不要省略主语,不要一次问两件事。学习者听不懂或答得不对时,换一种更简单的说法再问一遍,不要放弃这个阶段。",
-    stageStyle: "每个阶段一来一回就推进到下一个阶段,不要在同一个阶段反复追问细节。",
-    smallTalk: "不要闲聊,专心把流程走完。",
+    pace: "说短句,一句一个意思,按场景语域用完整敬体或简体,不用缩约形、不省略主语、不一次问两件事。他听不懂或答错就换更简单的说法再问一遍,别跳过这个阶段。",
+    stageStyle: "每阶段一来一回就推进,不在同一阶段反复追问细节。",
+    smallTalk: "不闲聊,专心走流程。",
   },
   {
     key: "normal", name: "ふつう", cn: "普通",
     maxTurns: 16, twists: 1,
-    pace: "用自然的日常口语速度和长度说话,可以有轻微的省略,但不要太快太碎。",
-    stageStyle: "每个阶段可以追问一个具体细节(比如份量、时间、要不要加什么),问完就推进到下一个阶段。",
-    smallTalk: "整场对话可以插一句和当下情境有关的寒暄或闲聊(比如天气、店里的招牌、最近很忙),不要多。",
+    pace: "自然的日常口语,可轻微省略,别太快太碎。",
+    stageStyle: "每阶段追问一个细节(份量/时间/加不加什么),问完就推进。",
+    smallTalk: "整场插一句应景的寒暄闲聊,不要多。",
   },
   {
     key: "hard", name: "むずかしい", cn: "挑战",
     maxTurns: 22, twists: 2,
-    pace: "像对日本人那样自然地说:可以用口语缩约形(〜ちゃう/〜とく/〜てる/〜んだけど)、省略主语和助词、用短促的应答(えっと、あ、はい),偶尔反问学习者一句。不要为了迁就学习者而放慢或简化。",
-    stageStyle: "每个阶段可以追问一两个细节,也可以主动提出学习者没想到的选项,让他必须临场判断。",
-    smallTalk: "整场对话主动插一到两句题外的闲聊或寒暄,需要学习者接得住。",
+    pace: "像对日本人那样说:用缩约形(〜ちゃう/〜とく/〜てる/〜んだけど)、省略主语和助词、短促应答(えっと、あ、はい),偶尔反问他。别为迁就他放慢或简化。",
+    stageStyle: "每阶段追问一两个细节,并主动抛出他没想到的选项让他临场判断。",
+    smallTalk: "整场主动插一两句题外闲聊,要他接得住。",
   },
 ];
 
@@ -512,8 +541,14 @@ async function callAIRawInner(system, user, maxTokens) {
 }
 
 /* 自我核验加长了判卷的输出内容,偶尔会在预算不够时把JSON写到一半就被截断。
-   这里遇到"截断/解析失败"时自动加大预算重试一次,不够了才把错误抛给用户看。 */
-async function callAI(system, user, maxTokens = 3000) {
+   这里遇到"截断/解析失败"时自动加大预算重试一次,不够了才把错误抛给用户看。
+
+   默认预算从 3000 提到 4200:重试是把**完整提示词再发一遍**,而判卷的提示词是全场最长的
+   (带教材解释 300 字 + 易混淆辨析 400 字),触发一次就是双倍开销。max_tokens 只是上限、
+   按实际产出计费,调高本身一分钱不花,却能把"写到一半被截断"这类重试基本消掉。
+   注意这只解决截断那一种;如果是 AI 在 JSON 字符串里写了英文直引号导致解析失败,
+   还是得重发一次(提示词里已经反复禁止过,见各处的"绝对不能使用英文直引号")。 */
+async function callAI(system, user, maxTokens = 4200) {
   let lastErr;
   for (const budget of [maxTokens, maxTokens * 2]) {
     const text = await callAIRaw(system, user, budget);
@@ -965,23 +1000,33 @@ function dialogueRegisterNote(scene) {
 }
 
 /* 阶段清单写进提示词的样子。带编号是为了让AI能在 stage 字段里回一个编号,
-   前端拿它显示"走到第几段了",不用自己去猜对话进行到哪儿。 */
-function dialogueStagesText(scene) {
-  return sceneStages(scene).map((s, i) => `${i + 1}. ${s}`).join("\n");
+   前端拿它显示"走到第几段了",不用自己去猜对话进行到哪儿。
+   from 传了就只列"还没走完的"(已经走过的阶段每轮再重发一遍是纯浪费),
+   但会从 from-1 开始留一格重叠,免得 AI 某轮把 stage 报大了、结果把还没做完的阶段藏掉。
+   总数照旧写在提示词里,所以"全部N个阶段走完才能收尾"这条规则不受影响。 */
+function dialogueStagesText(scene, from) {
+  const all = sceneStages(scene);
+  const start = from ? Math.max(0, from - 2) : 0;
+  const lines = all.map((s, i) => `${i + 1}. ${s}`).slice(start);
+  return start > 0 ? `(第1〜${start}段已走完)\n${lines.join("\n")}` : lines.join("\n");
 }
 
 /* 意外情况写进提示词的样子。档位的 twists 是 0 时整段都不给AI看,
-   免得它明明被要求"不要出意外"却还是被列表带着跑。 */
-function dialogueTwistsText(scene, tier) {
+   免得它明明被要求"不要出意外"却还是被列表带着跑。
+
+   used 是这场已经抛过几个意外(AI 每轮用 twist 字段自报,前端累计)。配额用完之后
+   整份清单就不再发了,只留一句"别再抛了"——清单本身占 250 字左右,一场 20 轮的对话
+   光这一段就要重发 20 遍。顺带也让判断更可靠:以前是让 AI 自己数一遍对话记录里
+   抛过几个,靠不住;现在由前端记账。 */
+function dialogueTwistsText(scene, tier, used) {
   const list = Array.isArray(scene.twists) ? scene.twists : [];
   if (!tier.twists || !list.length) return "";
+  if ((used || 0) >= tier.twists) return "\n【意外】这场的意外已经抛够了,接下来别再抛新的,专心把剩下的阶段走完。";
   return `
-
-【可以抛出的意外情况】这场对话里你最多可以引入 ${tier.twists} 个意外(从下面挑,不要自己另编),
-在流程进行到一半、学习者已经顺利说了几句之后再抛出来,不要一开口就抛:
+【可以抛出的意外情况】最多再抛 ${tier.twists - (used || 0)} 个(只能从下面挑,不要自己另编),
+要等流程走到一半、学习者已经顺利说了几句之后再抛,不要一开口就抛;抛完要等他应对,应对完继续走剩下的阶段:
 ${list.map((x) => `- ${x}`).join("\n")}
-抛出意外之后要像真人一样等学习者应对,他应对完了再继续往下走剩下的阶段。
-看一眼上面的对话记录,如果你已经抛过 ${tier.twists} 个意外了,就不要再抛新的了。`;
+如果这一轮你抛了意外,把 twist 字段设成 true。`;
 }
 
 /* AI先开口的场景,进对话前先要一句开场白(角色口吻,不含任何评价/元信息) */
@@ -1006,40 +1051,35 @@ ${dialogueStagesText(scene)}
    报一下现在走到第几个阶段,并判断是否可以自然收尾了。
    done 的规则是这个功能的关键:必须"所有阶段都走完"才允许收尾。
    以前只写"对话目标达成就可以收尾",而场景又只有一个小目标,于是两三轮就结束了。 */
-async function continueDialogue(scene, history, userMessage, tier) {
+async function continueDialogue(scene, history, userMessage, tier, twistsUsed, curStage) {
   const tr = tier || DIALOGUE_TIERS[0];
   const stages = sceneStages(scene);
-  const sys = `あなたは日本語教師です。请扮演场景里的「${scene.aiRole}」这个角色,和学习者(扮演「${scene.userRole}」)自然对话,不要出戏。同时你要暗中评估学习者刚才那句话说得自然不自然(这部分只体现在tag字段里,绝对不能在对话内容reply里评价或纠正对方,要像真人对话一样只管接话)。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
-  const registerTagHint = scene.register === "casual"
-    ? "(这个场景该用简体,如果学习者习惯性地切回です・ます敬体,即使语法没错也算不够自然)"
-    : "";
-  const user = `场景背景: ${scene.background}
-你扮演: ${scene.aiRole}
-对方(学习者)扮演: ${scene.userRole}
+  const sys = `あなたは日本語教師です。扮演「${scene.aiRole}」和学习者(扮演「${scene.userRole}」)自然对话,不要出戏。暗中评估学习者这句话自然不自然,只写进 tag 字段,绝不能在 reply 里评价或纠正他。只输出JSON。JSON字符串内引用假名/单词一律用「」或中文引号,绝不能用英文直引号。`;
+  const registerTagHint = scene.register === "casual" ? "(该用简体,切回です・ます敬体即使语法没错也算不自然)" : "";
+  /* 这份提示词每一轮都要原样重发一次,所以能省的字都省了(实测一场 15 轮的对话里,
+     固定说明占了总量的 75%,而对话历史只占 25%——省这里比裁历史划算得多,
+     而且不会让 AI 忘掉你前面点了什么)。删掉的只是重复啰嗦的措辞,规则一条没少。 */
+  const user = `场景: ${scene.background}
+你演 ${scene.aiRole},学习者演 ${scene.userRole}
 
-【这场对话要依次走完的阶段】必须一个一个走,不能跳过、不能合并、更不能提前收尾:
-${dialogueStagesText(scene)}
+【必经阶段】共 ${stages.length} 段,要一个一个走完,不能跳过、合并或提前收尾:
+${dialogueStagesText(scene, curStage)}
+【演法】${tr.pace}${tr.stageStyle}${tr.smallTalk}${dialogueTwistsText(scene, tr, twistsUsed)}
 
-【你的说话方式】${tr.pace}
-【推进节奏】${tr.stageStyle}
-【闲聊】${tr.smallTalk}${dialogueTwistsText(scene, tr)}
-
-到目前为止的对话:
+对话记录:
 ${formatDialogueHistory(scene, history)}
 ${scene.userRole}: ${userMessage}
 
-请以「${scene.aiRole}」的身份自然地回应这最后一句话,简短口语化,像真实对话,不要长篇大论、不要一次性把后面阶段的事都说完。${dialogueRegisterNote(scene)}
-tag字段:如果学习者刚才那句日语说得自然、地道${registerTagHint},给"natural";如果有点生硬、不够地道但还能听懂,给"stiff";如果不确定或不需要特别评价,给null。
-stage字段:你这句回复说完之后,对话正处在上面第几个阶段(填阶段编号,1~${stages.length}的整数)。
-done字段:只有当上面**全部 ${stages.length} 个阶段都已经走完**(最后一个阶段也完成了、只剩道谢道别)时才给true。
-  只要还有任何一个阶段没走到,哪怕当下这件事已经聊完了,也必须给false,并且要主动把话头引到下一个阶段去
-  (比如该结账了就主动说金额、该确认细节了就主动问细节),不要停在原地、也不要提前说さようなら。
-输出JSON: {"reply":"你的回应(日语)","tag":"natural|stiff|null","stage":阶段编号(数字),"done":true|false}`;
+以「${scene.aiRole}」的身份回应最后这句,简短口语化,别长篇大论,别把后面阶段的事一次说完。${dialogueRegisterNote(scene)}
+tag:说得自然地道${registerTagHint}给"natural";生硬但听得懂给"stiff";不确定给null。
+stage:这句说完后处在第几阶段(1~${stages.length})。
+done:只有全部 ${stages.length} 个阶段都走完(只剩道谢道别)才给true。还有阶段没走到就必须给false,并主动把话头引到下一阶段(该结账就主动报金额),不要停在原地、不要提前道别。
+输出JSON: {"reply":"回应(日语)","tag":"natural|stiff|null","stage":数字,"done":true|false,"twist":true|false}`;
   const r = await callAI(sys, user);
   if (!r.reply) throw new Error("bad dialogue reply");
   // stage 只用来显示进度,AI 给了越界的值就当没给,不影响对话本身
   const stage = typeof r.stage === "number" && r.stage >= 1 && r.stage <= stages.length ? r.stage : null;
-  return { reply: r.reply, tag: r.tag === "natural" || r.tag === "stiff" ? r.tag : null, stage, done: !!r.done };
+  return { reply: r.reply, tag: r.tag === "natural" || r.tag === "stiff" ? r.tag : null, stage, done: !!r.done, twist: !!r.twist };
 }
 
 /* 整场对话结束后的复盘:总结用了哪些句型、哪里生硬、敬体简体有没有混用,
@@ -1852,6 +1892,9 @@ function AppInner() {
   const [dialogueInput, setDialogueInput] = useState("");
   const [dialogueBusy, setDialogueBusy] = useState(false); // 等AI回复/复盘时,禁用输入
   const [dialogueStage, setDialogueStage] = useState(1); // AI 报回来的"现在走到第几个阶段",只用于显示进度
+  /* 这场已经抛过几个意外(AI 每轮自报 twist)。配额用完后就不再把整份意外清单发给它,
+     省下每轮 250 字左右的重复内容;也比让 AI 自己数对话记录可靠。 */
+  const twistsUsedRef = useRef(0);
 
   /* intro 阶段的课本例句逐词标注:优先查本地缓存,没有才现调一次AI,失败就静默放弃
      (这是锦上添花的辅助功能,不能因为它挂了就卡住正常做题流程)。 */
@@ -1968,6 +2011,7 @@ function AppInner() {
   const [cfDialoguePhase, setCfDialoguePhase] = useState("chatting"); // chatting|reviewing|reviewed
   const [cfDialogueReview, setCfDialogueReview] = useState(null);
   const [cfDialogueStage, setCfDialogueStage] = useState(1); // 同 dialogueStage,練習帳这一套独立
+  const cfTwistsUsedRef = useRef(0); // 同 twistsUsedRef
   const [cfDialogueInput, setCfDialogueInput] = useState("");
   const [cfDialogueBusy, setCfDialogueBusy] = useState(false);
   const [cfDialogueErr, setCfDialogueErr] = useState("");
@@ -2151,14 +2195,18 @@ function AppInner() {
   const warmedRef = useRef(false);
   useEffect(() => {
     if (!db || !loaded.current || view !== "home" || warmedRef.current) return;
+    hydrateWarmCache(); // 先把上次开 App 时预热好、还没用掉的题读回来,别重烧一遍
     const t2 = today();
     const cap = db.settings.reviewCap || REVIEW_CAP_DEFAULT;
     const head = sortedDueList(db, t2).slice(0, cap).slice(0, WARM_COUNT).filter((p) => !warmCache.has(p.id));
-    if (!head.length) return;
+    if (!head.length) { warmedRef.current = true; return; }
     warmedRef.current = true;
     const items = head.map((p) => ({ p, type: pickQType(db, p.id), avoid: seenTasksOf(db, p.id) }));
     genQuestionBatch(items)
-      .then((qs) => qs.forEach((q, i) => { if (q && q.task) warmCache.set(head[i].id, q); }))
+      .then((qs) => {
+        qs.forEach((q, i) => { if (q && q.task) warmCache.set(head[i].id, q); });
+        saveWarmCache();
+      })
       .catch(() => { /* 预热失败无所谓,做题时会照常现场出题 */ });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [db, view]);
@@ -2361,8 +2409,13 @@ function AppInner() {
   const runPrefetch = (indexedItems, generator) => {
     const myGen = sessionGenRef.current;
     const CHUNK_SIZE = 5;
-    // 已经在预取路上的题位不再重复请求(补取会和开场的批量预取撞车)
-    const todo = indexedItems.filter((it) => !preGenRef.current[it.idx] && !prefetchingRef.current.has(it.idx));
+    /* 已经有题面、或者已经在预取路上的题位,不再重复请求。
+       这里必须连 warmCache 一起查:首页预热是按"句型id"存的,开场预取是按"队列下标"排的,
+       两边各查各的,结果预热好的那几道(除了第0题)会被开场预取原样再生成一遍——
+       而 beginItem 取题时优先用 preGenRef,预热那几份直接作废。实测每次学习白烧 4 次出题。 */
+    hydrateWarmCache(); // 兜底:万一预热那个 effect 还没跑过,也别把已经预热好的再生成一遍
+    const todo = indexedItems.filter((it) =>
+      !preGenRef.current[it.idx] && !prefetchingRef.current.has(it.idx) && !(it.p && warmCache.has(it.p.id)));
     todo.forEach((it) => prefetchingRef.current.add(it.idx));
     for (let i = 0; i < todo.length; i += CHUNK_SIZE) {
       const chunk = todo.slice(i, i + CHUNK_SIZE);
@@ -2759,6 +2812,7 @@ function AppInner() {
       if (cached) {
         if (qIdx != null) delete preGenRef.current[qIdx];
         warmCache.delete(item.p.id); // 用过就扔,免得下次复习又拿到同一道题
+        saveWarmCache(); // 落盘同步,否则重开 App 会把已经用掉的题又读回来
         setQ(cached);
         setPhase("question");
       } else {
@@ -2838,6 +2892,7 @@ function AppInner() {
     if (cached) {
       if (qIdx != null) delete preGenRef.current[qIdx];
       warmCache.delete(item.p.id);
+      saveWarmCache();
       setQ(cached);
       setPhase("question");
     } else {
@@ -2988,6 +3043,7 @@ function AppInner() {
     setDialogueInput("");
     setDialoguePhase("chatting");
     setDialogueStage(1);
+    twistsUsedRef.current = 0;
     setPhase("dialogue");
     if (scene.initiator === "ai") {
       setDialogueBusy(true);
@@ -3007,7 +3063,7 @@ function AppInner() {
     setDialogueBusy(true);
     const userTurns = historyBeforeReply.filter((h) => h.role === "user").length;
     const tier = dialogueTier(db);
-    continueDialogue(dialogueScene, dialogueHistory, text, tier)
+    continueDialogue(dialogueScene, dialogueHistory, text, tier, twistsUsedRef.current, dialogueStage)
       .then((r) => {
         const historyAfterReply = [
           ...historyBeforeReply.slice(0, -1),
@@ -3016,6 +3072,7 @@ function AppInner() {
         ];
         setDialogueHistory(historyAfterReply);
         if (r.stage) setDialogueStage(r.stage);
+        if (r.twist) twistsUsedRef.current += 1;
         // 轮数上限按档位走(阶段变多之后,原来固定的8轮根本走不完整个流程)
         if (r.done || userTurns >= tier.maxTurns) finishDialogue(historyAfterReply);
         else setDialogueBusy(false);
@@ -3650,6 +3707,7 @@ function AppInner() {
     setCfDialogueErr("");
     setCfDialogueRetryId(retryMistakeId || null);
     setCfDialogueStage(1);
+    cfTwistsUsedRef.current = 0;
     setConfusionSub("dialogue");
     if (scene.initiator === "ai") {
       setCfDialogueBusy(true);
@@ -3669,7 +3727,7 @@ function AppInner() {
     setCfDialogueBusy(true);
     const userTurns = historyBeforeReply.filter((h) => h.role === "user").length;
     const tier = dialogueTier(db);
-    continueDialogue(cfScene, cfDialogueHistory, text, tier)
+    continueDialogue(cfScene, cfDialogueHistory, text, tier, cfTwistsUsedRef.current, cfDialogueStage)
       .then((r) => {
         const historyAfterReply = [
           ...historyBeforeReply.slice(0, -1),
@@ -3678,6 +3736,7 @@ function AppInner() {
         ];
         setCfDialogueHistory(historyAfterReply);
         if (r.stage) setCfDialogueStage(r.stage);
+        if (r.twist) cfTwistsUsedRef.current += 1;
         if (r.done || userTurns >= tier.maxTurns) finishConfusionDialogue(historyAfterReply);
         else setCfDialogueBusy(false);
       })

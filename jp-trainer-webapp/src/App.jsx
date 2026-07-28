@@ -32,6 +32,10 @@ const WARM_COUNT = 5;
 const WARM_CACHE_KEY = "jp_warm_cache_v1";
 const warmCache = new Map();
 let warmHydrated = false;
+/* 正在预热路上的句型 id。光查 warmCache 还不够:预热那一批要一两秒才回来,
+   如果你在它回来之前就点了「開始」,开场预取查 warmCache 是空的,于是同一批句型
+   又生成一遍。这个集合让"在飞的"也能被去重掉。 */
+const warmInFlight = new Set();
 
 /* ================= 遗忘曲线参数 ================= */
 const INTERVALS = [1, 2, 4, 7, 15, 30, 60]; // 天
@@ -2202,12 +2206,16 @@ function AppInner() {
     if (!head.length) { warmedRef.current = true; return; }
     warmedRef.current = true;
     const items = head.map((p) => ({ p, type: pickQType(db, p.id), avoid: seenTasksOf(db, p.id) }));
+    head.forEach((p) => warmInFlight.add(p.id));
     genQuestionBatch(items)
       .then((qs) => {
         qs.forEach((q, i) => { if (q && q.task) warmCache.set(head[i].id, q); });
         saveWarmCache();
       })
-      .catch(() => { /* 预热失败无所谓,做题时会照常现场出题 */ });
+      .catch(() => { /* 预热失败无所谓,做题时会照常现场出题 */ })
+      // 不管成没成都要放开"在飞"标记:失败的话这几题得让后面的滚动补取(topUpAhead)接手,
+      // 一直标着在飞就再也没人管它们了
+      .finally(() => head.forEach((p) => warmInFlight.delete(p.id)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [db, view]);
 
@@ -2415,7 +2423,8 @@ function AppInner() {
        而 beginItem 取题时优先用 preGenRef,预热那几份直接作废。实测每次学习白烧 4 次出题。 */
     hydrateWarmCache(); // 兜底:万一预热那个 effect 还没跑过,也别把已经预热好的再生成一遍
     const todo = indexedItems.filter((it) =>
-      !preGenRef.current[it.idx] && !prefetchingRef.current.has(it.idx) && !(it.p && warmCache.has(it.p.id)));
+      !preGenRef.current[it.idx] && !prefetchingRef.current.has(it.idx)
+      && !(it.p && (warmCache.has(it.p.id) || warmInFlight.has(it.p.id))));
     todo.forEach((it) => prefetchingRef.current.add(it.idx));
     for (let i = 0; i < todo.length; i += CHUNK_SIZE) {
       const chunk = todo.slice(i, i + CHUNK_SIZE);
@@ -2475,17 +2484,19 @@ function AppInner() {
     setSessionStats({ ok: 0, partial: 0, wrong: 0 }); setGradeStates({});
     setView("session");
     beginItem(items[0], 0);
+    /* 先抢并发名额的是新句型那一组,不是到期复习。
+       并发池只有 MAX_CONCURRENT 个位子,谁先排队谁先发。以前顺序反着:先把十几道到期复习
+       排进去,新句型那批排在最后——而你做完前面三五道复习就走到新句型了,那批还没轮到,
+       于是在介绍页点完"読めた"只能干等。到期复习每道之间隔着判卷、有的是时间慢慢补,
+       新句型却是"读完介绍页立刻要连做3道",最怕等,所以让它先走。 */
+    prefetchNextNewGroup(0);
     // 后台批量预取"待复习"题目。跳过第0题(它已经在上面单独请求了,再算进来会重复生成、白花一次调用);
-    // 新句型不走这条批量通道(它是同一个句型出3道,逻辑不一样),交给下面的 prefetchNextNewGroup
+    // 新句型不走这条批量通道(它是同一个句型出3道,逻辑不一样),交给上面的 prefetchNextNewGroup
     const dueIndexed = items
       .map((it, idx) => ({ idx, p: it.p, isNew: it.isNew }))
       .filter((it) => !it.isNew && it.idx !== 0)
       .map((it) => ({ ...it, type: pickQType(db, it.p.id) }));
     runPrefetch(dueIndexed, (chunk) => genQuestionBatch(chunk.map((c) => ({ p: c.p, type: c.type, avoid: seenTasksOf(db, c.p.id) }))));
-    // 万一到期复习题是空的、队列一开始就是新句型:没有前面的讲评页可以顺便触发预取,
-    // 这里兜底起个头。正常情况下(前面有到期复习题)会在进入讲评页时被 next() 里那次调用覆盖到,
-    // 这里再调一次是空操作(prefetchingRef/preGenRef 已经在处理中或已完成)。
-    prefetchNextNewGroup(0);
   };
 
   const startFree = (p, mistakeId) => {
@@ -2870,7 +2881,9 @@ function AppInner() {
       prefetchingRef.current.add(i);
       const myGen = sessionGenRef.current;
       const types = Array.from({ length: it.newReps }, (_, k) => (k === it.newReps - 1 ? "composition" : "translation"));
-      genQuestionBatch(types.map((type) => ({ p: it.p, type })))
+      // 避重清单这里也要带上(上一轮加避重时漏了这条通道):虽然新句型多半没有历史,
+      // 但答错重学、或者以前学过又被打回的句型是有的
+      genQuestionBatch(types.map((type) => ({ p: it.p, type, avoid: seenTasksOf(db, it.p.id) })))
         .then((qs) => {
           if (sessionGenRef.current !== myGen) return; // 已经切到别的会话,这批结果作废
           qs.forEach((q, k) => { if (q && q.task) preGenRef.current[i + k] = q; });
@@ -3391,6 +3404,13 @@ function AppInner() {
     }
     // 顺手把后面几题缺的题面补上——开场批量预取留下的空洞就是在这里被填掉的
     topUpAhead(nextIdx + 1);
+    /* 每翻一题都确保"后面最近的那个新句型组"已经在后台生成了。
+       以前只在讲评断点那一刻才触发(next() 里),也就是要等你答完上一组的第3题才开始排队,
+       于是学第二个新句型时又要在介绍页干等一次。现在从你做这一组第1题的时候就开始备下一组,
+       等你把3道做完、讲评看完、再读完下一组的介绍页,题早就好了。
+       topUpAhead 覆盖不到这里:它明确跳过 isNew(新句型是同一句型出3道,走的是另一条通道)。
+       重复调用是安全的——prefetchNextNewGroup 自己会跳过已经取好或正在取的组。 */
+    prefetchNextNewGroup(nextIdx + 1);
   };
 
   /* 看完一组讲评,继续做后面的题 */

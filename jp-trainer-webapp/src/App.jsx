@@ -1523,6 +1523,93 @@ function FollowUpAsk({ contextSummary }) {
   );
 }
 
+/* ================= 句型讲解(句型库 / 新句型介绍页 两处共用) =================
+   这些内容(教材解释 explain、易混淆辨析 contrasts、补充句型的详细讲解 study)以前
+   全都只发给 AI 出题判卷,界面上一个字都不显示——学新句型时只能看到接续、意思和一个例句。
+   教材内的句型还能翻课本,教材外的补充句型(ext)就完全没地方学,做题只能靠猜。
+   这里把它们显示出来:补充句型给 study 那套教材式讲解(接续/分用法+例句/注意),
+   所有句型都显示 explain 和 contrasts。 */
+function PatternLecture({ p, defaultOpen }) {
+  const [open, setOpen] = useState(!!defaultOpen);
+  const st = p.study;
+  const contrasts = p.contrasts || [];
+  /* 讲解里已经按用法分组给过的例句,不要在「その他の例文」里再出现一遍——
+     study 的用法例句和 extras 有重合(都是围绕同一个句型写的),两处都显示会像凑数。 */
+  const shownJp = new Set(
+    st && st.usages ? st.usages.flatMap((u) => (u.ex || []).map((e) => e[0])) : []
+  );
+  const extras = (p.extras || []).filter((e) => !shownJp.has(e[0]));
+  const hasAny = st || p.explain || contrasts.length || extras.length;
+  if (!hasAny) return null;
+  return (
+    <div className="lecture">
+      <button className="lecture-toggle" onClick={() => setOpen((o) => !o)}>
+        {open ? "− 收起讲解" : (p.ext ? "+ 展开讲解(教材外句型,这里有完整说明)" : "+ 展开讲解")}
+      </button>
+      {open && (
+        <div className="lecture-body">
+          {st && st.form && (
+            <div className="lec-sec">
+              <label>接続</label>
+              <div className="lec-form serif">{st.form}</div>
+            </div>
+          )}
+          {st && st.usages && st.usages.length > 0 && (
+            <div className="lec-sec">
+              <label>用法</label>
+              {st.usages.map((u, i) => (
+                <div key={i} className="lec-usage">
+                  <div className="lec-usage-head"><span className="lec-usage-no">{i + 1}</span>{u.use}</div>
+                  {(u.ex || []).map((e, j) => (
+                    <div key={j} className="lec-ex">
+                      <div className="serif lec-ex-jp">{e[0]}</div>
+                      <div className="lec-ex-cn">{e[1]}</div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+          {st && st.notes && st.notes.length > 0 && (
+            <div className="lec-sec">
+              <label>注意</label>
+              {st.notes.map((n, i) => <div key={i} className="lec-note">※ {n}</div>)}
+            </div>
+          )}
+          {p.explain && (
+            <div className="lec-sec">
+              <label>{st ? "要点" : "教材解释"}</label>
+              <div className="lec-text">{p.explain}</div>
+            </div>
+          )}
+          {extras.length > 0 && (
+            <div className="lec-sec">
+              <label>その他の例文</label>
+              {extras.map((e, i) => (
+                <div key={i} className="lec-ex">
+                  <div className="serif lec-ex-jp">{e[0]}</div>
+                  <div className="lec-ex-cn">{e[1]}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {contrasts.length > 0 && (
+            <div className="lec-sec">
+              <label>易混淆</label>
+              {contrasts.map((c, i) => (
+                <div key={i} className="lec-contrast">
+                  <div className="lec-contrast-head serif">{c[0]}</div>
+                  <div className="lec-text">{c[1]}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ================= 情景对话的场景卡(每日作业 / 練習帳 两处共用) =================
    抽成组件是因为这两处的场景卡本来就长得一样,以前是两份拷贝,加了阶段进度和难度切换之后
    再各写一份迟早会漂移(这个仓库里已经踩过一次:讲评样式两份拷贝改了一处没改另一处)。
@@ -3976,6 +4063,9 @@ function AppInner() {
               <div className="intro-row"><label>意味</label><div>{cur.p.meaning}</div></div>
               <div className="intro-row"><label>例文</label><div><div className="serif ex-jp"><WordHintText text={cur.p.exJP} words={exWords} onHintWord={markHinted} /></div><div className="ex-cn">{cur.p.exCN}</div></div></div>
               {exWords && <div className="wh-tip-note">生词不认识?点一下看读音,再点一下看释义</div>}
+              {/* 补充句型(教材外)默认展开:课本上查不到,不展开就等于没学过就直接做题。
+                  教材内的句型默认收起,想看再点——课本上本来就有,免得每次都挡住做题按钮 */}
+              <PatternLecture key={cur.p.id} p={cur.p} defaultOpen={cur.p.ext} />
               <p className="intro-reps-note">读完点开始,这个句型连续出 {cur.newReps} 道题,做完一起看讲评</p>
               <button className="btn-main" onClick={() => beginNewPatternGroup(cur, idx)}>読めた,开始做题 →</button>
             </section>
@@ -4238,6 +4328,7 @@ function AppInner() {
                       </div>
                       <div className="pr-meaning">{p.meaning} 〔{p.conn}〕</div>
                       <div className="pr-ex serif">{p.exJP}</div>
+                      <PatternLecture p={p} />
                       <button className="btn-mini" onClick={() => startFree(p)}>练一题(不影响排期)</button>
                     </div>
                   );
@@ -5072,6 +5163,33 @@ html,body{overflow-x:hidden}
 .badge-ext{background:var(--tint-brown-bg);color:var(--tint-brown-fg)}
 .pr-meaning{font-size:13px;color:var(--ink-soft);margin-top:4px}
 .pr-ex{font-size:14px;margin-top:4px}
+
+/* 句型讲解(句型库 / 新句型介绍页共用)。排版照教材语法页的层次:
+   接续在最上,然后是编号分开的用法+例句,最后是注意事项和易混淆。 */
+.lecture{margin-top:10px}
+.lecture-toggle{width:100%;text-align:left;background:none;border:1px dashed var(--line);border-radius:10px;
+  padding:7px 11px;font-size:12px;color:var(--ai);cursor:pointer;font-family:inherit}
+.lecture-body{margin-top:8px;padding:12px 13px;background:var(--tint-cream);border-radius:10px}
+.lec-sec{margin-bottom:12px}
+.lec-sec:last-child{margin-bottom:0}
+.lec-sec>label{display:block;font-size:11px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:5px}
+/* 接续说明里用 \n 分行(比如「動詞た形＋ら」和「後半は必ず過去形」是两条规则),
+   HTML 默认会把换行折成空格,所以要 pre-line 才能按写的样子分行显示 */
+.lec-form{font-size:14px;color:var(--ai-deep);line-height:1.8;background:var(--card);border-radius:8px;
+  padding:8px 10px;white-space:pre-line}
+.lec-usage{margin-bottom:10px}
+.lec-usage:last-child{margin-bottom:0}
+.lec-usage-head{font-size:13px;line-height:1.7;color:var(--ink);display:flex;gap:6px;align-items:baseline}
+.lec-usage-no{flex:0 0 auto;width:16px;height:16px;border-radius:50%;background:var(--ai);color:#fff;
+  display:inline-flex;align-items:center;justify-content:center;font-size:10px;margin-top:2px}
+.lec-ex{margin:5px 0 0 22px;padding-left:8px;border-left:2px solid var(--line)}
+.lec-ex-jp{font-size:14px;color:var(--ai-deep);line-height:1.7}
+.lec-ex-cn{font-size:12px;color:var(--ink-soft);line-height:1.6}
+.lec-note{font-size:12px;color:var(--shu);line-height:1.7;margin-bottom:3px}
+.lec-text{font-size:13px;line-height:1.8;color:var(--ink)}
+.lec-contrast{margin-bottom:8px}
+.lec-contrast:last-child{margin-bottom:0}
+.lec-contrast-head{font-size:13px;color:var(--ai-deep);font-weight:600;margin-bottom:2px}
 
 .drill-bar{margin-bottom:16px;padding:14px 16px;background:var(--tint-purple-panel);border:1px solid var(--tint-purple-border);border-radius:12px}
 .drill-note{font-size:12px;color:var(--tint-purple-fg);margin-bottom:0;line-height:1.6}

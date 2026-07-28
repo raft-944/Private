@@ -7,6 +7,7 @@
  */
 import { PATTERNS_CHUKYU } from "./data/chukyu-01-02.js";
 import { PATTERNS_CHUKYU_03 } from "./data/chukyu-03.js";
+import { EXT_STUDY } from "./data/extStudyNotes.js";
 
 const SHOKYU = [
   {
@@ -4930,7 +4931,7 @@ const SHOKYU = [
       ]
     ],
     "explain": "日语请求和商量的典型模式:先用「〜んですが」说明自己的情况或困难,再提出具体的请求。这个铺垫在日语交际中很重要——直接提要求会显得突然。后半句常接:「〜ていただけませんか」(请求)、「〜たらいいですか」(请教)、「〜を知っていますか」(询问)。接续和「んです」一致,な形容词和名词加「な」。后半句也可以省略,靠语气让对方领会。",
-    "ext": true
+    "ext": false
   },
   {
     "lesson": 26,
@@ -5589,7 +5590,13 @@ export const PATTERNS = [
   ...SHOKYU,
   ...PATTERNS_CHUKYU.map((p) => ({ ...p, ext: false })),
   ...PATTERNS_CHUKYU_03.map((p) => ({ ...p, ext: false })),
-].map((p, i) => ({ ...p, id: i }));
+].map((p, i) => ({
+  ...p,
+  id: i,
+  // 教材外的补充句型没有课本可以对照着学,单独写了教材式的详细讲解(见 data/extStudyNotes.js),
+  // 在句型库和新句型介绍页上展示。对不上 key 的不会报错,只是没有这块讲解
+  ...(EXT_STUDY[p.pattern] ? { study: EXT_STUDY[p.pattern] } : {}),
+}));
 
 /* 学习与展示顺序:按课次排序;id 保持稳定,已保存的进度不受影响 */
 export const ORDERED = [...PATTERNS].sort((a, b) => a.lesson - b.lesson || a.id - b.id);

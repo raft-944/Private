@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>E2E Harness</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      // 用 localStorage 替代 Supabase 的 window.storage,key 加 e2e: 前缀防冲突
+      window.storage = {
+        async get(key) {
+          const raw = localStorage.getItem("e2e:" + key);
+          if (raw === null) throw new Error("key not found");
+          return { key, value: raw };
+        },
+        async set(key, value) {
+          localStorage.setItem("e2e:" + key, value);
+          return { key, value };
+        },
+      };
+      // 直接渲染 App,跳过 Supabase 登录
+      const { createRoot } = await import("react-dom/client");
+      const { default: App } = await import("/src/App.jsx");
+      const { jsx } = await import("react/jsx-runtime");
+      createRoot(document.getElementById("root")).render(jsx(App, {}));
+    </script>
+  </body>
+</html>

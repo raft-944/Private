@@ -853,6 +853,7 @@ ${STYLE_CONSISTENCY_RULE}
 - modifier: 句子里的修饰关系,以及两个句型在同一句话里是怎么衔接/组合的;如果结构简单,写"该句结构简单,无复杂修饰关系"
 verdict 是 "correct" 时,breakdown 设为 null。
 
+注意:explanation 字段必须全部用中文写,绝对不可以用日语写讲解,引用日语词汇/例句除外。
 输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语,需同时包含两个句型)","explanation":"分别点评两个句型各自的使用情况,指出哪里好、哪里需要改,用中文,150字以内","breakdown":{"skeleton":"...","verbForm":"...","particleReason":"...","modifier":"..."}或null}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
@@ -890,6 +891,7 @@ async function gradeListening(p, q, answer) {
 
 给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何听写差异、听错/漏听的地方,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
 
+注意:explanation 字段必须全部用中文写,绝对不可以用日语写讲解,引用日语词汇/例句除外。
 输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"explanation":"具体指出听写内容和原文的差异(比如漏了哪个助词、把哪个词的活用形式听错了),再用一句话说明这句话的中文意思,用中文,120字以内"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
@@ -1153,6 +1155,7 @@ ${ERROR_SCOPE_RULE}
 - modifier: 句子里的修饰关系(谁修饰谁、为什么这样排列);如果句子结构简单没有复杂修饰关系,写"该句结构简单,无复杂修饰关系"
 verdict 是 "correct" 时,breakdown 设为 null。
 
+注意:explanation 字段必须全部用中文写,绝对不可以用日语写讲解,引用日语词汇/例句除外。
 输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"errorScope":"none|pattern|outside|both","reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,用中文,120字以内","breakdown":{"skeleton":"...","verbForm":"...","particleReason":"...","modifier":"..."}或null}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
@@ -1310,6 +1313,7 @@ async function gradeConfusionAnswer(topicName, item, question, answer, stageBenc
 - 允许多个合理答案(比如敬体/简体皆可,只要变形逻辑正确都算对),存在更优选择时说明为什么优选它
 - explanation 里必须先明确点出"变形对不对"这个核心结论,再谈其他方面
 
+注意:explanation 字段必须全部用中文写,绝对不可以用日语写讲解,引用日语词汇/例句除外。
 输出JSON: {"verdict":"correct|partial|wrong","formCorrect":true|false,"reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,先说变形对不对,再说其他,用中文,120字以内"}` : head + `
 判定标准:
 - 这类题目经常存在不止一个语法上都说得通的答案,不要因为学生的答案和你脑海里的"标准答案"字面不同就直接判错;只要语法正确、能自然表达题目要求的意思就判 correct
@@ -1321,6 +1325,7 @@ async function gradeConfusionAnswer(topicName, item, question, answer, stageBenc
 
 ${STYLE_CONSISTENCY_RULE}
 
+注意:explanation 字段必须全部用中文写,绝对不可以用日语写讲解,引用日语词汇/例句除外。
 输出JSON: {"verdict":"correct|partial|wrong","reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,用中文,120字以内,若存在更优答案请说明为什么优选它"}`;
   const g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad confusion grade");
@@ -4037,7 +4042,7 @@ function AppInner() {
                 先消化积压。想调回去可以在设置里改。
               </div>
             )}
-            {dueList.length + newList.length > 0 ? (
+            {db.session && !staleSrsSession && !staleHwSession ? null : dueList.length + newList.length > 0 ? (
               <button className="btn-main" onClick={startSession}>開始 · 今日の学習</button>
             ) : (
               <div className="all-done serif">今日の分は終わりました 🎌<br /><span className="all-done-sub">今天的任务已全部完成,明天见</span></div>

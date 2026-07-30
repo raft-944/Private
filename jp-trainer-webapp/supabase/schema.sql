@@ -12,18 +12,22 @@ create table if not exists kv_store (
 -- 开启行级安全策略(RLS):每个人只能读写自己的数据,互相看不到
 alter table kv_store enable row level security;
 
+drop policy if exists "用户只能查看自己的数据" on kv_store;
 create policy "用户只能查看自己的数据"
   on kv_store for select
   using (auth.uid() = user_id);
 
+drop policy if exists "用户只能新增自己的数据" on kv_store;
 create policy "用户只能新增自己的数据"
   on kv_store for insert
   with check (auth.uid() = user_id);
 
+drop policy if exists "用户只能更新自己的数据" on kv_store;
 create policy "用户只能更新自己的数据"
   on kv_store for update
   using (auth.uid() = user_id);
 
+drop policy if exists "用户只能删除自己的数据" on kv_store;
 create policy "用户只能删除自己的数据"
   on kv_store for delete
   using (auth.uid() = user_id);

@@ -4504,7 +4504,18 @@ function AppInner() {
               {prefetchFailRef.current > 0 && (
                 <div className="done-note">⚠️ 本场有 {prefetchFailRef.current} 批题目预取失败,这些题只能现场出题(所以中途会看到等待)。偶发一两次是网络/AI 抖动,如果每次都有,告诉我这个数字。</div>
               )}
-              <button className="btn-main" onClick={() => setView("home")}>返回首页</button>
+              {/* !freeMode 是"今日の学習"(startSession/resumeSession 里 kind==="srs")专属的信号,
+                  homework/weekly/听力/错题重练等其他流程一律 freeMode=true,不会走到这里。
+                  之所以这一批做完了新句型还可能没学:待复习积压达到 NEW_PATTERN_PAUSE_RATIO 倍时
+                  会暂停引入新句型、优先清积压(见 newPatternsPaused),这批复习清完之后积压已经
+                  降下去了,newList 就重新有内容了——不用回首页再点一次"開始",这里直接续上。 */}
+              {!freeMode && newList.length > 0 && (
+                <div className="done-more-new">
+                  还有 {newList.length} 个新句型待学(刚才复习积压较多,系统临时把新句型往后推了,现在可以继续)
+                  <button className="btn-main" onClick={startSession}>継続 · 学习新句型</button>
+                </div>
+              )}
+              <button className={!freeMode && newList.length > 0 ? "btn-ghost" : "btn-main"} onClick={() => setView("home")}>返回首页</button>
             </section>
           )}
 
@@ -5393,6 +5404,7 @@ html,body{overflow-x:hidden}
 .result-item-q{font-size:15px;color:var(--ink);line-height:1.7;margin-bottom:4px}
 .done-extra-note{font-size:12px;color:var(--tint-green-fg);background:var(--tint-green-bg);border-radius:10px;padding:8px 12px;margin-bottom:12px}
 .done-note{font-size:13px;color:var(--ink-soft);margin-bottom:8px}
+.done-more-new{font-size:13px;color:var(--ai-deep);background:var(--tint-blue-bg);border-radius:10px;padding:12px;margin-bottom:14px;display:flex;flex-direction:column;gap:10px;align-items:center}
 
 .lesson-block{margin-bottom:8px}
 .lesson-head{width:100%;display:flex;justify-content:space-between;padding:12px 16px;background:var(--card);

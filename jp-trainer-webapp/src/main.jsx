@@ -80,7 +80,7 @@ function AuthScreen() {
     <div style={S.wrap}>
       <div style={S.card}>
         <div style={S.title}>句型道場</div>
-        <div style={S.sub}>大家的日语 I・II × 遗忘曲线</div>
+        <div style={S.sub}>大家的日语 × 标准日本语 · 遗忘曲线</div>
 
         <div style={S.modeTitle}>{title}</div>
 

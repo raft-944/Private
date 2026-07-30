@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, Component } from "react";
 import { supabase } from "./supabaseClient";
-import { PATTERNS, ORDERED } from "./patternsData.js";
+import { PATTERNS, BOOKS, DEFAULT_BOOK, orderedForBook } from "./patternsData.js";
 import { SCENES, resolveScenePatterns } from "./data/scenes.js";
 import { CONFUSION_SCENES } from "./data/confusionScenes.js";
 import { CONFUSION_EMAIL_TOPICS } from "./data/confusionEmails.js";
@@ -9,8 +9,9 @@ import { CONFUSION_EMAIL_TOPICS } from "./data/confusionEmails.js";
    ②同档位里逾期越久的优先。复习上限截断时,留下的就一定是最该先复习的那些。
    抽成模块级函数是因为首页预热和真正开始学习两处都要用,写两份迟早会漂移。 */
 function sortedDueList(db, t) {
+  const book = db.settings.book || DEFAULT_BOOK;
   return PATTERNS
-    .filter((p) => db.prog[p.id] && db.prog[p.id].due <= t)
+    .filter((p) => p.book === book && db.prog[p.id] && db.prog[p.id].due <= t)
     .sort((a, b) => {
       const pa = db.prog[a.id], pb = db.prog[b.id];
       if (pa.lv !== pb.lv) return pa.lv - pb.lv;
@@ -181,7 +182,7 @@ const REVIEW_CAP_DEFAULT = 40;
    就自动下调每日新句型数,把资源让给消化积压。参数留在这里方便按实际学习数据调整。 */
 const CAP_STREAK_FOR_DOWNGRADE = 5;
 
-const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null, reviewCap: REVIEW_CAP_DEFAULT, dialogueTier: null }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, dialogueStats: { total: 0, clean: 0 }, session: null, studyTime: {}, hwBacklog: null, qHist: {}, hwRecent: [] };
+const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null, reviewCap: REVIEW_CAP_DEFAULT, dialogueTier: null, book: DEFAULT_BOOK }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, dialogueStats: { total: 0, clean: 0 }, session: null, studyTime: {}, hwBacklog: null, qHist: {}, hwRecent: [] };
 
 /* 每个句型记住最近出过的几道题面,出新题时作为"别再出这些"的清单发给 AI。
    为什么必须存进 db 而不是内存:以前只有一个 useRef(recentTasks)记最近4条,而且
@@ -596,7 +597,7 @@ function speakJa(text, rate = 1, voiceURI) {
 }
 
 async function genComboQuestion(p1, p2, avoid) {
-  const sys = `あなたは日本語教師です。学習者:句型A对应 JLPT ${levelBenchmark(p1.level)},句型B对应 JLPT ${levelBenchmark(p2.level)}(《大家的日语》初中级)。出题词汇和语法请分别符合各自句型的难度基准,不要因为其中一个句型简单/难就把另一个也拉到同一水平。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
+  const sys = `あなたは日本語教師です。学習者:句型A对应 JLPT ${levelBenchmark(p1.level)},句型B对应 JLPT ${levelBenchmark(p2.level)}(《${BOOKS[p1.book].name}》初中级)。出题词汇和语法请分别符合各自句型的难度基准,不要因为其中一个句型简单/难就把另一个也拉到同一水平。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `请出一道"複合作文"练习题,要求学习者在同一句话(或简短的两三句对话)中,同时正确使用以下两个句型。
 句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})${styleTagText(p1)}${explainBriefText(p1)}
 句型B: ${p2.pattern}(${p2.conn} / ${p2.meaning})${styleTagText(p2)}${explainBriefText(p2)}
@@ -863,7 +864,7 @@ verdict 是 "correct" 时,breakdown 设为 null。
 }
 
 async function genListeningSentence(p, avoid, tier) {
-  const sys = `あなたは日本語教師です。学習者:JLPT ${levelBenchmark(p.level)}(《大家的日语》${p.level}水平)。词汇和语法必须限定在该难度范围内,句子要自然、适合朗读听力练习。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const sys = `あなたは日本語教師です。学習者:JLPT ${levelBenchmark(p.level)}(《${BOOKS[p.book].name}》${p.level}水平)。词汇和语法必须限定在该难度范围内,句子要自然、适合朗读听力练习。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `请为以下句型新造一句自然的日语例句(不要用课本原句),用于听力练习,学习者只能听、看不到文字。
 句型: ${p.pattern}(${p.conn} / ${p.meaning})${styleTagText(p)}${explainBriefText(p)}
 难度档位(${tier.name}): ${tier.spec}
@@ -902,7 +903,7 @@ async function gradeListening(p, q, answer) {
 async function genQuestion(p, avoid, forceType) {
   const type = forceType || (Math.random() < 0.6 ? "translation" : "composition");
   const topic = TOPICS[Math.floor(Math.random() * TOPICS.length)];
-  const sys = `あなたは日本語教師です。学習者:JLPT ${levelBenchmark(p.level)}(《大家的日语》${p.level}水平)。出题词汇和语法必须限定在该难度范围内。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
+  const sys = `あなたは日本語教師です。学習者:JLPT ${levelBenchmark(p.level)}(《${BOOKS[p.book].name}》${p.level}水平)。出题词汇和语法必须限定在该难度范围内。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
   const user = `请围绕以下句型出一道练习题。
 句型: ${p.pattern}
 接续: ${p.conn}
@@ -2236,7 +2237,8 @@ function AppInner() {
     const t2 = today();
     if (db.meta.capDate === t2) return; // 今天已经盘过了
     const cap = db.settings.reviewCap || REVIEW_CAP_DEFAULT;
-    const dueCount = PATTERNS.filter((p) => db.prog[p.id] && db.prog[p.id].due <= t2).length;
+    const bookNow = db.settings.book || DEFAULT_BOOK;
+    const dueCount = PATTERNS.filter((p) => p.book === bookNow && db.prog[p.id] && db.prog[p.id].due <= t2).length;
     const hit = dueCount > cap;
     setDb((d) => {
       const nd = { ...d, meta: { ...d.meta }, settings: { ...d.settings } };
@@ -2360,7 +2362,10 @@ function AppInner() {
 
   /* --- 派生数据 --- */
   const t = today();
-  const learnedIds = Object.keys(db.prog).map(Number);
+  // 当前正在学的教材:两本书的进度(到期/新句型/统计/作业/弱点)完全分开算,
+  // 靠这个字段过滤,不是靠单独的学习进度存档
+  const currentBook = db.settings.book || DEFAULT_BOOK;
+  const learnedIds = Object.keys(db.prog).map(Number).filter((id) => PATTERNS[id] && PATTERNS[id].book === currentBook);
   /* 所有到期未消化的句型(due <= 今天)。因为 due 只在真正答题后才更新,
      没做的会一直留在这里累积,不会因为跨天而消失(Anki 的到期队列模型)。 */
   const dueSorted = sortedDueList(db, t);
@@ -2375,9 +2380,9 @@ function AppInner() {
   // 新句型要按"句型库"里看到的课程顺序发,不能按 PATTERNS 数组本身的原始顺序——
   // 补充句型(p.ext)大多是后来追加进数据文件的,在数组里排得靠后,如果直接按 PATTERNS
   // 顺序发新句型,会导致"明明是第3课的补充句型,却要等第50+课都学完才轮到它",
-  // 表现出来就是句型库里某一课永远卡在"3/4已学"这种缺一个的状态。ORDERED 已经
-  // 按 lesson→id 重新排过,用它才会先发完第3课剩下那条,再发第4课。
-  const unlearned = ORDERED.filter((p) => !db.prog[p.id]);
+  // 表现出来就是句型库里某一课永远卡在"3/4已学"这种缺一个的状态。orderedForBook 已经
+  // 按 lesson→id 重新排过(并且只取当前教材的句型),用它才会先发完第3课剩下那条,再发第4课。
+  const unlearned = orderedForBook(currentBook).filter((p) => !db.prog[p.id]);
   const newDoneToday = db.meta.date === t ? db.meta.newDone : 0;
   // 待复习积压过多时暂停新句型引入,参照 Anki"复习优先于新卡"——阈值是新句型日配额的
   // NEW_PATTERN_PAUSE_RATIO 倍,门槛给宽松点,避免正常小波动就误伤新句型进度
@@ -2386,7 +2391,7 @@ function AppInner() {
   const newPatternsPaused = dueAll.length >= db.settings.newPerDay * NEW_PATTERN_PAUSE_RATIO;
   const newSlots = newPatternsPaused ? 0 : Math.max(0, db.settings.newPerDay - newDoneToday);
   const newList = unlearned.slice(0, newSlots);
-  const learnedPatterns = PATTERNS.filter((p) => db.prog[p.id]);
+  const learnedPatterns = PATTERNS.filter((p) => p.book === currentBook && db.prog[p.id]);
   const recentCutoff = addDays(t, -6);
   const recentPool = learnedPatterns.filter((p) => db.prog[p.id].learnedDate && db.prog[p.id].learnedDate >= recentCutoff);
   const comboPool = recentPool.length >= 2 ? recentPool : learnedPatterns;
@@ -2533,7 +2538,7 @@ function AppInner() {
   const startMistakeDrill = () => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
     const items = db.mistakes
-      .filter((m) => m.source !== "confusion") // 練習帳来的错题没有 pid,走它自己的重练入口
+      .filter((m) => m.source !== "confusion" && PATTERNS[m.pid] && PATTERNS[m.pid].book === currentBook) // 練習帳来的错题没有 pid,走它自己的重练入口;错题也要按当前教材过滤
       .map((m) => m.pid2 !== undefined
         ? { sub: "combo", p1: PATTERNS[m.pid], p2: PATTERNS[m.pid2], mistakeId: m.id }
         : m.type === "listening"
@@ -2580,10 +2585,11 @@ function AppInner() {
 
   const startHomework = () => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
-    const learned = PATTERNS.filter((p) => db.prog[p.id]);
+    const learned = PATTERNS.filter((p) => p.book === currentBook && db.prog[p.id]);
     if (learned.length === 0) return;
-    // 错题本里出现过的句型(非句型类错误不算——那是词写错了,不代表这个句型没掌握)
-    const mistakePids = new Set(db.mistakes.filter((m) => m.pid !== undefined && !m.nonPattern).map((m) => m.pid));
+    // 错题本里出现过的句型(非句型类错误不算——那是词写错了,不代表这个句型没掌握;
+    // 同时只算当前教材的错题,两本书的作业互不掺和)
+    const mistakePids = new Set(db.mistakes.filter((m) => m.pid !== undefined && !m.nonPattern && PATTERNS[m.pid] && PATTERNS[m.pid].book === currentBook).map((m) => m.pid));
     /* 加权抽题(不放回)。以前是纯随机洗牌:你已经背得很熟的句型和刚学完还很虚的句型
        被抽中的概率一模一样,再加上最近抽过的也不降权,于是同一批句型隔几天就又来一遍。
        现在按"越不熟越该练"给权重:
@@ -2655,8 +2661,9 @@ function AppInner() {
     for (const m of db.mistakes) {
       if (mistakeItems.length >= slotBudget) break;
       // 練習帳(source==="confusion")来的错题不挂钩具体句型,没有 pid,不能塞进作业题位——
-      // 練習帳本来就是"不计入每日/每周任务"的自由练习,这里跳过正是这条规则的体现
-      if (m.pid === undefined) continue;
+      // 練習帳本来就是"不计入每日/每周任务"的自由练习,这里跳过正是这条规则的体现;
+      // 另外只挑当前教材的错题,不同教材的进度不互相掺和
+      if (m.pid === undefined || !PATTERNS[m.pid] || PATTERNS[m.pid].book !== currentBook) continue;
       if (m.pid2 !== undefined) mistakeItems.push({ sub: "combo", p1: PATTERNS[m.pid], p2: PATTERNS[m.pid2], mistakeId: m.id });
       else if (compCount <= transCount) { mistakeItems.push({ p: PATTERNS[m.pid], hw: "comp", mistakeId: m.id }); compCount++; }
       else { mistakeItems.push({ p: PATTERNS[m.pid], hw: "trans", mistakeId: m.id }); transCount++; }
@@ -2747,8 +2754,8 @@ function AppInner() {
     const counts = {};
     // 練習帳来的错题没有 pid,不参与"弱点句型"统计(它们本来就不挂钩具体句型);
     // 非句型类错误(nonPattern,句型用对了只是词写错了)也不算这个句型的弱点,
-    // 否则"哪些句型薄弱"的排名会被无关的单词错误带偏
-    db.mistakes.forEach((m) => { if (m.pid !== undefined && !m.nonPattern && m.date >= cutoff) counts[m.pid] = (counts[m.pid] || 0) + 1; });
+    // 否则"哪些句型薄弱"的排名会被无关的单词错误带偏;同时只统计当前教材的错题
+    db.mistakes.forEach((m) => { if (m.pid !== undefined && !m.nonPattern && m.date >= cutoff && PATTERNS[m.pid] && PATTERNS[m.pid].book === currentBook) counts[m.pid] = (counts[m.pid] || 0) + 1; });
     // 弱点重测题量随本周错题量浮动:错题攒得多说明这周欠的债多,多测2道;
     // 少的时候就保持3道,不用凑数(参照 hsrs 让当天题量贴合当前状态的思路,规则从简)
     const weakSlots = Object.keys(counts).length >= WEEKLY_WEAK_BOOST_THRESHOLD ? 5 : 3;
@@ -2769,7 +2776,7 @@ function AppInner() {
 
   const startListening = () => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
-    const learned = PATTERNS.filter((p) => db.prog[p.id]);
+    const learned = PATTERNS.filter((p) => p.book === currentBook && db.prog[p.id]);
     if (learned.length === 0) return;
     const shuffled = [...learned].sort(() => Math.random() - 0.5);
     const items = Array.from({ length: 8 }, (_, i) => ({ p: shuffled[i % shuffled.length], isNew: false }));
@@ -3345,7 +3352,7 @@ function AppInner() {
       if (it.p) usedPids.add(it.p.id);
       if (it.p1) { usedPids.add(it.p1.id); usedPids.add(it.p2.id); }
     });
-    return db.mistakes.filter((m) => m.pid !== undefined && !usedPids.has(m.pid));
+    return db.mistakes.filter((m) => m.pid !== undefined && !usedPids.has(m.pid) && PATTERNS[m.pid] && PATTERNS[m.pid].book === currentBook);
   };
   const shouldAppendHwExtra = () => {
     if (!homeworkMode) return false;
@@ -3990,15 +3997,29 @@ function AppInner() {
     Object.keys(gradeStates).map(Number).filter((gi) => gi >= from && gi <= to).sort((a, b) => a - b);
   const cur = queue[idx];
   actionsRef.current = { cur, idx, next, retry, loadQuestion, beginNewPatternGroup };
-  const lessons = [...new Set(PATTERNS.map((p) => p.lesson))];
+  const bookPatterns = PATTERNS.filter((p) => p.book === currentBook);
+  const lessons = [...new Set(bookPatterns.map((p) => p.lesson))];
 
   return (
     <div className="app">
       <Style />
       <header className="top">
         <div className="brand serif">句型道場</div>
-        <div className="brand-sub">大家的日语 I・II × 遗忘曲线</div>
+        <div className="brand-sub">大家的日语 × 标准日本语 · 遗忘曲线</div>
       </header>
+      {view !== "session" && (
+        <div className="book-switch">
+          {Object.values(BOOKS).map((b) => (
+            <button
+              key={b.id}
+              className={"book-switch-btn" + (currentBook === b.id ? " on" : "")}
+              onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, book: b.id } }))}
+            >
+              {b.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       {!storageOk && <div className="warn">⚠ 暂时连不上进度存储:本次做题记录关闭后会丢失。请尝试刷新页面,连上后此提示会自动消失。</div>}
 
@@ -4027,7 +4048,7 @@ function AppInner() {
                 <div className="num-label">待复习</div>
               </div>
               <div className="num-block"><div className="num ai-c">{newList.length}</div><div className="num-label">新句型</div></div>
-              <div className="num-block"><div className="num">{learnedIds.length}<span className="num-total">/{PATTERNS.length}</span></div><div className="num-label">已学</div></div>
+              <div className="num-block"><div className="num">{learnedIds.length}<span className="num-total">/{bookPatterns.length}</span></div><div className="num-label">已学</div></div>
             </div>
             {deferredCount > 0 && (
               <div className="pause-hint">
@@ -4042,7 +4063,9 @@ function AppInner() {
                 先消化积压。想调回去可以在设置里改。
               </div>
             )}
-            {db.session && !staleSrsSession && !staleHwSession ? null : dueList.length + newList.length > 0 ? (
+            {bookPatterns.length === 0 ? (
+              <div className="all-done serif">这本教材还没有内容 📭<br /><span className="all-done-sub">句型还没录入,切到别的教材看看吧</span></div>
+            ) : db.session && !staleSrsSession && !staleHwSession ? null : dueList.length + newList.length > 0 ? (
               <button className="btn-main" onClick={startSession}>開始 · 今日の学習</button>
             ) : (
               <div className="all-done serif">今日の分は終わりました 🎌<br /><span className="all-done-sub">今天的任务已全部完成,明天见</span></div>
@@ -4501,8 +4524,9 @@ function AppInner() {
       {view === "library" && (
         <main className="page">
           <h2 className="page-title serif">句型库</h2>
+          {lessons.length === 0 && <div className="center-msg">《{BOOKS[currentBook].name}》还没有录入句型内容,切到别的教材看看,或者等内容录入后再回来</div>}
           {lessons.map((l) => {
-            const ps = PATTERNS.filter((p) => p.lesson === l);
+            const ps = bookPatterns.filter((p) => p.lesson === l);
             const learned = ps.filter((p) => db.prog[p.id]).length;
             return (
               <div key={l} className="lesson-block">
@@ -4923,13 +4947,17 @@ function AppInner() {
       )}
 
       {/* ---------- 错题本 ---------- */}
-      {view === "mistakes" && (
+      {view === "mistakes" && (() => {
+            // 練習帳(source==="confusion")来的错题不挂钩具体句型,跟教材无关,一律显示;
+            // 挂钩句型的错题按当前教材过滤,两本书的错题本完全分开
+            const visibleMistakes = db.mistakes.filter((m) => m.source === "confusion" || (PATTERNS[m.pid] && PATTERNS[m.pid].book === currentBook));
+            return (
         <main className="page">
           <h2 className="page-title serif">錯題本</h2>
-          {db.mistakes.length === 0 && <div className="center-msg">还没有错题。錯題は宝物です — 出错了才会来这里。</div>}
-          {db.mistakes.length > 0 && (() => {
+          {visibleMistakes.length === 0 && <div className="center-msg">还没有错题。錯題は宝物です — 出错了才会来这里。</div>}
+          {visibleMistakes.length > 0 && (() => {
             // 練習帳来的错题没有 pid,进不了这条统一队列,只能在各自的卡片上点"重练"
-            const drillCount = db.mistakes.filter((m) => m.source !== "confusion").length;
+            const drillCount = visibleMistakes.filter((m) => m.source !== "confusion").length;
             return (
               <div className="drill-bar">
                 <div className="drill-note">这些错题会优先混入「毎日の宿題」,做对了自动移除,不用额外再点什么</div>
@@ -4942,7 +4970,7 @@ function AppInner() {
               </div>
             );
           })()}
-          {db.mistakes.map((m, i) => {
+          {visibleMistakes.map((m, i) => {
             // 練習帳(知识辨析/场景对话/书面邮件)来的错题不挂钩具体句型,没有 pid,用 m.label 兜底展示。
             // 練習帳的"重练"需要当初存下来的上下文(topicId/sceneId/emailTopicId等)才能重新出题——
             // 这次更新之前留下的老记录没存这些字段,判断一下缺不缺,缺了就不出"重练"按钮,只能手动移除。
@@ -4980,7 +5008,8 @@ function AppInner() {
             );
           })}
         </main>
-      )}
+            );
+      })()}
 
       {/* ---------- 底部导航 ---------- */}
       <nav className="nav">
@@ -5040,6 +5069,10 @@ html,body{overflow-x:hidden}
 .brand{font-size:22px;font-weight:700;letter-spacing:2px;color:var(--ai-deep)}
 .brand-sub{font-size:11px;color:var(--ink-soft);letter-spacing:1px}
 .warn{margin:8px 20px;padding:8px 12px;background:var(--tint-red-bg);color:var(--shu);font-size:12px;border-radius:8px}
+
+.book-switch{display:flex;gap:8px;padding:0 20px 10px}
+.book-switch-btn{flex:1;padding:8px 10px;font-size:13px;border:1.5px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink-soft);cursor:pointer}
+.book-switch-btn.on{border-color:var(--ai);color:var(--ai);font-weight:600;background:var(--tint-blue-bg)}
 
 .page{padding:12px 20px calc(66px + env(safe-area-inset-bottom))}
 .page-title{font-size:18px;margin:6px 0 14px;color:var(--ai-deep)}

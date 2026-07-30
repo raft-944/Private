@@ -7,7 +7,16 @@
  */
 import { PATTERNS_CHUKYU } from "./data/chukyu-01-02.js";
 import { PATTERNS_CHUKYU_03 } from "./data/chukyu-03.js";
+import { PATTERNS_BIAORI } from "./data/biaori.js";
 import { EXT_STUDY } from "./data/extStudyNotes.js";
+
+/* 教材(book)元信息:切换教材功能靠这个字段区分两本书的句型、进度、复习队列。
+ * DEFAULT_BOOK 是老存档(还没有 settings.book 字段时)默认落在的那本书。 */
+export const DEFAULT_BOOK = "minna";
+export const BOOKS = {
+  minna: { id: "minna", name: "大家的日语", full: "大家的日语 I・II" },
+  biaori: { id: "biaori", name: "标准日本语", full: "标准日本语" },
+};
 
 const SHOKYU = [
   {
@@ -5587,9 +5596,10 @@ const SHOKYU = [
 ];
 
 export const PATTERNS = [
-  ...SHOKYU,
-  ...PATTERNS_CHUKYU.map((p) => ({ ...p, ext: false })),
-  ...PATTERNS_CHUKYU_03.map((p) => ({ ...p, ext: false })),
+  ...SHOKYU.map((p) => ({ ...p, book: "minna" })),
+  ...PATTERNS_CHUKYU.map((p) => ({ ...p, ext: false, book: "minna" })),
+  ...PATTERNS_CHUKYU_03.map((p) => ({ ...p, ext: false, book: "minna" })),
+  ...PATTERNS_BIAORI.map((p) => ({ ...p, book: "biaori" })),
 ].map((p, i) => ({
   ...p,
   id: i,
@@ -5598,5 +5608,12 @@ export const PATTERNS = [
   ...(EXT_STUDY[p.pattern] ? { study: EXT_STUDY[p.pattern] } : {}),
 }));
 
-/* 学习与展示顺序:按课次排序;id 保持稳定,已保存的进度不受影响 */
-export const ORDERED = [...PATTERNS].sort((a, b) => a.lesson - b.lesson || a.id - b.id);
+/* 学习与展示顺序:按教材+课次排序;id 保持稳定,已保存的进度不受影响。
+ * 两本教材课号各自从头编,所以排序必须先分教材再按课次,否则两本书会按课号交织在一起。 */
+export const ORDERED = [...PATTERNS].sort((a, b) => a.book.localeCompare(b.book) || a.lesson - b.lesson || a.id - b.id);
+
+/* 按教材过滤后再按课次排序——首页"发新句型"和句型库分组显示都要用这个,
+ * 而不是全局的 ORDERED,否则两本教材的课号会混在一起。 */
+export function orderedForBook(book) {
+  return PATTERNS.filter((p) => p.book === book).sort((a, b) => a.lesson - b.lesson || a.id - b.id);
+}

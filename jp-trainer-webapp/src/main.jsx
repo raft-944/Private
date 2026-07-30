@@ -10,11 +10,12 @@ function AuthScreen() {
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [pw2, setPw2] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const reset = (m) => { setMode(m); setErr(""); setMsg(""); setPw(""); setPw2(""); };
+  const reset = (m) => { setMode(m); setErr(""); setMsg(""); setPw(""); setPw2(""); setInviteCode(""); };
 
   const submit = async () => {
     setErr(""); setMsg("");
@@ -35,15 +36,30 @@ function AuthScreen() {
     if (pw.length < 6) { setErr("密码至少 6 位"); return; }
 
     if (mode === "signup") {
+      if (!inviteCode.trim()) { setErr("请填写邀请码"); return; }
       if (pw !== pw2) { setErr("两次输入的密码不一致"); return; }
       setBusy(true);
+      const { data: redeemed, error: redeemErr } = await supabase.rpc("redeem_invite_code", {
+        p_code: inviteCode.trim(),
+      });
+      if (redeemErr || !redeemed) {
+        setBusy(false);
+        setErr("邀请码无效或名额已用完，请联系邀请人确认");
+        return;
+      }
       const { error } = await supabase.auth.signUp({
         email: email.trim(),
         password: pw,
         options: { emailRedirectTo: window.location.origin },
       });
+      if (error) {
+        // 邀请码已校验通过但注册没成功(比如邮箱已被注册过),把占用的名额还回去
+        await supabase.rpc("release_invite_code", { p_code: inviteCode.trim() });
+        setBusy(false);
+        setErr(translateErr(error.message));
+        return;
+      }
       setBusy(false);
-      if (error) { setErr(translateErr(error.message)); return; }
       setMsg("注册成功！验证邮件已发到你的邮箱，去点一下里面的链接完成验证（只需这一次）。验证之后，以后在任何设备上都可以直接用邮箱+密码登录。");
       return;
     }
@@ -67,6 +83,18 @@ function AuthScreen() {
         <div style={S.sub}>大家的日语 I・II × 遗忘曲线</div>
 
         <div style={S.modeTitle}>{title}</div>
+
+        {mode === "signup" && (
+          <input
+            style={S.input}
+            type="text"
+            placeholder="邀请码"
+            autoComplete="off"
+            value={inviteCode}
+            onChange={(e) => setInviteCode(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+          />
+        )}
 
         <input
           style={S.input}

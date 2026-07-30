@@ -756,6 +756,22 @@ function naiveSegmentChinese(text) {
   return segments;
 }
 
+/* AI 给的 taskSegments 有时不遵守"每段不超过约6个汉字"这条规则,把大半句甚至一整个
+   分句都当成一段——表现出来就是点开一个"词"却弹出一整句话的翻译。光靠提示词说服
+   不够可靠(这条规则已经在提示词里写了,AI 还是偶尔会违反),所以在真正拿去渲染前
+   再做一遍强制兜底:超过上限的段落按 naiveSegmentChinese 同样的 2 字一组粗切,
+   不管 AI 给没给、给的准不准,界面上点一个片段最多只会查到几个字,不会查出大半句。 */
+const TASK_SEGMENT_MAX_LEN = 6;
+function capSegmentLength(segments) {
+  const isPunct = (s) => /^[，。？！、,.!?()（）「」『』\s]+$/.test(s);
+  const out = [];
+  for (const seg of segments) {
+    if (isPunct(seg) || seg.length <= TASK_SEGMENT_MAX_LEN) { out.push(seg); continue; }
+    for (let i = 0; i < seg.length; i += 2) out.push(seg.slice(i, i + 2));
+  }
+  return out;
+}
+
 /* 点开某个中文词/短语现查的日语说法,按(句子+词)缓存,同一句题面里查过的词不用重复调AI。
    yomi 是假名读音——很多日语单词本来就是汉字写法(比如"数学"日语也写"数学"),
    这种情况下光给汉字对学习者没有任何新信息,真正有用的是"这个词读作什么/怎么写出来",
@@ -1927,7 +1943,8 @@ function AppInner() {
      "这道题的语法点描述"这两样准备好交给渲染,不需要单独的 state/effect。 */
   const taskSegmentsFor = (question) => {
     if (!question || question.type === "listening" || question.jpTask || !question.task) return null;
-    return Array.isArray(question.taskSegments) && question.taskSegments.length ? question.taskSegments : naiveSegmentChinese(question.task);
+    const segs = Array.isArray(question.taskSegments) && question.taskSegments.length ? question.taskSegments : naiveSegmentChinese(question.task);
+    return capSegmentLength(segs);
   };
   const taskTargetDescFor = (item) => item && item.p ? `${item.p.pattern}(${item.p.conn} / ${item.p.meaning})`
     : item && item.p1 ? `${item.p1.pattern}(${item.p1.meaning}) + ${item.p2.pattern}(${item.p2.meaning})`
@@ -4726,7 +4743,7 @@ function AppInner() {
                 <ChineseTaskText
                   key={cfQuizIdx + ":" + cfQuiz.questions[cfQuizIdx].task}
                   text={cfQuiz.questions[cfQuizIdx].task}
-                  segments={Array.isArray(cfQuiz.questions[cfQuizIdx].taskSegments) && cfQuiz.questions[cfQuizIdx].taskSegments.length ? cfQuiz.questions[cfQuizIdx].taskSegments : naiveSegmentChinese(cfQuiz.questions[cfQuizIdx].task)}
+                  segments={capSegmentLength(Array.isArray(cfQuiz.questions[cfQuizIdx].taskSegments) && cfQuiz.questions[cfQuizIdx].taskSegments.length ? cfQuiz.questions[cfQuizIdx].taskSegments : naiveSegmentChinese(cfQuiz.questions[cfQuizIdx].task))}
                   sentence={cfQuiz.questions[cfQuizIdx].task}
                   targetDesc={`${cfQuiz.items[cfQuizIdx].head}(${cfQuiz.items[cfQuizIdx].sub}): ${cfQuiz.items[cfQuizIdx].note}`}
                 />

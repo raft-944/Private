@@ -573,9 +573,9 @@ async function callAI(system, user, maxTokens = 4200, model) {
 }
 
 /* 批量版:一次调用要多道题,maxTokens按题数放大一些,避免写到一半被截断 */
-async function callAIArray(system, user, itemCount, background) {
+async function callAIArray(system, user, itemCount, background, model) {
   // 每条题目现在还要顺带出 taskSegments(逐词切分),比之前占的篇幅稍大,预算相应调高
-  const text = await callAIRaw(system, user, Math.min(8000, 900 * Math.max(itemCount, 1) + 700), background);
+  const text = await callAIRaw(system, user, Math.min(8000, 900 * Math.max(itemCount, 1) + 700), background, model);
   const jsonStr = extractFirstJsonArray(text);
   if (!jsonStr) throw new Error("返回内容不含完整JSON数组:" + text.slice(0, 80));
   const parsed = JSON.parse(jsonStr);
@@ -1048,7 +1048,46 @@ ${list}
     out[pos] = { p: patterns[pos], sentence: q.sentence, options: q.options, answerIndex: idx, explanation: q.explanation || "", cn: q.cn || "" };
   });
   if (!out.some(Boolean)) throw new Error("批量出题没有一条可用");
-  return out;
+  return verifyGrammarChoiceAnswers(out.filter(Boolean));
+}
+
+/* 批量出完题后再核验一遍:不告诉AI"标的答案是哪个",只给句子+4个选项让它重新解——
+   剥离掉"刚写完就知道自己想让哪个对"这层自我暗示,更接近一个真考生读这道题的视角。
+   解出来的答案和刚才标记的 answerIndex 对不上,大概率是这道题出得有歧义(比如两个
+   选项都说得通,或者干扰项其实没那么"干扰"),这种题直接丢掉、不呈现给用户,总比
+   留着一道会误导人的题更好。故意用 pro 而不是 flash 来核验:如果核验也用同一个
+   模型,原本生成时的偏差很可能在核验时原样复现,起不到交叉检查的作用。
+   核验这一步本身失败(网络抖动/返回格式不对/漏答某几题)不牵连原题——直接信任
+   原来的 answerIndex,不能因为"核验"这个附加环节掉链子就导致整批题目全部作废。 */
+async function verifyGrammarChoiceAnswers(items) {
+  if (!items.length) return items;
+  const sys = `あなたは日本語のJLPT受験者です。请解答下面这些四选一的文法选择题,选出你认为在语境下唯一正确的一个选项。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const list = items.map((it, i) => `第${i + 1}题: ${it.sentence}\nA. ${it.options[0]}\nB. ${it.options[1]}\nC. ${it.options[2]}\nD. ${it.options[3]}`).join("\n\n");
+  const user = `请解答下面这 ${items.length} 道四选一的文法选择题,每题选出你认为语法和语境都唯一正确的一个选项:
+
+${list}
+
+按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"n":题号(整数),"answerIndex":你认为正确的选项下标(0到3的整数)}`;
+  let arr;
+  try {
+    arr = await callAIArray(sys, user, items.length, true, "deepseek-v4-pro");
+  } catch {
+    return items;
+  }
+  const lenOk = Array.isArray(arr) && arr.length === items.length;
+  const solved = new Array(items.length).fill(null);
+  (Array.isArray(arr) ? arr : []).forEach((r, i) => {
+    if (!r) return;
+    const idx = Number(r.answerIndex);
+    if (!Number.isInteger(idx) || idx < 0 || idx > 3) return;
+    const n = Number(r.n);
+    const pos = Number.isInteger(n) && n >= 1 && n <= items.length ? n - 1 : (lenOk ? i : -1);
+    if (pos < 0) return;
+    solved[pos] = idx;
+  });
+  // 核验没解出来的(比如AI漏答了某题)按"信任原题"处理,不因为核验本身不完整就误伤;
+  // 只有明确解出来、且和原来标记的答案对不上,才判定这道题有歧义、丢掉
+  return items.filter((it, i) => solved[i] === null || solved[i] === it.answerIndex);
 }
 
 /* ================= JLPT模拟 · 読解 =================

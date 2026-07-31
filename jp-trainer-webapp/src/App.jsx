@@ -2105,10 +2105,13 @@ function AppInner() {
 
   /* ================= JLPT模拟(文法选择题/読解,自由练习) =================
      和練習帳一样是独立state,不复用主线SRS的queue/phase。判卷是本地选择题比对,
-     不用等AI批改,所以没有"grading"这个中间phase——选完立刻能看对错和讲解。 */
-  const [jlptQuiz, setJlptQuiz] = useState(null); // {kind:"grammar"|"reading", passage, items, patternIds}
+     不用等AI批改,所以没有"grading"这个中间phase——选完立刻能看对错和讲解。
+     不像毎日の宿題那样有固定题量,items 只增不减、靠后台滚动预取续下去,
+     所以也没有"done"这个终点phase——退出全靠 exitJlptQuiz,error 只在真出不了
+     题时才出现(定义和触发逻辑见下面"JLPT模拟"那段函数)。 */
+  const [jlptQuiz, setJlptQuiz] = useState(null); // {mode:"grammar"|"reading", items:[...]},grammar题自带p/sentence,reading题自带passage/q
   const [jlptQuizIdx, setJlptQuizIdx] = useState(0);
-  const [jlptQuizPhase, setJlptQuizPhase] = useState("question"); // loading|question|result|done|error
+  const [jlptQuizPhase, setJlptQuizPhase] = useState("question"); // loading|question|result|error
   const [jlptSelected, setJlptSelected] = useState(null); // 已选中的选项下标,null=还没选
   const [jlptQuizStats, setJlptQuizStats] = useState({ ok: 0, wrong: 0 });
   const [jlptErrMsg, setJlptErrMsg] = useState("");
@@ -2456,6 +2459,28 @@ function AppInner() {
     setPhase("done");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [db, phase, gradeStates]);
+
+  /* JLPT模拟的滚动预取相关 hooks——和其它 effect 一样必须写在 `if (!db) return` 之前
+     (hooks 数量不能因为 db 有没有加载好而变化)。真正的生成/判断逻辑(topUpJlptQuiz
+     等)定义在下面 JLPT模拟 那段里,这里只是提前占好 hook 的位置;effect 回调本身
+     要到 commit 之后才真正执行,那时候 topUpJlptQuiz 已经定义好了,不会有引用不到的问题。 */
+  const jlptPrefetchingRef = useRef(false);
+  const jlptLiveRef = useRef({ idx: 0, itemsLen: 0 });
+  useEffect(() => {
+    jlptLiveRef.current = { idx: jlptQuizIdx, itemsLen: jlptQuiz ? jlptQuiz.items.length : 0 };
+  });
+  useEffect(() => {
+    if (!jlptQuiz || view !== "jlpt" || jlptQuizPhase === "error") return;
+    const lookahead = JLPT_LOOKAHEAD[jlptQuiz.mode];
+    const remaining = jlptQuiz.items.length - 1 - jlptQuizIdx;
+    if (remaining <= lookahead) topUpJlptQuiz(jlptQuiz.mode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jlptQuizIdx, jlptQuiz, view]);
+  useEffect(() => {
+    if (!jlptQuiz || jlptQuizPhase !== "loading") return;
+    if (jlptQuizIdx < jlptQuiz.items.length) setJlptQuizPhase("question");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jlptQuiz, jlptQuizIdx]);
 
   if (!db) return <div className="app"><Style /><div className="center-msg">読み込み中…</div></div>;
 
@@ -3828,9 +3853,22 @@ function AppInner() {
 
   /* ================= JLPT模拟:文法选择题 / 読解 =================
      出题池只从"已学过"的句型里抽(没学过的考它没有意义),优先抽标了 contrasts 的——
-     干扰项质量更有保证,池子不够时用没有 contrasts 的已学句型垫底,保证凑得够数。 */
-  const GRAMMAR_CHOICE_COUNT = 8;
+     干扰项质量更有保证,池子不够时用没有 contrasts 的已学句型垫底,保证凑得够数。
+
+     这个练习不像毎日の宿題那样有"今天该做几题"的固定量,是想练多少练多少,
+     所以不是"出一批、做完、再点一次"——而是滚动预取:每批题目做到只剩
+     JLPT_LOOKAHEAD 题时,后台就悄悄把下一批生成好接在队尾,追上来的时候
+     大概率已经在等着了,感觉不到"又要等AI出题"这一下。jlptQuiz.items 因此
+     是个只增不减的数组,mode 定了之后整场都不变,topUpJlptQuiz 靠这个 mode
+     (不是靠读当时的state,state更新是异步的,start*刚setJlptQuiz完不能马上
+     从闭包里读到新值)决定继续生成哪一种。
+     滚动预取要用到的 useRef/useEffect(jlptPrefetchingRef/jlptLiveRef 和两个
+     effect)已经跟其它 effect 一起提前放在上面 `if (!db) return` 之前了,
+     这里只放不受 hooks 顺序约束的普通函数。 */
+  const GRAMMAR_CHOICE_COUNT = 10;
   const READING_PATTERN_COUNT = 5;
+  const JLPT_LOOKAHEAD = { grammar: 2, reading: 1 }; // 剩这么多题时就在后台补下一批
+
   const pickJlptPool = (n) => {
     const learned = PATTERNS.filter((p) => p.book === currentBook && db.prog[p.id]);
     if (learned.length === 0) return [];
@@ -3840,47 +3878,55 @@ function AppInner() {
     return [...withContrast, ...withoutContrast].slice(0, Math.min(n, learned.length));
   };
 
-  const startGrammarChoiceQuiz = async () => {
-    const picked = pickJlptPool(GRAMMAR_CHOICE_COUNT);
-    if (!picked.length) return;
-    setJlptQuizPhase("loading");
-    setJlptErrMsg("");
-    setJlptQuizStats({ ok: 0, wrong: 0 });
-    setJlptQuizIdx(0);
-    setJlptSelected(null);
-    setJlptQuiz(null);
-    setView("jlpt");
+  /* 生成下一批并追加到队尾。mode 由调用方显式传入(开局的第一批、和后续每一批
+     都走这一个函数),避免刚开局时读到还没更新的 jlptQuiz 闭包值。
+     后台悄悄预取失败不打扰用户(用户可能还有好几题才追到队尾);只有真追到
+     队尾、发现确实没有更多题了,才转错误页——用 jlptLiveRef 判断"追到没"。 */
+  const topUpJlptQuiz = async (mode) => {
+    if (jlptPrefetchingRef.current) return;
+    jlptPrefetchingRef.current = true;
     try {
-      const items = (await genGrammarChoiceQuiz(picked)).filter(Boolean);
-      if (!items.length) throw new Error("这批题目没能出出来,请再试一次");
-      setJlptQuiz({ kind: "grammar", passage: null, items });
-      setJlptQuizPhase("question");
+      const picked = pickJlptPool(mode === "grammar" ? GRAMMAR_CHOICE_COUNT : READING_PATTERN_COUNT);
+      if (!picked.length) throw new Error("没有更多已学句型可以出题了");
+      let newItems;
+      if (mode === "grammar") {
+        newItems = (await genGrammarChoiceQuiz(picked)).filter(Boolean);
+      } else {
+        // 読解是多步骤推理任务(通篇连贯+每道理解题有且只有一个选项站得住脚),
+        // 用 pro 提高严谨度——只在生成这一下慢一点,不影响后续做题速度
+        const r = await genReadingPassage(picked, "deepseek-v4-pro");
+        newItems = r.questions.map((q) => ({ passage: r.passage, ...q }));
+      }
+      if (!newItems.length) throw new Error("这批题目没能出出来");
+      setJlptQuiz((q) => (q && q.mode === mode ? { ...q, items: [...q.items, ...newItems] } : q));
     } catch (e) {
       setJlptErrMsg("出题失败:" + (e && e.message ? e.message : String(e)));
-      setJlptQuizPhase("error");
+      if (jlptLiveRef.current.idx >= jlptLiveRef.current.itemsLen) setJlptQuizPhase("error");
+    } finally {
+      jlptPrefetchingRef.current = false;
     }
   };
 
-  const startReadingQuiz = async () => {
-    const picked = pickJlptPool(READING_PATTERN_COUNT);
-    if (!picked.length) return;
-    setJlptQuizPhase("loading");
-    setJlptErrMsg("");
+  const startGrammarChoiceQuiz = () => {
     setJlptQuizStats({ ok: 0, wrong: 0 });
     setJlptQuizIdx(0);
     setJlptSelected(null);
-    setJlptQuiz(null);
+    setJlptErrMsg("");
+    setJlptQuizPhase("loading");
+    setJlptQuiz({ mode: "grammar", items: [] });
     setView("jlpt");
-    try {
-      // 読解是多步骤推理任务(通篇连贯+每道理解题有且只有一个选项站得住脚),
-      // 用 pro 提高严谨度——只生成这一次,不影响后续做题速度
-      const r = await genReadingPassage(picked, "deepseek-v4-pro");
-      setJlptQuiz({ kind: "reading", passage: r.passage, items: r.questions, patternIds: r.patternIds });
-      setJlptQuizPhase("question");
-    } catch (e) {
-      setJlptErrMsg("出题失败:" + (e && e.message ? e.message : String(e)));
-      setJlptQuizPhase("error");
-    }
+    topUpJlptQuiz("grammar");
+  };
+
+  const startReadingQuiz = () => {
+    setJlptQuizStats({ ok: 0, wrong: 0 });
+    setJlptQuizIdx(0);
+    setJlptSelected(null);
+    setJlptErrMsg("");
+    setJlptQuizPhase("loading");
+    setJlptQuiz({ mode: "reading", items: [] });
+    setView("jlpt");
+    topUpJlptQuiz("reading");
   };
 
   /* 选完立刻本地判断对错(选择题不需要AI判卷),答错才记进錯題本;
@@ -3889,11 +3935,11 @@ function AppInner() {
     if (!jlptQuiz || jlptQuizPhase !== "question" || jlptSelected !== null) return;
     const item = jlptQuiz.items[jlptQuizIdx];
     const correct = idx === item.answerIndex;
+    const isGrammar = jlptQuiz.mode === "grammar";
     setJlptSelected(idx);
     setJlptQuizPhase("result");
     setJlptQuizStats((s) => (correct ? { ...s, ok: s.ok + 1 } : { ...s, wrong: s.wrong + 1 }));
-    const statsKey = jlptQuiz.kind === "grammar" ? "choiceStats" : "readingStats";
-    const isGrammar = jlptQuiz.kind === "grammar";
+    const statsKey = isGrammar ? "choiceStats" : "readingStats";
     setDb((d) => ({
       ...d,
       [statsKey]: { total: d[statsKey].total + 1, ok: d[statsKey].ok + (correct ? 1 : 0) },
@@ -3902,7 +3948,7 @@ function AppInner() {
         source: isGrammar ? "grammarChoice" : "reading",
         book: currentBook,
         ...(isGrammar ? { pid: item.p.id } : { label: "読解" }),
-        task: isGrammar ? item.sentence : `${jlptQuiz.passage.slice(0, 80)}${jlptQuiz.passage.length > 80 ? "…" : ""}\n问:${item.q}`,
+        task: isGrammar ? item.sentence : `${item.passage.slice(0, 80)}${item.passage.length > 80 ? "…" : ""}\n问:${item.q}`,
         ans: item.options[idx],
         ref: item.options[item.answerIndex],
         exp: item.explanation,
@@ -3911,25 +3957,29 @@ function AppInner() {
     }));
   };
 
+  /* 一直往前走,不设"这一批做完了"的终点——remaining队列已经被上面那个
+     lookahead effect 提前续好了,正常情况下这里几乎不会真的等;万一网络慢、
+     还没续上,就先进 loading,续上的那个 effect 会自动把它接回 question。 */
   const nextJlptQuestion = () => {
     setJlptSelected(null);
-    if (jlptQuizIdx + 1 < jlptQuiz.items.length) {
-      setJlptQuizIdx((i) => i + 1);
-      setJlptQuizPhase("question");
-    } else {
-      setJlptQuizPhase("done");
-    }
+    const nextIdx = jlptQuizIdx + 1;
+    setJlptQuizIdx(nextIdx);
+    setJlptQuizPhase(jlptQuiz && nextIdx < jlptQuiz.items.length ? "question" : "loading");
   };
 
+  /* 出错可能是"刚开局第一批就没出来"(jlptQuiz.items 还是空的),也可能是
+     "追到队尾时后台续题失败了"——两种情况都是同一个动作:接着往下续,
+     不用重新开一场、已有的正确率统计不受影响 */
   const retryJlptQuiz = () => {
     if (!jlptQuiz) return;
-    if (jlptQuiz.kind === "grammar") startGrammarChoiceQuiz();
-    else startReadingQuiz();
+    setJlptQuizPhase("loading");
+    topUpJlptQuiz(jlptQuiz.mode);
   };
 
   const exitJlptQuiz = () => {
     setJlptQuiz(null);
-    setView("home");
+    setView("confusion");
+    setConfusionSub("list");
   };
 
   /* ================= 練習帳:场景对话 =================
@@ -4358,35 +4408,6 @@ function AppInner() {
               <div className="hw-empty">当前浏览器不支持语音朗读,建议换电脑浏览器(Chrome/Edge/Safari)使用这个功能</div>
             ) : (
               <button className="btn-outline ls-btn" onClick={startListening}>開始 · 聴解練習</button>
-            )}
-          </section>
-
-          <section className="hw-card jlpt-card">
-            <div className="hw-top">
-              <div>
-                <div className="hw-title serif">JLPT模拟</div>
-                <div className="hw-sub">仿真题的四选一形式:文法選択(挖空选正确说法)+ 読解(短文理解题),不进复习排期,答错记进錯題本</div>
-              </div>
-            </div>
-            {bookPatterns.length === 0 ? (
-              <div className="hw-empty">这本教材还没有内容,切到别的教材看看吧</div>
-            ) : learnedIds.length === 0 ? (
-              <div className="hw-empty">先学几个句型,再来做模拟题吧</div>
-            ) : (
-              <>
-                <div className="jlpt-row">
-                  <div className="jlpt-sub">
-                    <div className="jlpt-sub-label">文法選択問題</div>
-                    <div className="jlpt-sub-stat">{db.choiceStats.total === 0 ? "还没练过" : `正确率 ${Math.round((db.choiceStats.ok / db.choiceStats.total) * 100)}%(共 ${db.choiceStats.total} 题)`}</div>
-                    <button className="btn-outline" onClick={startGrammarChoiceQuiz}>開始 · 文法選択</button>
-                  </div>
-                  <div className="jlpt-sub">
-                    <div className="jlpt-sub-label">読解</div>
-                    <div className="jlpt-sub-stat">{db.readingStats.total === 0 ? "还没练过" : `正确率 ${Math.round((db.readingStats.ok / db.readingStats.total) * 100)}%(共 ${db.readingStats.total} 题)`}</div>
-                    <button className="btn-outline" onClick={startReadingQuiz}>開始 · 読解</button>
-                  </div>
-                </div>
-              </>
             )}
           </section>
 
@@ -4876,6 +4897,37 @@ function AppInner() {
               </div>
             )}
           </section>
+
+          <section className="cf-section">
+            <button className="cf-section-head" onClick={() => setCfOpenSection((s) => (s === "jlpt" ? null : "jlpt"))}>
+              <span className="cf-section-title">JLPT模拟</span>
+              <span className="cf-section-meta">文法選択 · 読解</span>
+              <span className="cf-section-arrow">{cfOpenSection === "jlpt" ? "−" : "+"}</span>
+            </button>
+            {cfOpenSection === "jlpt" && (
+              <div className="cf-section-body">
+                <div className="cf-note">仿真题的四选一形式,想练多少练多少,不进复习排期,答错记进錯題本</div>
+                {bookPatterns.length === 0 ? (
+                  <div className="cf-empty"><div>这本教材还没有内容,切到别的教材看看吧</div></div>
+                ) : learnedIds.length === 0 ? (
+                  <div className="cf-empty"><div>先学几个句型,再来做模拟题吧</div></div>
+                ) : (
+                  <div className="jlpt-row">
+                    <div className="jlpt-sub">
+                      <div className="jlpt-sub-label">文法選択問題</div>
+                      <div className="jlpt-sub-stat">{db.choiceStats.total === 0 ? "还没练过" : `正确率 ${Math.round((db.choiceStats.ok / db.choiceStats.total) * 100)}%(共 ${db.choiceStats.total} 题)`}</div>
+                      <button className="btn-main" onClick={startGrammarChoiceQuiz}>開始 · 文法選択</button>
+                    </div>
+                    <div className="jlpt-sub">
+                      <div className="jlpt-sub-label">読解</div>
+                      <div className="jlpt-sub-stat">{db.readingStats.total === 0 ? "还没练过" : `正确率 ${Math.round((db.readingStats.ok / db.readingStats.total) * 100)}%(共 ${db.readingStats.total} 题)`}</div>
+                      <button className="btn-main" onClick={startReadingQuiz}>開始 · 読解</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
         </main>
       )}
 
@@ -5264,15 +5316,12 @@ function AppInner() {
       {/* ---------- JLPT模拟(文法選択/読解) ---------- */}
       {view === "jlpt" && (
         <main className="page">
-          {jlptQuizPhase !== "done" && jlptQuiz && (
-            <div className="progress-row">
-              <div className="progress-bar"><div className="progress-fill" style={{ width: `${((jlptQuizIdx + 1) / jlptQuiz.items.length) * 100}%` }} /></div>
-              <span className="progress-text">{jlptQuizIdx + 1} / {jlptQuiz.items.length}</span>
-            </div>
-          )}
-          {jlptQuizPhase !== "done" && jlptQuiz && (
+          {jlptQuiz && (
             <div className="pattern-head">
-              <span className="tag tag-cf">JLPT模拟 · {jlptQuiz.kind === "grammar" ? "文法選択" : "読解"}</span>
+              <span className="tag tag-cf">JLPT模拟 · {jlptQuiz.mode === "grammar" ? "文法選択" : "読解"}</span>
+              {/* 没有固定题量(想练多少练多少),所以不是"第几/共几题"的进度条,
+                  换成"第几题+累计对错"这种走到哪算到哪的计数 */}
+              <span className="jlpt-tally">第 {jlptQuizIdx + 1} 题 · ◎{jlptQuizStats.ok} ✗{jlptQuizStats.wrong}</span>
             </div>
           )}
 
@@ -5289,18 +5338,22 @@ function AppInner() {
                 <p className="err-hint">当前账号的 AI 用量暂时达到上限,稍等几分钟再重试即可。</p>
               ) : null}
               <p className="err-text">{jlptErrMsg}</p>
-              <button className="btn-main" onClick={retryJlptQuiz}>重试</button>
+              <div className="btn-row">
+                <button className="btn-main" onClick={retryJlptQuiz}>重试</button>
+                <button className="btn-ghost" onClick={exitJlptQuiz}>返回練習帳</button>
+              </div>
             </section>
           )}
 
-          {(jlptQuizPhase === "question" || jlptQuizPhase === "result") && jlptQuiz && (() => {
+          {(jlptQuizPhase === "question" || jlptQuizPhase === "result") && jlptQuiz && jlptQuizIdx < jlptQuiz.items.length && (() => {
             const item = jlptQuiz.items[jlptQuizIdx];
+            const isGrammar = jlptQuiz.mode === "grammar";
             return (
               <section className="card">
-                {jlptQuiz.passage && (
-                  <div className="jlpt-passage serif">{furiganaify(jlptQuiz.passage)}</div>
+                {!isGrammar && (
+                  <div className="jlpt-passage serif">{furiganaify(item.passage)}</div>
                 )}
-                <div className="q-task serif">{jlptQuiz.kind === "grammar" ? furiganaify(item.sentence) : item.q}</div>
+                <div className="q-task serif">{isGrammar ? furiganaify(item.sentence) : item.q}</div>
                 <div className="jlpt-options">
                   {item.options.map((opt, oi) => {
                     const chosen = jlptSelected === oi;
@@ -5322,31 +5375,17 @@ function AppInner() {
                   <div className="result-wrap">
                     <Stamp verdict={jlptSelected === item.answerIndex ? "correct" : "wrong"} />
                     <div className="exp-block"><label>講解</label><div>{item.explanation}</div></div>
-                    {jlptQuiz.kind === "grammar" && item.cn && (
+                    {isGrammar && item.cn && (
                       <div className="exp-block"><label>参考译文</label><div className="serif">{item.cn}</div></div>
                     )}
-                    <button className="btn-main" onClick={nextJlptQuestion}>{jlptQuizIdx + 1 < jlptQuiz.items.length ? "次へ →" : "完成本组练习"}</button>
+                    <button className="btn-main" onClick={nextJlptQuestion}>次へ →</button>
                   </div>
                 )}
               </section>
             );
           })()}
 
-          {jlptQuizPhase === "done" && jlptQuiz && (
-            <section className="card done-card">
-              <div className="done-title serif">お疲れさまでした</div>
-              <div className="done-stats">
-                <span className="d-ok">◎ {jlptQuizStats.ok}</span>
-                <span className="d-ng">✗ {jlptQuizStats.wrong}</span>
-              </div>
-              <p className="done-note">自由练习,不进复习排期,不影响任何句型的复习间隔。答错的题已经记到錯題本里了。</p>
-              <button className="btn-main" onClick={exitJlptQuiz}>返回首页</button>
-            </section>
-          )}
-
-          {jlptQuizPhase !== "done" && (
-            <button className="quit-link" onClick={exitJlptQuiz}>中断,返回首页</button>
-          )}
+          <button className="quit-link" onClick={exitJlptQuiz}>中断,返回練習帳</button>
         </main>
       )}
 
@@ -5491,12 +5530,12 @@ html,body{overflow-x:hidden}
 .voice-picker .btn-mini{margin-top:0;flex:0 0 auto;white-space:nowrap}
 .ls-btn{border-color:var(--tint-green-fg);color:var(--tint-green-fg)}
 .ls-btn:hover{background:var(--tint-green-bg)}
-.jlpt-card{border-color:var(--tint-purple-border)}
-.jlpt-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.jlpt-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
 .jlpt-sub{display:flex;flex-direction:column;gap:6px}
 .jlpt-sub-label{font-size:14px;color:var(--ink);font-weight:600}
 .jlpt-sub-stat{font-size:12px;color:var(--ink-soft)}
-.jlpt-sub .btn-outline{margin-top:auto;font-size:13px;padding:10px}
+.jlpt-sub .btn-main{margin-top:auto;font-size:13px;padding:10px}
+.jlpt-tally{font-size:12px;color:var(--ink-soft)}
 
 .settings-row{display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding:12px 16px;
   background:var(--card);border:1px solid var(--line);border-radius:12px;font-size:14px}

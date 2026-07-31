@@ -150,6 +150,15 @@ const today = () => new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0
 const addDays = (d, n) => { const t = new Date(d + "T00:00:00Z"); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
 const mondayOf = (d) => { const dt = new Date(d + "T00:00:00Z"); const day = dt.getUTCDay(); dt.setUTCDate(dt.getUTCDate() + (day === 0 ? -6 : 1) - day); return dt.toISOString().slice(0, 10); };
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+/* 按日期记录当天的答题正确率,供首页"学习报告"里的热力图使用;和 stats.total/ok
+   (全局累计)是平行的两份计数,互不影响——这个只多一个"按天分桶"的维度。
+   直接改 nd.dailyStats(nd 是 setDb 更新函数里已经浅拷贝过一层的新对象),
+   调用方负责保证 nd 本身是新对象,这里只需要保证 dailyStats 和当天这条不是
+   直接改引用,避免污染上一次渲染读到的旧 state。 */
+function bumpDailyStats(nd, date, correct) {
+  const day = nd.dailyStats[date] || { total: 0, ok: 0 };
+  nd.dailyStats = { ...nd.dailyStats, [date]: { total: day.total + 1, ok: day.ok + (correct ? 1 : 0) } };
+}
 
 /* 预热缓存的读盘/落盘(声明在 today 之后,见 warmCache 那里的说明)。
    hydrate 只做一次,在第一次用到预热缓存的时候。 */
@@ -182,7 +191,7 @@ const REVIEW_CAP_DEFAULT = 40;
    就自动下调每日新句型数,把资源让给消化积压。参数留在这里方便按实际学习数据调整。 */
 const CAP_STREAK_FOR_DOWNGRADE = 5;
 
-const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null, reviewCap: REVIEW_CAP_DEFAULT, dialogueTier: null, book: DEFAULT_BOOK }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, dialogueStats: { total: 0, clean: 0 }, choiceStats: { total: 0, ok: 0 }, readingStats: { total: 0, ok: 0 }, session: null, studyTime: {}, hwBacklog: null, qHist: {}, hwRecent: [] };
+const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null, reviewCap: REVIEW_CAP_DEFAULT, dialogueTier: null, book: DEFAULT_BOOK }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, dialogueStats: { total: 0, clean: 0 }, choiceStats: { total: 0, ok: 0 }, readingStats: { total: 0, ok: 0 }, session: null, studyTime: {}, dailyStats: {}, hwBacklog: null, qHist: {}, hwRecent: [] };
 
 /* 每个句型记住最近出过的几道题面,出新题时作为"别再出这些"的清单发给 AI。
    为什么必须存进 db 而不是内存:以前只有一个 useRef(recentTasks)记最近4条,而且
@@ -308,6 +317,7 @@ function mergeDb(saved) {
     prog: s.prog || {},
     mistakes: Array.isArray(s.mistakes) ? s.mistakes : [],
     studyTime: s.studyTime && typeof s.studyTime === "object" ? s.studyTime : {},
+    dailyStats: s.dailyStats && typeof s.dailyStats === "object" ? s.dailyStats : {},
     qHist: s.qHist && typeof s.qHist === "object" ? s.qHist : {},
     hwRecent: Array.isArray(s.hwRecent) ? s.hwRecent : [],
   };
@@ -2583,6 +2593,52 @@ function AppInner() {
   const avg30Sec = avgSecOverDays(30);
   const fmtMinutes = (sec) => (sec >= 30 ? `${Math.round(sec / 60)} 分钟` : sec > 0 ? "<1 分钟" : "0 分钟");
 
+  /* 学习报告(首页最下方,优先级不高的锦上添花区块):连续打卡、近28天正确率热力图、
+     薄弱句型排行。这几个都是从已有数据(studyTime/dailyStats/mistakes)派生出来的
+     只读展示,不产生任何新的排期/统计副作用。 */
+  // 今天还没学不算"打卡断了"——从昨天开始倒数,连续学习的天数才不会因为你还没打开
+  // 今天的学习就在午夜前突然清零。真正断了(昨天也没学)会自然数到0。
+  const streak = (() => {
+    let n = 0;
+    let d = studyTime[t] > 0 ? t : addDays(t, -1);
+    while (studyTime[d] > 0) { n++; d = addDays(d, -1); }
+    return n;
+  })();
+  const longestStreak = (() => {
+    const days = Object.keys(studyTime).filter((d) => studyTime[d] > 0).sort();
+    let longest = 0, cur = 0, prev = null;
+    for (const d of days) {
+      cur = prev && addDays(prev, 1) === d ? cur + 1 : 1;
+      longest = Math.max(longest, cur);
+      prev = d;
+    }
+    return Math.max(longest, streak);
+  })();
+  const HEATMAP_DAYS = 28;
+  const heatmapCells = Array.from({ length: HEATMAP_DAYS }, (_, i) => {
+    const d = addDays(t, i - (HEATMAP_DAYS - 1));
+    const day = db.dailyStats[d];
+    if (!day || day.total === 0) return { date: d, cls: "hm-none" };
+    const acc = day.ok / day.total;
+    return { date: d, cls: acc >= 0.85 ? "hm-high" : acc >= 0.6 ? "hm-mid" : "hm-low" };
+  });
+  // 薄弱句型排行:只看近30天的错题,不然很久以前已经攻克的老错题会一直占着榜——
+  // 排除练習帳来的(没挂钩具体句型)和 nonPattern(句型本身没问题,只是词写错了)
+  const weakPatternRanking = (() => {
+    const cutoff = addDays(t, -30);
+    const counts = {};
+    db.mistakes.forEach((m) => {
+      if (m.pid === undefined || m.nonPattern || m.date < cutoff) return;
+      const p = PATTERNS[m.pid];
+      if (!p || p.book !== currentBook) return;
+      counts[m.pid] = (counts[m.pid] || 0) + 1;
+    });
+    return Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([pid, count]) => ({ p: PATTERNS[pid], count }));
+  })();
+
   /* --- 会话流程 --- */
   /* 批量预取:把一组"待出题的坑位"分成每5个一批,后台异步逐批请求,
      结果存进 preGenRef,后面轮到对应题目时优先直接用,减少现场一题一次调用的次数。
@@ -3422,6 +3478,7 @@ function AppInner() {
         const nd = { ...d, stats: { ...d.stats } };
         nd.stats.total += 1;
         if (g.verdict === "correct") nd.stats.ok += 1;
+        bumpDailyStats(nd, t, g.verdict === "correct");
         return nd;
       });
       const list = newGroupResultsRef.current[item.p.id] || [];
@@ -3443,6 +3500,7 @@ function AppInner() {
         nd.stats.ok += 1;
         if (isListening) nd.listenStats.ok += 1;
       }
+      bumpDailyStats(nd, t, g.verdict === "correct");
       /* errorScope === "outside":目标句型本身用对了,错的只是句型之外的东西
          (单词写错、无关的助词、时态等)。这种情况不该让这个句型的复习间隔跟着缩短——
          否则会因为一个无关的词就认为"这个句型没掌握",下次又要重考一遍已经会的句型。
@@ -4476,6 +4534,39 @@ function AppInner() {
 
           {db.stats.total > 0 && (
             <div className="mini-stats">累计答题 {db.stats.total} · 正确率 {Math.round((db.stats.ok / db.stats.total) * 100)}%</div>
+          )}
+
+          {db.stats.total > 0 && (
+            <section className="report-section">
+              <div className="report-head">学习报告</div>
+              <div className="streak-row">
+                <div className="streak-block">
+                  <div className="streak-num">🔥{streak}</div>
+                  <div className="streak-label">连续学习(天)</div>
+                </div>
+                <div className="streak-block">
+                  <div className="streak-num">{longestStreak}</div>
+                  <div className="streak-label">最长记录(天)</div>
+                </div>
+              </div>
+              <div className="heatmap-label">近{HEATMAP_DAYS}天正确率</div>
+              <div className="heatmap-row">
+                {heatmapCells.map((c) => <div key={c.date} className={"heatmap-cell " + c.cls} />)}
+              </div>
+              {weakPatternRanking.length > 0 && (
+                <>
+                  <div className="heatmap-label">薄弱句型(近30天错题最多)</div>
+                  <div className="weak-list">
+                    {weakPatternRanking.map((w) => (
+                      <div key={w.p.id} className="weak-item">
+                        <span className="serif">{w.p.pattern}</span>
+                        <span className="weak-count">错 {w.count} 次</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </section>
           )}
 
           <section className="backup-section">
@@ -5581,6 +5672,24 @@ html,body{overflow-x:hidden}
 .stepper{display:flex;align-items:center;gap:14px}
 .stepper button{width:30px;height:30px;border-radius:8px;border:1px solid var(--line);background:none;font-size:16px;cursor:pointer;color:var(--ai-deep)}
 .mini-stats{margin-top:14px;font-size:12px;color:var(--ink-soft);text-align:center}
+
+/* 学习报告:优先级最低的锦上添花区块,特意放在首页最下方、字号比其它区块小一号,
+   视觉上不和"待复习/新句型/開始"这些真正每天要用的东西抢注意力 */
+.report-section{margin-top:18px;padding-top:14px;border-top:1px dashed var(--line)}
+.report-head{font-size:11px;color:var(--ink-soft);letter-spacing:1px;margin-bottom:10px;text-align:center}
+.streak-row{display:flex;justify-content:center;gap:32px;margin-bottom:14px}
+.streak-block{text-align:center}
+.streak-num{font-size:20px;font-weight:700;color:var(--ai-deep)}
+.streak-label{font-size:11px;color:var(--ink-soft);margin-top:2px}
+.heatmap-label{font-size:11px;color:var(--ink-soft);margin-bottom:6px}
+.heatmap-row{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:14px}
+.heatmap-cell{width:14px;height:14px;border-radius:3px;background:var(--tint-panel)}
+.hm-low{background:var(--tint-red2-bg)}
+.hm-mid{background:var(--tint-amber-bg)}
+.hm-high{background:var(--tint-green-fg)}
+.weak-list{display:flex;flex-direction:column;gap:6px}
+.weak-item{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:var(--tint-panel);border-radius:8px;font-size:13px}
+.weak-count{font-size:11px;color:var(--shu);flex:0 0 auto;margin-left:10px}
 
 .backup-section{margin-top:22px;padding-top:14px;border-top:1px dashed var(--line)}
 .account-section{margin-top:18px;padding-top:14px;border-top:1px dashed var(--line);text-align:center}

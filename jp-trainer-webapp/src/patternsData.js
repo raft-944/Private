@@ -7,6 +7,10 @@
  */
 import { PATTERNS_CHUKYU } from "./data/chukyu-01-02.js";
 import { PATTERNS_CHUKYU_03 } from "./data/chukyu-03.js";
+import { PATTERNS_N3_PART1 } from "./data/n3-part1.js";
+import { PATTERNS_N3_FORMREF } from "./data/n3-formref.js";
+import { PATTERNS_N3_PART2 } from "./data/n3-part2.js";
+import { PATTERNS_N3_PART3 } from "./data/n3-part3.js";
 import { PATTERNS_BIAORI } from "./data/biaori.js";
 import { EXT_STUDY } from "./data/extStudyNotes.js";
 
@@ -5599,6 +5603,10 @@ export const PATTERNS = [
   ...SHOKYU.map((p) => ({ ...p, book: "minna" })),
   ...PATTERNS_CHUKYU.map((p) => ({ ...p, ext: false, book: "minna" })),
   ...PATTERNS_CHUKYU_03.map((p) => ({ ...p, ext: false, book: "minna" })),
+  ...PATTERNS_N3_PART1.map((p) => ({ ...p, book: "minna" })),
+  ...PATTERNS_N3_FORMREF.map((p) => ({ ...p, book: "minna" })),
+  ...PATTERNS_N3_PART2.map((p) => ({ ...p, book: "minna" })),
+  ...PATTERNS_N3_PART3.map((p) => ({ ...p, book: "minna" })),
   ...PATTERNS_BIAORI.map((p) => ({ ...p, book: "biaori" })),
 ].map((p, i) => ({
   ...p,

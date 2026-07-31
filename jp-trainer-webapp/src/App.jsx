@@ -182,7 +182,7 @@ const REVIEW_CAP_DEFAULT = 40;
    就自动下调每日新句型数,把资源让给消化积压。参数留在这里方便按实际学习数据调整。 */
 const CAP_STREAK_FOR_DOWNGRADE = 5;
 
-const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null, reviewCap: REVIEW_CAP_DEFAULT, dialogueTier: null, book: DEFAULT_BOOK }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, dialogueStats: { total: 0, clean: 0 }, session: null, studyTime: {}, hwBacklog: null, qHist: {}, hwRecent: [] };
+const DEFAULT_DB = { prog: {}, settings: { newPerDay: 3, voiceURI: null, reviewCap: REVIEW_CAP_DEFAULT, dialogueTier: null, book: DEFAULT_BOOK }, meta: { date: "", newDone: 0 }, mistakes: [], stats: { total: 0, ok: 0 }, listenStats: { total: 0, ok: 0 }, dialogueStats: { total: 0, clean: 0 }, choiceStats: { total: 0, ok: 0 }, readingStats: { total: 0, ok: 0 }, session: null, studyTime: {}, hwBacklog: null, qHist: {}, hwRecent: [] };
 
 /* 每个句型记住最近出过的几道题面,出新题时作为"别再出这些"的清单发给 AI。
    为什么必须存进 db 而不是内存:以前只有一个 useRef(recentTasks)记最近4条,而且
@@ -303,6 +303,8 @@ function mergeDb(saved) {
     stats: { ...DEFAULT_DB.stats, ...(s.stats || {}) },
     listenStats: { ...DEFAULT_DB.listenStats, ...(s.listenStats || {}) },
     dialogueStats: { ...DEFAULT_DB.dialogueStats, ...(s.dialogueStats || {}) },
+    choiceStats: { ...DEFAULT_DB.choiceStats, ...(s.choiceStats || {}) },
+    readingStats: { ...DEFAULT_DB.readingStats, ...(s.readingStats || {}) },
     prog: s.prog || {},
     mistakes: Array.isArray(s.mistakes) ? s.mistakes : [],
     studyTime: s.studyTime && typeof s.studyTime === "object" ? s.studyTime : {},
@@ -494,18 +496,18 @@ async function spaceOutDispatch() {
 
 /* 真正发请求+429退避重试的共用逻辑,只返回原始文字,不在这里解析JSON形状,
    这样单个问题(callAI)和批量问题(callAIArray)可以共用同一套重试机制 */
-async function callAIRaw(system, user, maxTokens, background) {
+async function callAIRaw(system, user, maxTokens, background, model) {
   // 名额在整个重试循环之外持有:429 退避期间也应该占着名额,否则一批请求同时撞限流后
   // 会一起放开名额、又一起重试,等于把限流又打一遍
   await acquireSlot(background);
   try {
-    return await callAIRawInner(system, user, maxTokens);
+    return await callAIRawInner(system, user, maxTokens, model);
   } finally {
     releaseSlot(background);
   }
 }
 
-async function callAIRawInner(system, user, maxTokens) {
+async function callAIRawInner(system, user, maxTokens, model) {
   let lastErr;
   const MAX_ATTEMPTS = 4;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -514,7 +516,7 @@ async function callAIRawInner(system, user, maxTokens) {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ max_tokens: maxTokens || 1200, system, user }),
+        body: JSON.stringify({ max_tokens: maxTokens || 1200, system, user, ...(model ? { model } : {}) }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -553,10 +555,10 @@ async function callAIRawInner(system, user, maxTokens) {
    按实际产出计费,调高本身一分钱不花,却能把"写到一半被截断"这类重试基本消掉。
    注意这只解决截断那一种;如果是 AI 在 JSON 字符串里写了英文直引号导致解析失败,
    还是得重发一次(提示词里已经反复禁止过,见各处的"绝对不能使用英文直引号")。 */
-async function callAI(system, user, maxTokens = 4200) {
+async function callAI(system, user, maxTokens = 4200, model) {
   let lastErr;
   for (const budget of [maxTokens, maxTokens * 2]) {
-    const text = await callAIRaw(system, user, budget);
+    const text = await callAIRaw(system, user, budget, undefined, model);
     try {
       const jsonStr = extractFirstJsonObject(text);
       if (!jsonStr) throw new Error("返回内容不含完整JSON:" + text.slice(0, 80));
@@ -1006,6 +1008,75 @@ ${TASK_SEGMENTS_RULE}
     type: "translation", task: q.task,
     taskSegments: Array.isArray(q.taskSegments) && q.taskSegments.length ? q.taskSegments : null,
   }));
+}
+
+/* ================= JLPT模拟 · 文法选择题 =================
+   仿照JLPT"文法形式の判断"単選題:一句话挖空,四选一。干扰项优先用句型自带的
+   contrasts(易混淆辨析)字段——这些原本就是教材里"容易和哪个句型搞混、区别在哪"
+   的整理,拿来当干扰项比让AI现场瞎编质量高得多,也更贴近真实考试的出题逻辑
+   (考试的错误选项基本都是"看着很像但在这个语境/文体下不对"的近义句型)。
+   判卷不需要AI:选项对不对是确定的,选完本地直接比对下标即可,不用等AI批改。 */
+async function genGrammarChoiceQuiz(patterns) {
+  const sys = `あなたは日本語教師です。请仿照JLPT考试"文法形式の判断"単選題的出法命题。只输出JSON数组,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const list = patterns.map((p, i) => {
+    const contrastText = p.contrasts && p.contrasts.length
+      ? `\n易混淆句型(优先当干扰项使用):${p.contrasts.map((c) => c[0] + "：" + c[1]).join("；")}`
+      : "";
+    return `第${i + 1}题 — 句型:${p.pattern}(${p.conn} / ${p.meaning}) — 【難易度基準】${levelBenchmark(p.level)}${styleTagText(p)}${explainBriefText(p)}${contrastText}`;
+  }).join("\n\n");
+  const user = `请为下面这 ${patterns.length} 个句型各出一道四选一的"文法选择题",格式模仿JLPT真题的"文法形式の判断":给一句自然、有明确语境的日语句子,把要考查的这个句型部分挖空(用「＿＿＿」表示),给出4个选项,只有一个在这个语境下语法和意思都正确。
+
+${list}
+
+出题要求:
+- 干扰项优先从题目里给出的"易混淆句型"选取(没有的话就编3个语法上说得通、但在这个语境/文体/时态/人称下用错了的说法),不要编造和目标句型完全无关的选项,那样太容易排除,起不到辨析的作用
+- 4个选项里正确答案所在的位置要打乱,不能总是同一个位置,长度也不要让正确答案明显比其他选项长或短
+- explanation 用中文具体说明为什么正确答案对、其余3个选项各自错在哪(依据易混淆点的区别说,不能只说"语法不对"这种空话)
+- 各题之间内容不要相似雷同,不要跳过任何一题、不要合并
+
+按顺序输出一个JSON数组,长度必须正好是 ${patterns.length},每个元素格式: {"n":题号(整数),"sentence":"带＿＿＿的完整日语句子","options":["选项1","选项2","选项3","选项4"],"answerIndex":正确选项的下标(0到3的整数),"explanation":"中文讲解,150字以内","cn":"整句话补全后的中文参考意思"}`;
+  const arr = await callAIArray(sys, user, patterns.length, true);
+  const out = new Array(patterns.length).fill(null);
+  const lenOk = Array.isArray(arr) && arr.length === patterns.length;
+  (Array.isArray(arr) ? arr : []).forEach((q, i) => {
+    if (!q || !q.sentence || !Array.isArray(q.options) || q.options.length !== 4) return;
+    const idx = Number(q.answerIndex);
+    if (!Number.isInteger(idx) || idx < 0 || idx > 3) return;
+    const n = Number(q.n);
+    const pos = Number.isInteger(n) && n >= 1 && n <= patterns.length ? n - 1 : (lenOk ? i : -1);
+    if (pos < 0 || out[pos]) return;
+    out[pos] = { p: patterns[pos], sentence: q.sentence, options: q.options, answerIndex: idx, explanation: q.explanation || "", cn: q.cn || "" };
+  });
+  if (!out.some(Boolean)) throw new Error("批量出题没有一条可用");
+  return out;
+}
+
+/* ================= JLPT模拟 · 読解 =================
+   用几个已学句型攒出一段几百字的连贯短文,配几道理解题(四选一)。
+   这个任务比单句挖空复杂得多——既要通篇连贯,又要保证每道理解题"有且只有一个
+   选项站得住脚",flash 这类不带思考链的模型更容易出现看似都对的模糊选项、或者
+   某道题其实passage里没有依据。调用方按需传 model="deepseek-v4-pro" 来提高
+   这类多步骤推理任务的严谨度(读解只生成一次、后续判断对错是本地比对,pro
+   慢一点/贵一点的成本只发生在生成这一下,不影响做题体验)。 */
+async function genReadingPassage(patterns, model) {
+  const sys = `あなたは日本語教師です。请仿照JLPT読解题命题:先写一段连贯的日语短文,再针对这段短文出几道理解题。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
+  const level = patterns.some((p) => p.level === "中級") ? "N3〜N2" : "N4";
+  const list = patterns.map((p) => `${p.pattern}(${p.conn} / ${p.meaning})`).join("、");
+  const user = `学习者水平:JLPT ${level}。请写一段 300～450 字的日语短文(可以是随笔、说明文、书信等体裁,自行选一个合适的),文中要自然地用上以下这些已学句型(不要求每个都用、也不要求只用这些,但至少覆盖其中大半):${list}
+
+短文要求:
+1. 通篇讲一件事或一个观点,有明确的起承转合,不要写成互不相关的句子堆砌
+2. 词汇和语法难度控制在 ${level} 范围内
+3. 不要在文中标注用了哪个句型,自然写成一整段就行
+
+短文写完后,针对这段短文出 3 道理解题(细节理解/推理/主旨归纳各来一道,不要3道都问同一类问题),每道题4个选项,只有一个选项能从短文内容直接推出或明确支持,其余3个选项要看着有迷惑性(比如偷换了细节、以偏概全、或反了因果关系),但必须明确错——不能出现"两个选项都说得通"这种有争议的题。
+
+输出JSON: {"passage":"短文正文","questions":[{"q":"问题(中文)","options":["选项1","选项2","选项3","选项4"],"answerIndex":正确选项下标(0到3的整数),"explanation":"中文讲解,说明正确答案的依据在短文哪里、其余选项为什么不对,150字以内"},...共3道]}`;
+  const r = await callAI(sys, user, 3800, model);
+  if (!r.passage || !Array.isArray(r.questions) || !r.questions.length) throw new Error("読解生成失败:内容不完整");
+  const questions = r.questions.filter((q) => q && q.q && Array.isArray(q.options) && q.options.length === 4 && Number.isInteger(q.answerIndex) && q.answerIndex >= 0 && q.answerIndex <= 3);
+  if (!questions.length) throw new Error("読解生成失败:没有一道理解题格式正确");
+  return { passage: r.passage, questions, patternIds: patterns.map((p) => p.id) };
 }
 
 /* ================= 情景对话:多轮AI调用 ================= */
@@ -2031,6 +2102,16 @@ function AppInner() {
   const [cfResult, setCfResult] = useState(null);
   const [cfQuizStats, setCfQuizStats] = useState({ ok: 0, partial: 0, wrong: 0 });
   const [cfErrMsg, setCfErrMsg] = useState("");
+
+  /* ================= JLPT模拟(文法选择题/読解,自由练习) =================
+     和練習帳一样是独立state,不复用主线SRS的queue/phase。判卷是本地选择题比对,
+     不用等AI批改,所以没有"grading"这个中间phase——选完立刻能看对错和讲解。 */
+  const [jlptQuiz, setJlptQuiz] = useState(null); // {kind:"grammar"|"reading", passage, items, patternIds}
+  const [jlptQuizIdx, setJlptQuizIdx] = useState(0);
+  const [jlptQuizPhase, setJlptQuizPhase] = useState("question"); // loading|question|result|done|error
+  const [jlptSelected, setJlptSelected] = useState(null); // 已选中的选项下标,null=还没选
+  const [jlptQuizStats, setJlptQuizStats] = useState({ ok: 0, wrong: 0 });
+  const [jlptErrMsg, setJlptErrMsg] = useState("");
   const cfQuizRecentRef = useRef({}); // topicId -> 最近一批用过的 head[],只用来"轻度避开",不持久化
 
   const [cfScene, setCfScene] = useState(null);
@@ -2072,6 +2153,7 @@ function AppInner() {
         if (confusionSub === "list") { setView("home"); return; }
         return;
       }
+      if (view === "jlpt") { exitJlptQuiz(); return; }
       if (view === "library" || view === "mistakes" || view === "session") { setView("home"); return; }
     };
   });
@@ -3744,6 +3826,112 @@ function AppInner() {
     else setConfusionSub("topicDetail");
   };
 
+  /* ================= JLPT模拟:文法选择题 / 読解 =================
+     出题池只从"已学过"的句型里抽(没学过的考它没有意义),优先抽标了 contrasts 的——
+     干扰项质量更有保证,池子不够时用没有 contrasts 的已学句型垫底,保证凑得够数。 */
+  const GRAMMAR_CHOICE_COUNT = 8;
+  const READING_PATTERN_COUNT = 5;
+  const pickJlptPool = (n) => {
+    const learned = PATTERNS.filter((p) => p.book === currentBook && db.prog[p.id]);
+    if (learned.length === 0) return [];
+    const shuffle = (arr) => [...arr].sort(() => Math.random() - 0.5);
+    const withContrast = shuffle(learned.filter((p) => p.contrasts && p.contrasts.length));
+    const withoutContrast = shuffle(learned.filter((p) => !p.contrasts || !p.contrasts.length));
+    return [...withContrast, ...withoutContrast].slice(0, Math.min(n, learned.length));
+  };
+
+  const startGrammarChoiceQuiz = async () => {
+    const picked = pickJlptPool(GRAMMAR_CHOICE_COUNT);
+    if (!picked.length) return;
+    setJlptQuizPhase("loading");
+    setJlptErrMsg("");
+    setJlptQuizStats({ ok: 0, wrong: 0 });
+    setJlptQuizIdx(0);
+    setJlptSelected(null);
+    setJlptQuiz(null);
+    setView("jlpt");
+    try {
+      const items = (await genGrammarChoiceQuiz(picked)).filter(Boolean);
+      if (!items.length) throw new Error("这批题目没能出出来,请再试一次");
+      setJlptQuiz({ kind: "grammar", passage: null, items });
+      setJlptQuizPhase("question");
+    } catch (e) {
+      setJlptErrMsg("出题失败:" + (e && e.message ? e.message : String(e)));
+      setJlptQuizPhase("error");
+    }
+  };
+
+  const startReadingQuiz = async () => {
+    const picked = pickJlptPool(READING_PATTERN_COUNT);
+    if (!picked.length) return;
+    setJlptQuizPhase("loading");
+    setJlptErrMsg("");
+    setJlptQuizStats({ ok: 0, wrong: 0 });
+    setJlptQuizIdx(0);
+    setJlptSelected(null);
+    setJlptQuiz(null);
+    setView("jlpt");
+    try {
+      // 読解是多步骤推理任务(通篇连贯+每道理解题有且只有一个选项站得住脚),
+      // 用 pro 提高严谨度——只生成这一次,不影响后续做题速度
+      const r = await genReadingPassage(picked, "deepseek-v4-pro");
+      setJlptQuiz({ kind: "reading", passage: r.passage, items: r.questions, patternIds: r.patternIds });
+      setJlptQuizPhase("question");
+    } catch (e) {
+      setJlptErrMsg("出题失败:" + (e && e.message ? e.message : String(e)));
+      setJlptQuizPhase("error");
+    }
+  };
+
+  /* 选完立刻本地判断对错(选择题不需要AI判卷),答错才记进錯題本;
+     统计写进 choiceStats/readingStats,和 SRS 的 lv/due 完全无关,不影响复习排期。 */
+  const selectJlptAnswer = (idx) => {
+    if (!jlptQuiz || jlptQuizPhase !== "question" || jlptSelected !== null) return;
+    const item = jlptQuiz.items[jlptQuizIdx];
+    const correct = idx === item.answerIndex;
+    setJlptSelected(idx);
+    setJlptQuizPhase("result");
+    setJlptQuizStats((s) => (correct ? { ...s, ok: s.ok + 1 } : { ...s, wrong: s.wrong + 1 }));
+    const statsKey = jlptQuiz.kind === "grammar" ? "choiceStats" : "readingStats";
+    const isGrammar = jlptQuiz.kind === "grammar";
+    setDb((d) => ({
+      ...d,
+      [statsKey]: { total: d[statsKey].total + 1, ok: d[statsKey].ok + (correct ? 1 : 0) },
+      mistakes: correct ? d.mistakes : [{
+        id: newId(),
+        source: isGrammar ? "grammarChoice" : "reading",
+        book: currentBook,
+        ...(isGrammar ? { pid: item.p.id } : { label: "読解" }),
+        task: isGrammar ? item.sentence : `${jlptQuiz.passage.slice(0, 80)}${jlptQuiz.passage.length > 80 ? "…" : ""}\n问:${item.q}`,
+        ans: item.options[idx],
+        ref: item.options[item.answerIndex],
+        exp: item.explanation,
+        date: today(), needsReview: false, streak: 0,
+      }, ...d.mistakes].slice(0, 100),
+    }));
+  };
+
+  const nextJlptQuestion = () => {
+    setJlptSelected(null);
+    if (jlptQuizIdx + 1 < jlptQuiz.items.length) {
+      setJlptQuizIdx((i) => i + 1);
+      setJlptQuizPhase("question");
+    } else {
+      setJlptQuizPhase("done");
+    }
+  };
+
+  const retryJlptQuiz = () => {
+    if (!jlptQuiz) return;
+    if (jlptQuiz.kind === "grammar") startGrammarChoiceQuiz();
+    else startReadingQuiz();
+  };
+
+  const exitJlptQuiz = () => {
+    setJlptQuiz(null);
+    setView("home");
+  };
+
   /* ================= 練習帳:场景对话 =================
      流程和 SRS 那边的情景对话(beginDialogueItem/sendDialogueTurn/finishDialogue)几乎一样,
      但状态、复盘函数、错题写入方式都是独立的一套,互不影响。 */
@@ -4170,6 +4358,35 @@ function AppInner() {
               <div className="hw-empty">当前浏览器不支持语音朗读,建议换电脑浏览器(Chrome/Edge/Safari)使用这个功能</div>
             ) : (
               <button className="btn-outline ls-btn" onClick={startListening}>開始 · 聴解練習</button>
+            )}
+          </section>
+
+          <section className="hw-card jlpt-card">
+            <div className="hw-top">
+              <div>
+                <div className="hw-title serif">JLPT模拟</div>
+                <div className="hw-sub">仿真题的四选一形式:文法選択(挖空选正确说法)+ 読解(短文理解题),不进复习排期,答错记进錯題本</div>
+              </div>
+            </div>
+            {bookPatterns.length === 0 ? (
+              <div className="hw-empty">这本教材还没有内容,切到别的教材看看吧</div>
+            ) : learnedIds.length === 0 ? (
+              <div className="hw-empty">先学几个句型,再来做模拟题吧</div>
+            ) : (
+              <>
+                <div className="jlpt-row">
+                  <div className="jlpt-sub">
+                    <div className="jlpt-sub-label">文法選択問題</div>
+                    <div className="jlpt-sub-stat">{db.choiceStats.total === 0 ? "还没练过" : `正确率 ${Math.round((db.choiceStats.ok / db.choiceStats.total) * 100)}%(共 ${db.choiceStats.total} 题)`}</div>
+                    <button className="btn-outline" onClick={startGrammarChoiceQuiz}>開始 · 文法選択</button>
+                  </div>
+                  <div className="jlpt-sub">
+                    <div className="jlpt-sub-label">読解</div>
+                    <div className="jlpt-sub-stat">{db.readingStats.total === 0 ? "还没练过" : `正确率 ${Math.round((db.readingStats.ok / db.readingStats.total) * 100)}%(共 ${db.readingStats.total} 题)`}</div>
+                    <button className="btn-outline" onClick={startReadingQuiz}>開始 · 読解</button>
+                  </div>
+                </div>
+              </>
             )}
           </section>
 
@@ -4978,14 +5195,15 @@ function AppInner() {
       {view === "mistakes" && (() => {
             // 練習帳(source==="confusion")来的错题不挂钩具体句型,跟教材无关,一律显示;
             // 挂钩句型的错题按当前教材过滤,两本书的错题本完全分开
-            const visibleMistakes = db.mistakes.filter((m) => m.source === "confusion" || (PATTERNS[m.pid] && PATTERNS[m.pid].book === currentBook));
+            // 読解不挂钩单一句型,靠 book 字段直接标了是哪本教材;其余类型(含老数据)照旧靠 pid 反查
+            const visibleMistakes = db.mistakes.filter((m) => m.source === "confusion" || (m.book ? m.book === currentBook : (PATTERNS[m.pid] && PATTERNS[m.pid].book === currentBook)));
             return (
         <main className="page">
           <h2 className="page-title serif">錯題本</h2>
           {visibleMistakes.length === 0 && <div className="center-msg">还没有错题。錯題は宝物です — 出错了才会来这里。</div>}
           {visibleMistakes.length > 0 && (() => {
-            // 練習帳来的错题没有 pid,进不了这条统一队列,只能在各自的卡片上点"重练"
-            const drillCount = visibleMistakes.filter((m) => m.source !== "confusion").length;
+            // 練習帳/読解来的错题没有 pid(或者没法在这条统一队列里重练),只能在各自的卡片上点"重练"或者干脆没有重练入口
+            const drillCount = visibleMistakes.filter((m) => m.source !== "confusion" && m.source !== "reading").length;
             return (
               <div className="drill-bar">
                 <div className="drill-note">这些错题会优先混入「毎日の宿題」,做对了自动移除,不用额外再点什么</div>
@@ -4999,12 +5217,16 @@ function AppInner() {
             );
           })()}
           {visibleMistakes.map((m, i) => {
-            // 練習帳(知识辨析/场景对话/书面邮件)来的错题不挂钩具体句型,没有 pid,用 m.label 兜底展示。
+            // 練習帳(知识辨析/场景对话/书面邮件)、読解 来的错题不挂钩具体句型,没有 pid,用 m.label 兜底展示。
             // 練習帳的"重练"需要当初存下来的上下文(topicId/sceneId/emailTopicId等)才能重新出题——
             // 这次更新之前留下的老记录没存这些字段,判断一下缺不缺,缺了就不出"重练"按钮,只能手动移除。
             const isConfusion = m.source === "confusion";
-            const p = isConfusion ? null : PATTERNS[m.pid];
-            const p2 = !isConfusion && m.pid2 !== undefined ? PATTERNS[m.pid2] : null;
+            const noSinglePattern = isConfusion || m.source === "reading";
+            const p = noSinglePattern ? null : PATTERNS[m.pid];
+            const p2 = !noSinglePattern && m.pid2 !== undefined ? PATTERNS[m.pid2] : null;
+            // 文法选择题/読解 只是随机生成的一次性题目,没有存下能重新出同一题的上下文,
+            // 和 confusion 一样只留"查看/移除",不给"重练"按钮
+            const noRetryBtn = isConfusion || m.source === "grammarChoice" || m.source === "reading";
             const canRetryConfusion = isConfusion && (
               (m.cfType === "quiz" && m.topicId && m.itemHead) ||
               (m.cfType === "dialogue" && m.sceneId) ||
@@ -5014,7 +5236,7 @@ function AppInner() {
               <div key={m.id || i} className="card mistake-card">
                 <div className="mk-head">
                   <span className="mk-head-left">
-                    <span className="serif">{isConfusion ? m.label : <>{p.pattern}{p2 && <> ＋ {p2.pattern}</>}</>}</span>
+                    <span className="serif">{noSinglePattern ? m.label : <>{p.pattern}{p2 && <> ＋ {p2.pattern}</>}</>}</span>
                     {m.needsReview && <span className="badge badge-review">⚠️ 建议复核</span>}
                     {m.nonPattern && <span className="badge badge-nonpattern">句型没问题 · 词/助词错</span>}
                     {m.streak > 0 && <span className="badge badge-streak">连续答对 {m.streak}/{MISTAKE_CLEAR_STREAK}</span>}
@@ -5027,7 +5249,7 @@ function AppInner() {
                 <div className="mk-exp">{m.exp}</div>
                 <BreakdownBlock breakdown={m.breakdown} />
                 <div className="btn-row">
-                  {!isConfusion && <button className="btn-mini" onClick={() => (p2 ? startComboFree(p, p2, m.id) : m.type === "listening" ? startListenFree(p, m.id) : startFree(p, m.id))}>{p2 ? "重练这组合" : m.type === "listening" ? "重新听一次" : "重练这个句型"}</button>}
+                  {!noRetryBtn && <button className="btn-mini" onClick={() => (p2 ? startComboFree(p, p2, m.id) : m.type === "listening" ? startListenFree(p, m.id) : startFree(p, m.id))}>{p2 ? "重练这组合" : m.type === "listening" ? "重新听一次" : "重练这个句型"}</button>}
                   {canRetryConfusion && <button className="btn-mini" onClick={() => retryConfusionMistake(m)}>重练</button>}
                   {m.needsReview && <button className="btn-mini" onClick={() => setDb((d) => ({ ...d, mistakes: d.mistakes.filter((x, j) => (m.id ? x.id !== m.id : j !== i)) }))}>✓ 确认无误</button>}
                   <button className="btn-mini ghost" onClick={() => setDb((d) => ({ ...d, mistakes: d.mistakes.filter((x, j) => (m.id ? x.id !== m.id : j !== i)) }))}>移除</button>
@@ -5038,6 +5260,95 @@ function AppInner() {
         </main>
             );
       })()}
+
+      {/* ---------- JLPT模拟(文法選択/読解) ---------- */}
+      {view === "jlpt" && (
+        <main className="page">
+          {jlptQuizPhase !== "done" && jlptQuiz && (
+            <div className="progress-row">
+              <div className="progress-bar"><div className="progress-fill" style={{ width: `${((jlptQuizIdx + 1) / jlptQuiz.items.length) * 100}%` }} /></div>
+              <span className="progress-text">{jlptQuizIdx + 1} / {jlptQuiz.items.length}</span>
+            </div>
+          )}
+          {jlptQuizPhase !== "done" && jlptQuiz && (
+            <div className="pattern-head">
+              <span className="tag tag-cf">JLPT模拟 · {jlptQuiz.kind === "grammar" ? "文法選択" : "読解"}</span>
+            </div>
+          )}
+
+          {jlptQuizPhase === "loading" && (
+            <section className="card loading-card">
+              <div className="dots"><span /><span /><span /></div>
+              <div className="loading-text">先生が問題を作っています…</div>
+            </section>
+          )}
+
+          {jlptQuizPhase === "error" && (
+            <section className="card">
+              {/rate|limit|429|overload|529/i.test(jlptErrMsg) ? (
+                <p className="err-hint">当前账号的 AI 用量暂时达到上限,稍等几分钟再重试即可。</p>
+              ) : null}
+              <p className="err-text">{jlptErrMsg}</p>
+              <button className="btn-main" onClick={retryJlptQuiz}>重试</button>
+            </section>
+          )}
+
+          {(jlptQuizPhase === "question" || jlptQuizPhase === "result") && jlptQuiz && (() => {
+            const item = jlptQuiz.items[jlptQuizIdx];
+            return (
+              <section className="card">
+                {jlptQuiz.passage && (
+                  <div className="jlpt-passage serif">{furiganaify(jlptQuiz.passage)}</div>
+                )}
+                <div className="q-task serif">{jlptQuiz.kind === "grammar" ? furiganaify(item.sentence) : item.q}</div>
+                <div className="jlpt-options">
+                  {item.options.map((opt, oi) => {
+                    const chosen = jlptSelected === oi;
+                    const isAnswer = oi === item.answerIndex;
+                    const revealed = jlptSelected !== null;
+                    const cls = "jlpt-opt"
+                      + (revealed && isAnswer ? " jlpt-opt-correct" : "")
+                      + (revealed && chosen && !isAnswer ? " jlpt-opt-wrong" : "")
+                      + (chosen && !revealed ? " jlpt-opt-picked" : "");
+                    return (
+                      <button key={oi} className={cls} disabled={revealed} onClick={() => selectJlptAnswer(oi)}>
+                        <span className="jlpt-opt-mark">{"ABCD"[oi]}</span>
+                        <span className="serif">{furiganaify(opt)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {jlptQuizPhase === "result" && (
+                  <div className="result-wrap">
+                    <Stamp verdict={jlptSelected === item.answerIndex ? "correct" : "wrong"} />
+                    <div className="exp-block"><label>講解</label><div>{item.explanation}</div></div>
+                    {jlptQuiz.kind === "grammar" && item.cn && (
+                      <div className="exp-block"><label>参考译文</label><div className="serif">{item.cn}</div></div>
+                    )}
+                    <button className="btn-main" onClick={nextJlptQuestion}>{jlptQuizIdx + 1 < jlptQuiz.items.length ? "次へ →" : "完成本组练习"}</button>
+                  </div>
+                )}
+              </section>
+            );
+          })()}
+
+          {jlptQuizPhase === "done" && jlptQuiz && (
+            <section className="card done-card">
+              <div className="done-title serif">お疲れさまでした</div>
+              <div className="done-stats">
+                <span className="d-ok">◎ {jlptQuizStats.ok}</span>
+                <span className="d-ng">✗ {jlptQuizStats.wrong}</span>
+              </div>
+              <p className="done-note">自由练习,不进复习排期,不影响任何句型的复习间隔。答错的题已经记到錯題本里了。</p>
+              <button className="btn-main" onClick={exitJlptQuiz}>返回首页</button>
+            </section>
+          )}
+
+          {jlptQuizPhase !== "done" && (
+            <button className="quit-link" onClick={exitJlptQuiz}>中断,返回首页</button>
+          )}
+        </main>
+      )}
 
       {/* ---------- 底部导航 ---------- */}
       <nav className="nav">
@@ -5180,6 +5491,12 @@ html,body{overflow-x:hidden}
 .voice-picker .btn-mini{margin-top:0;flex:0 0 auto;white-space:nowrap}
 .ls-btn{border-color:var(--tint-green-fg);color:var(--tint-green-fg)}
 .ls-btn:hover{background:var(--tint-green-bg)}
+.jlpt-card{border-color:var(--tint-purple-border)}
+.jlpt-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.jlpt-sub{display:flex;flex-direction:column;gap:6px}
+.jlpt-sub-label{font-size:14px;color:var(--ink);font-weight:600}
+.jlpt-sub-stat{font-size:12px;color:var(--ink-soft)}
+.jlpt-sub .btn-outline{margin-top:auto;font-size:13px;padding:10px}
 
 .settings-row{display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding:12px 16px;
   background:var(--card);border:1px solid var(--line);border-radius:12px;font-size:14px}
@@ -5303,6 +5620,17 @@ html,body{overflow-x:hidden}
 .exp-block label{margin-bottom:6px}
 .breakdown-block{margin-top:12px;font-size:13px;line-height:1.7;background:var(--tint-panel-blue);border-radius:10px;padding:12px}
 .breakdown-block label{display:block;font-size:11px;color:var(--ink-soft);letter-spacing:2px;margin-bottom:8px}
+
+.jlpt-passage{font-size:16px;line-height:1.9;background:var(--tint-panel);border-radius:10px;padding:14px;margin-bottom:14px;white-space:pre-wrap}
+.jlpt-options{display:flex;flex-direction:column;gap:10px;margin-top:6px}
+.jlpt-opt{display:flex;align-items:center;gap:10px;text-align:left;padding:12px 14px;border:1.5px solid var(--line);border-radius:12px;background:var(--card);cursor:pointer;font-size:15px;color:var(--ink)}
+.jlpt-opt:disabled{cursor:default}
+.jlpt-opt-mark{flex:0 0 auto;width:22px;height:22px;display:flex;align-items:center;justify-content:center;border-radius:50%;background:var(--tint-panel);font-size:12px;font-weight:700;color:var(--ink-soft)}
+.jlpt-opt-picked{border-color:var(--ai)}
+.jlpt-opt-correct{border-color:var(--tint-green-fg);background:var(--tint-green-bg)}
+.jlpt-opt-correct .jlpt-opt-mark{background:var(--tint-green-fg);color:#fff}
+.jlpt-opt-wrong{border-color:var(--shu);background:var(--tint-red-bg)}
+.jlpt-opt-wrong .jlpt-opt-mark{background:var(--shu);color:#fff}
 .bd-row{display:flex;gap:8px;margin:6px 0;align-items:baseline}
 .bd-tag{flex:0 0 auto;font-size:11px;color:var(--ai);background:var(--tint-blue2-bg);border-radius:6px;padding:2px 8px;white-space:nowrap}
 .card .btn-main{margin-top:16px}

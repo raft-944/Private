@@ -70,7 +70,7 @@ No test runner or lint script is configured in `package.json`.
 
 Browser → `POST /api/generate` (`api/generate.js`, Vercel serverless function) → **DeepSeek**(`deepseek-v4-flash`,OpenAI 兼容的 `/v1/chat/completions` 接口)。项目最早是接的 Google Gemini,后来换成了 DeepSeek——如果在别处(注释、旧文档)看到 "Gemini" 字样,那是没跟着改掉的历史遗留,不代表实际情况。前端的 `callAIRaw`/`callAI`/`callAIArray`(在 `App.jsx` 里)说的是 Anthropic-Messages-API 形状的请求/响应(`{system, user, max_tokens}` → `{content: [{type:"text", text}]}`),`api/generate.js` 负责把这个形状翻译成/从 DeepSeek 的 `messages`/`choices` 格式,这样移植过来的 prompt/解析逻辑不用重写。改这条链路时要注意:
 
-- `MODEL` 硬编码在 `api/generate.js` 里(当前是 `deepseek-v4-flash`)。
+- `MODEL` 硬编码在 `api/generate.js` 里(当前是 `deepseek-v4-flash`),但接口也接受请求体里可选的 `model` 字段,白名单只认 `deepseek-v4-flash`/`deepseek-v4-pro`,不认识的值一律忽略退回默认。`callAI`/`callAIRaw`/`callAIRawInner`(`App.jsx`)都透传一个可选的最后一个参数把它带过去,现在只有読解生成(`genReadingPassage`)会显式传 `"deepseek-v4-pro"`——読解是"一次生成、通篇连贯、每道理解题要有且只有一个选项站得住脚"这种多步推理任务,flash 更容易出模糊选项,pro 的思考链在这类任务上更值。其余场景(出题/判卷/文法选择题)继续用默认的 flash,不要不加区分地把所有调用都换成 pro——生成一次的调用切 pro 成本可接受,判卷这种高频调用切 pro 会明显拖慢+加大开销。
 - 服务端环境变量是 `DEEPSEEK_API_KEY`(不是 `GEMINI_API_KEY`),配在 Vercel 项目设置里,浏览器永远看不到。
 - 客户端有一个并发池(`MAX_CONCURRENT`)而不是纯串行节流,同时最多几个请求在飞,详见 `App.jsx` 里 `acquireSlot`/`releaseSlot` 附近的注释。429 重试时,等待秒数从 DeepSeek 响应头的 `Retry-After` 里取(OpenAI 兼容接口的惯例,不在 JSON body 里)。
 - 服务端不管客户端要多少 token,都保底给够 2048 输出 token,因为 DeepSeek 有时候比 Claude 更啰嗦,少了容易在写判卷讲解时把 JSON 截断。

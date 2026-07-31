@@ -3,6 +3,11 @@
 // DEEPSEEK_API_KEY 是服务端环境变量,浏览器永远看不到,安全
 
 const MODEL = "deepseek-v4-flash";
+// 大部分场景用 flash 就够(出题/判卷这类单步任务),但像"読解"这种要一次性攒出一段
+// 连贯长文、还要保证每道理解题有且只有一个选项站得住脚的多步推理任务,flash 更容易
+// 出现看似都对的模糊选项。允许前端按请求显式指定 pro,白名单校验,不认识的值一律
+// 忽略、退回默认的 flash,不能让前端随便指定任意字符串当模型名传给上游。
+const ALLOWED_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"];
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -16,11 +21,12 @@ export default async function handler(req, res) {
     return;
   }
 
-  const { system, user, max_tokens } = req.body || {};
+  const { system, user, max_tokens, model } = req.body || {};
   if (!user) {
     res.status(400).json({ error: { message: "缺少 user 字段" } });
     return;
   }
+  const useModel = ALLOWED_MODELS.includes(model) ? model : MODEL;
 
   // DeepSeek 有时候比 Claude 更啰嗦,1200 tokens 容易在写判卷讲解时被截断导致JSON不完整
   // 这里不管前端传多少,都保底给够 2048,避免"判卷失败:返回内容不含完整JSON"这类问题
@@ -38,7 +44,7 @@ export default async function handler(req, res) {
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: MODEL,
+        model: useModel,
         messages,
         max_tokens: outputTokens,
         temperature: 0.9,

@@ -7,7 +7,7 @@
 export const PATTERNS_N3_PART1 = [
   {
     "lesson": 63,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜うちに",
     "conn": "動詞辞書形／ている形／ない形 + うちに；い形容詞 + うちに；な形容詞 -な + うちに；名詞 + の + うちに",
     "meaning": "趁着…还没结束的时候(做)",
@@ -26,7 +26,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 63,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜間・〜間に",
     "conn": "動詞辞書形／ている形 + 間／間に；い形容詞 + 間／間に；な形容詞 -な + 間／間に；名詞 + の + 間／間に",
     "meaning": "…的整个期间(一直)／…这段期间内(某一刻)",
@@ -44,7 +44,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 63,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜てからでないと・〜てからでなければ",
     "conn": "動詞て形 + からでないと／からでなければ",
     "meaning": "不先做完…就没法…",
@@ -62,7 +62,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 63,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜ところだ・〜ところ(+助词)",
     "conn": "動詞辞書形 + ところだ(即将)／動詞ている形 + ところだ(正在)／動詞た形 + ところだ(刚…)；+ に／へ／を 表某节点上发生别的事",
     "meaning": "正处于(将要/正在/刚)…的阶段",
@@ -81,7 +81,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 64,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜とおりだ・とおりに",
     "conn": "動詞辞書形／た形 + とおりだ・とおりに；名詞 + の + とおりだ・とおりに；名詞 + どおりだ・どおりに",
     "meaning": "完全按照…那样",
@@ -99,7 +99,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 64,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜によって・によっては",
     "conn": "名詞 + によって・によっては",
     "meaning": "由于…／由…／根据不同的…(而不同)",
@@ -118,7 +118,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 64,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜たびに",
     "conn": "動詞辞書形 + たびに；名詞 + の + たびに",
     "meaning": "每次…都…",
@@ -136,7 +136,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 64,
-    "level": "中級",
+    "level": "N3",
     "pattern": "（〜ば）〜ほど・（〜なら）〜ほど・〜ほど",
     "conn": "動詞ば形 + 動詞辞書形 + ほど；い形容詞 -ければ + い形容詞 + ほど；な形容詞 -なら + な形容詞 + ほど",
     "meaning": "越…就越…",
@@ -154,7 +154,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 64,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜ついでに",
     "conn": "動詞辞書形／た形 + ついでに；名詞 + の + ついでに",
     "meaning": "顺便…",
@@ -172,7 +172,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 65,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜くらいだ・ぐらいだ／〜くらい・ぐらい／〜ほどだ／〜ほど",
     "conn": "動詞辞書形／た形 + くらいだ・ほどだ；名詞 + くらいだ・ほどだ",
     "meaning": "到了…的地步(夸张程度)",
@@ -190,7 +190,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 65,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜くらい・ぐらい…はない／〜ほど…はない",
     "conn": "名詞 + くらい・ぐらい／ほど + ……はない",
     "meaning": "没有比…更…的了(最高级)",
@@ -208,7 +208,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 65,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜くらいなら・ぐらいなら",
     "conn": "動詞辞書形 + くらいなら・ぐらいなら",
     "meaning": "与其…还不如…",
@@ -226,7 +226,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 65,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜に限る",
     "conn": "名詞 + に限る；動詞辞書形／ない形 + に限る",
     "meaning": "…是最好的(经验之谈)",
@@ -244,7 +244,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 66,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜に対して",
     "conn": "名詞 + に対して",
     "meaning": "针对…／与…相对(对比)",
@@ -262,7 +262,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 66,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜反面",
     "conn": "動詞／い形容詞 辞書形 + 反面；な形容詞 -な + 反面；名詞 + である + 反面",
     "meaning": "…的同时，也有…的另一面",
@@ -280,7 +280,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 66,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜一方（で）",
     "conn": "動詞辞書形 + 一方（で）；い形容詞 + 一方（で）；な形容詞 -な + 一方（で）；名詞 + である + 一方（で）",
     "meaning": "…的同时/另一方面…；(趋势)一直…下去",
@@ -298,7 +298,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 66,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜というより",
     "conn": "動詞／い形容詞／な形容詞 普通形 + というより；名詞 + というより",
     "meaning": "与其说是…不如说是…",
@@ -316,7 +316,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 66,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜かわりに",
     "conn": "動詞辞書形／た形 + かわりに；名詞 + の + かわりに",
     "meaning": "代替…／作为交换…",
@@ -334,7 +334,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 67,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜ためだ・ために",
     "conn": "動詞辞書形／た形 + ため（に）；い形容詞 + ため（に）；な形容詞 -な + ため（に）；名詞 + の + ため（に）",
     "meaning": "因为…所以…／为了…",
@@ -352,7 +352,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 67,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜によって・〜による(原因义)",
     "conn": "名詞 + によって／による",
     "meaning": "由于…(客观原因)",
@@ -371,7 +371,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 67,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜から・〜ことから",
     "conn": "動詞／い形容詞／な形容詞 普通形 + ことから；名詞 + であることから",
     "meaning": "从…这一事实可以推断出/得名",
@@ -389,7 +389,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 67,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜おかげだ・おかげで／〜せいだ・せいで",
     "conn": "動詞／い形容詞 普通形 + おかげで・せいで；な形容詞 -な + おかげで・せいで；名詞 + の + おかげで・せいで",
     "meaning": "多亏了…／都怪…",
@@ -407,7 +407,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 67,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜のだから",
     "conn": "動詞／い形容詞／な形容詞 普通形 + のだから；名詞 + なのだから",
     "meaning": "既然…(那么理应)…",
@@ -425,7 +425,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 68,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜（の）なら",
     "conn": "動詞／い形容詞 普通形 + なら；な形容詞 -な／名詞 + なら",
     "meaning": "如果是…的话(针对对方话题给出判断/建议)",
@@ -443,7 +443,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 68,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜ては…〜（の）では",
     "conn": "動詞て形 + は；名詞 + では",
     "meaning": "反复…的话,就会导致(不好的结果)",
@@ -461,7 +461,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 68,
-    "level": "中級",
+    "level": "N3",
     "pattern": "さえ〜ば・さえ〜なら",
     "conn": "動詞ます形（去ます）／名詞／助詞 + さえ + 假定形（ば／なら）",
     "meaning": "只要…就(足够)…",
@@ -479,7 +479,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 68,
-    "level": "中級",
+    "level": "N3",
     "pattern": "たとえ〜ても・たとえ〜でも",
     "conn": "たとえ + 動詞て形／い形容詞 -くて + も；たとえ + な形容詞／名詞 + でも",
     "meaning": "即使…也…",
@@ -495,7 +495,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 68,
-    "level": "中級",
+    "level": "N3",
     "pattern": "ば…たら…なら…（条件形式总结）",
     "conn": "分别对应假定形（ば）、た形+ら（たら）、辞书形/名词+なら（なら）",
     "meaning": "ば/たら/なら三种条件形式的辨析总结",
@@ -513,7 +513,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 68,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜ものなら",
     "conn": "動詞可能形 + ものなら",
     "meaning": "如果真能做到…的话(反讽/挑战语气)",
@@ -532,7 +532,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 68,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜（よ）うものなら",
     "conn": "動詞意志形（意向形）+ ものなら",
     "meaning": "万一…的话,后果会很严重",
@@ -550,7 +550,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 69,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜ということだ・とのことだ",
     "conn": "動詞／い形容詞／な形容詞／名詞 普通形 + ということだ・とのことだ",
     "meaning": "听说…／据说…",
@@ -568,7 +568,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 69,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜と言われている",
     "conn": "動詞／い形容詞／な形容詞／名詞 普通形 + と言われている",
     "meaning": "被普遍认为…(社会公论)",
@@ -586,7 +586,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 69,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜とか",
     "conn": "動詞／い形容詞／な形容詞／名詞 普通形 + とか",
     "meaning": "好像是…(不太确定的传闻)",
@@ -604,7 +604,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 69,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜って",
     "conn": "動詞／い形容詞／な形容詞／名詞 普通形 + って",
     "meaning": "(口语)听说…／所谓…",
@@ -622,7 +622,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 69,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜という(传闻/概括转述义)",
     "conn": "名詞1 + という + 名詞2；動詞／い形容詞／な形容詞／名詞 普通形 + という",
     "meaning": "叫做…的…／据传/概括为…",
@@ -640,7 +640,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 70,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜はずがない・わけがない",
     "conn": "普通形（な形容詞 -な／である，名詞 -の／である）+ はずがない・わけがない",
     "meaning": "绝不可能…",
@@ -658,7 +658,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 70,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜とは限らない",
     "conn": "普通形 + とは限らない",
     "meaning": "不能一概而论,未必…",
@@ -676,7 +676,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 70,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜わけではない・〜というわけではない／〜のではない",
     "conn": "普通形 + わけではない・というわけではない",
     "meaning": "并不是(完全)…",
@@ -694,7 +694,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 70,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜ないことはない",
     "conn": "動詞ない形 + ことはない；い形容詞 -くない + ことはない；な形容詞 -ではない + ことはない",
     "meaning": "也不是不…(委婉肯定)",
@@ -712,7 +712,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 70,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜ことは〜が、…",
     "conn": "動詞／い形容詞 辞書形（或た形） + ことは + 同一動詞／い形容詞 + が",
     "meaning": "…是…,但是(有所保留)",
@@ -728,7 +728,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 71,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜てもらいたい・ていただきたい／〜てほしい",
     "conn": "動詞て形 + もらいたい・いただきたい・ほしい",
     "meaning": "希望(对方)为我做…",
@@ -746,7 +746,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 71,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜(さ)せてもらいたい・(さ)せていただきたい／〜(さ)せてほしい",
     "conn": "動詞使役形（させて）+ もらいたい・いただきたい・ほしい",
     "meaning": "希望被允许做…",
@@ -764,7 +764,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 71,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜といい・ばいい／たらいい",
     "conn": "動詞辞書形 + といい；動詞ば形 + いい；動詞た形 + らいい",
     "meaning": "…就好了(愿望/建议)",
@@ -780,7 +780,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 71,
-    "level": "中級",
+    "level": "N3",
     "pattern": "命令形（しろ）／禁止形（〜な）",
     "conn": "動詞命令形（一類:词尾变e段;二類:る→ろ;三類:する→しろ、来る→来い）；動詞辞書形 + な",
     "meaning": "给我做…／不准…",
@@ -796,7 +796,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 71,
-    "level": "中級",
+    "level": "N3",
     "pattern": "こと（表命令・义务）",
     "conn": "動詞辞書形／ない形 + こと",
     "meaning": "须…(书面规则/规定)",
@@ -814,7 +814,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 72,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜べきだ・べき／べきではない",
     "conn": "動詞辞書形 + べきだ（「する」也可用「すべきだ」）",
     "meaning": "应该…",
@@ -832,7 +832,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 72,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜たらどうか",
     "conn": "動詞た形 + らどうか",
     "meaning": "…怎么样？(委婉建议)",
@@ -850,7 +850,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 73,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜ことにする・ことにしている",
     "conn": "動詞辞書形／ない形 + ことにする・ことにしている",
     "meaning": "决定…／(一直)坚持…",
@@ -868,7 +868,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 73,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜ようにする・ようにしている",
     "conn": "動詞辞書形／ない形 + ようにする・ようにしている",
     "meaning": "尽量…／一直注意…",
@@ -886,7 +886,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 73,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜(よ)うとする",
     "conn": "動詞意志形 + とする",
     "meaning": "正打算…／正要…",
@@ -904,7 +904,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 73,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜つもりだ",
     "conn": "動詞辞書形／ない形 + つもりだ；名詞 + の + つもりだ",
     "meaning": "打算…",
@@ -922,7 +922,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 74,
-    "level": "中級",
+    "level": "N3",
     "pattern": "尊敬语（尊敬語）",
     "conn": "特殊尊敬動詞(する→なさる、行く／来る→いらっしゃる、言う→おっしゃる、見る→ご覧になる、食べる／飲む→召し上がる、いる→いらっしゃる)；一般動詞:お+ます形+になる；被動形兼用作简易尊敬",
     "meaning": "抬高对方的动作/状态",
@@ -940,7 +940,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 74,
-    "level": "中級",
+    "level": "N3",
     "pattern": "谦让语1（謙譲語1／自谦语1）",
     "conn": "特殊謙譲動詞(する→いたす、行く→伺う、言う→申し上げる、見る→拝見する、食べる／飲む→いただく、会う→お目にかかる、あげる→差し上げる)；一般動詞:お+ます形+する／いたす",
     "meaning": "放低自己(涉及对方的)动作",
@@ -958,7 +958,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 74,
-    "level": "中級",
+    "level": "N3",
     "pattern": "谦让语2（謙譲語2／自谦语2，又称丁重语）",
     "conn": "特殊丁重動詞(する→いたす、行く／来る→参る、言う→申す、いる→おる、知っている→存じております)",
     "meaning": "单纯放低自己一方(不涉及具体对方)",
@@ -976,7 +976,7 @@ export const PATTERNS_N3_PART1 = [
   },
   {
     "lesson": 74,
-    "level": "中級",
+    "level": "N3",
     "pattern": "丁宁语（丁寧語／礼貌语）",
     "conn": "動詞ます形／です；美化语(お／ご+名词)",
     "meaning": "单纯的礼貌说话方式",

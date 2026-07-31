@@ -8,7 +8,7 @@
 export const PATTERNS_N3_PART2 = [
   {
     "lesson": 86,
-    "level": "中級",
+    "level": "N3",
     "pattern": "直接引用与间接引用（「」と言う vs 普通形+と言う）",
     "conn": "直接引用:「原句」+ と + 言う／思う／書く等；间接引用:普通形(句子内容) + と + 言う等",
     "meaning": "原样引述 vs 转换成自己的表达转述",
@@ -24,7 +24,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 86,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜という／〜とのこと(引用来源类)",
     "conn": "普通形 + という／とのこと + 名词或话を聞いた",
     "meaning": "听说…这样的说法/传闻",
@@ -42,7 +42,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 86,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜という(引用内容作句子成分)",
     "conn": "「引用内容」+ という + 名词/という考え・発表・保証など",
     "meaning": "…这样的(理念/宣布/保证)",
@@ -58,7 +58,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 87,
-    "level": "中級",
+    "level": "N3",
     "pattern": "修饰节+名词(从句修饰名词)",
     "conn": "動詞／い形容詞 普通形 + 名詞；な形容詞 -な + 名詞",
     "meaning": "…的+名词(用从句修饰名词)",
@@ -74,7 +74,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 87,
-    "level": "中級",
+    "level": "N3",
     "pattern": "名词+の+名词(多重含义)",
     "conn": "名詞1 + の + 名詞2",
     "meaning": "…的…(所属/同位/材料/所在等)",
@@ -90,7 +90,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 87,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜のような／〜のように＋名词(举例说明式修饰)",
     "conn": "名詞 + の + ような + 名詞；名詞 + の + ように + 動詞",
     "meaning": "像…这样的…",
@@ -108,7 +108,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 88,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜という(下定义/介绍名称)",
     "conn": "名詞1 + という + 名詞2",
     "meaning": "叫做…的…",
@@ -126,7 +126,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 88,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜といった(举例/列举同类)",
     "conn": "名詞1、名詞2 + といった + 名詞3",
     "meaning": "…之类的…",
@@ -144,7 +144,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 88,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜というのは(下定义/强调引出话题)",
     "conn": "名詞／句子 + というのは",
     "meaning": "所谓…",
@@ -162,7 +162,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 89,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜から〜にかけて",
     "conn": "名詞(时间/空间) + から + 名詞 + にかけて",
     "meaning": "从…到…(这段较长的范围内)",
@@ -180,7 +180,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 89,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜にわたって",
     "conn": "数量詞／范围词 + にわたって",
     "meaning": "涉及/横跨…整个范围",
@@ -198,7 +198,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 89,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜をもとに（して）",
     "conn": "名詞 + をもとに（して）",
     "meaning": "以…为基础/依据",
@@ -216,7 +216,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 89,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜を中心に（して）",
     "conn": "名詞 + を中心に（して）",
     "meaning": "以…为中心/重点",
@@ -232,7 +232,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 89,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜に応じて",
     "conn": "名詞 + に応じて",
     "meaning": "根据/按照…(的不同情况)",
@@ -250,7 +250,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 89,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜はもちろん〜も",
     "conn": "名詞1 + はもちろん、名詞2 + も",
     "meaning": "…自不必说,…也…",
@@ -266,7 +266,7 @@ export const PATTERNS_N3_PART2 = [
   },
   {
     "lesson": 89,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜に比べて",
     "conn": "名詞 + に比べて",
     "meaning": "与…相比",

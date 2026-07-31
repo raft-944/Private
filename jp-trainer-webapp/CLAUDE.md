@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目简介
 自建的日语句型练习应用，自用。使用者以中文为母语，已通过 JLPT N4，最终目标 N1。
-句型库现覆盖《大家的日语》初级 I+II 全 50 课 180+ 句型，正在按 N3→N2→N1 逐级扩充。
-技术栈：Vite + React 前端，Vercel Serverless 代理 AI 接口，Supabase 负责数据库与登录，
-出题判卷由 AI 完成，语音走 Web Speech API，已部署在 Vercel。
+句型库不按教材分类，直接按 JLPT 等级(N5/N4/N3/N2/N1)组织，现覆盖 N5-N3 共 300+ 句型，
+正在往 N2→N1 逐级扩充。技术栈：Vite + React 前端，Vercel Serverless 代理 AI 接口，
+Supabase 负责数据库与登录，出题判卷由 AI 完成，语音走 Web Speech API，已部署在 Vercel。
 
 ## 交流方式
 - 始终用中文回复，代码注释也用中文
@@ -23,17 +23,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 句型库数据规范
 - 采用具名对象格式，字段定义见 schema-v2.js
-- 课号规则：初级 1-50，中级 51-62（= 50 + 中级课号）
+- 不再按教材分类，level 字段直接是 JLPT 等级("N5"|"N4"|"N3"|"N2"|"N1")；
+  lesson 字段只是句型库内部的顺序分组编号，不对应任何教材课号，新增内容一律接着
+  当前最大课号往后追加
 - 修改句型库顺序前必须提醒我备份学习进度
 
 ## 出题与判卷难度
 - 难度基准要随当前学习阶段调整，不要默认停留在 N5～N4
-- 判卷时须依据句型的 explain（教材解释）和 contrasts（易混淆辨析）字段，
+- 判卷时须依据句型的 explain（语法解释）和 contrasts（易混淆辨析）字段，
   语法正确但文体、语气、使用场景不当的，也要指出
 
 ## What this is
 
-句型道場 ("Sentence Pattern Dojo") — a Japanese (JLPT N5–N4, based on 《大家的日语》Minna no Nihongo I+II) sentence-pattern trainer. Single-page React app deployed to Vercel, using Vercel Serverless Functions for AI grading and Supabase for auth + progress storage. It's a personal-use app ported out of a Claude Artifact (see README.md for the original migration story) — there is no test suite, linter config, or CI.
+句型道場 ("Sentence Pattern Dojo") — a Japanese (JLPT N5–N1) sentence-pattern trainer. The pattern library is organized purely by JLPT level, not by any specific textbook. Single-page React app deployed to Vercel, using Vercel Serverless Functions for AI grading and Supabase for auth + progress storage. It's a personal-use app ported out of a Claude Artifact (see README.md for the original migration story) — there is no test suite, linter config, or CI.
 
 ## Commands
 

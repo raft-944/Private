@@ -11,21 +11,12 @@ import { PATTERNS_N3_PART1 } from "./data/n3-part1.js";
 import { PATTERNS_N3_FORMREF } from "./data/n3-formref.js";
 import { PATTERNS_N3_PART2 } from "./data/n3-part2.js";
 import { PATTERNS_N3_PART3 } from "./data/n3-part3.js";
-import { PATTERNS_BIAORI } from "./data/biaori.js";
 import { EXT_STUDY } from "./data/extStudyNotes.js";
-
-/* 教材(book)元信息:切换教材功能靠这个字段区分两本书的句型、进度、复习队列。
- * DEFAULT_BOOK 是老存档(还没有 settings.book 字段时)默认落在的那本书。 */
-export const DEFAULT_BOOK = "minna";
-export const BOOKS = {
-  minna: { id: "minna", name: "大家的日语", full: "大家的日语 I・II" },
-  biaori: { id: "biaori", name: "标准日本语", full: "标准日本语" },
-};
 
 const SHOKYU = [
   {
     "lesson": 1,
-    "level": "初級",
+    "level": "N5",
     "pattern": "NはNです",
     "conn": "名詞1 は 名詞2 です",
     "meaning": "…是…(判断句)",
@@ -56,7 +47,7 @@ const SHOKYU = [
   },
   {
     "lesson": 1,
-    "level": "初級",
+    "level": "N5",
     "pattern": "NはNではありません",
     "conn": "名詞1 は 名詞2 ではありません",
     "meaning": "…不是…",
@@ -87,7 +78,7 @@ const SHOKYU = [
   },
   {
     "lesson": 1,
-    "level": "初級",
+    "level": "N5",
     "pattern": "NはNですか",
     "conn": "句尾 + か",
     "meaning": "…是…吗?(疑问)",
@@ -118,7 +109,7 @@ const SHOKYU = [
   },
   {
     "lesson": 1,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Nも",
     "conn": "名詞 + も",
     "meaning": "…也…",
@@ -149,7 +140,7 @@ const SHOKYU = [
   },
   {
     "lesson": 2,
-    "level": "初級",
+    "level": "N5",
     "pattern": "これ／それ／あれはNです",
     "conn": "これ・それ・あれ は 名詞です",
     "meaning": "这/那/那(远)是…",
@@ -180,7 +171,7 @@ const SHOKYU = [
   },
   {
     "lesson": 2,
-    "level": "初級",
+    "level": "N5",
     "pattern": "このN／そのN／あのN",
     "conn": "この・その・あの + 名詞",
     "meaning": "这个/那个…(修饰名词)",
@@ -211,7 +202,7 @@ const SHOKYU = [
   },
   {
     "lesson": 2,
-    "level": "初級",
+    "level": "N5",
     "pattern": "NのN(所属・内容)",
     "conn": "名詞1 の 名詞2",
     "meaning": "…的…",
@@ -242,7 +233,7 @@ const SHOKYU = [
   },
   {
     "lesson": 3,
-    "level": "初級",
+    "level": "N5",
     "pattern": "ここ／そこ／あそこはNです",
     "conn": "ここ・そこ・あそこ は 名詞です",
     "meaning": "这里/那里是…",
@@ -273,7 +264,7 @@ const SHOKYU = [
   },
   {
     "lesson": 3,
-    "level": "初級",
+    "level": "N5",
     "pattern": "NはN(場所)です",
     "conn": "名詞 は 場所 です",
     "meaning": "…在…(位置)",
@@ -304,7 +295,7 @@ const SHOKYU = [
   },
   {
     "lesson": 3,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Nはどこ／いくらですか",
     "conn": "名詞 は どこ・いくら ですか",
     "meaning": "…在哪里/多少钱?",
@@ -335,7 +326,7 @@ const SHOKYU = [
   },
   {
     "lesson": 4,
-    "level": "初級",
+    "level": "N5",
     "pattern": "今〜時〜分です",
     "conn": "今 〜時〜分 です",
     "meaning": "现在是…点…分",
@@ -366,7 +357,7 @@ const SHOKYU = [
   },
   {
     "lesson": 4,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vます／Vません／Vました",
     "conn": "動詞ます形",
     "meaning": "动词敬体(现在/否定/过去)",
@@ -397,7 +388,7 @@ const SHOKYU = [
   },
   {
     "lesson": 4,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜から〜まで",
     "conn": "名詞 から 名詞 まで",
     "meaning": "从…到…",
@@ -428,7 +419,7 @@ const SHOKYU = [
   },
   {
     "lesson": 5,
-    "level": "初級",
+    "level": "N5",
     "pattern": "N(場所)へ行きます",
     "conn": "場所 へ 行きます・来ます・帰ります",
     "meaning": "去/来/回…(移动)",
@@ -459,7 +450,7 @@ const SHOKYU = [
   },
   {
     "lesson": 5,
-    "level": "初級",
+    "level": "N5",
     "pattern": "N(乗り物)で行きます",
     "conn": "乗り物 で 行きます",
     "meaning": "乘…去(交通手段)",
@@ -490,7 +481,7 @@ const SHOKYU = [
   },
   {
     "lesson": 5,
-    "level": "初級",
+    "level": "N5",
     "pattern": "N(人)と行きます",
     "conn": "人 と 動詞",
     "meaning": "和…一起…",
@@ -517,7 +508,7 @@ const SHOKYU = [
   },
   {
     "lesson": 6,
-    "level": "初級",
+    "level": "N5",
     "pattern": "NをVます",
     "conn": "名詞 を 動詞(他動詞)",
     "meaning": "…做…(宾语)",
@@ -548,7 +539,7 @@ const SHOKYU = [
   },
   {
     "lesson": 6,
-    "level": "初級",
+    "level": "N5",
     "pattern": "N(場所)でVます",
     "conn": "場所 で 動詞",
     "meaning": "在…(地点)做…",
@@ -579,7 +570,7 @@ const SHOKYU = [
   },
   {
     "lesson": 6,
-    "level": "初級",
+    "level": "N5",
     "pattern": "一緒にVませんか",
     "conn": "動詞ませんか",
     "meaning": "要不要一起…?(邀请)",
@@ -610,7 +601,7 @@ const SHOKYU = [
   },
   {
     "lesson": 6,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vましょう",
     "conn": "動詞ましょう",
     "meaning": "…吧(提议)",
@@ -641,7 +632,7 @@ const SHOKYU = [
   },
   {
     "lesson": 7,
-    "level": "初級",
+    "level": "N5",
     "pattern": "N(道具)でVます",
     "conn": "道具・手段 で 動詞",
     "meaning": "用…(工具)做…",
@@ -672,7 +663,7 @@ const SHOKYU = [
   },
   {
     "lesson": 7,
-    "level": "初級",
+    "level": "N5",
     "pattern": "N(人)にあげます／もらいます",
     "conn": "人 に あげます・もらいます",
     "meaning": "给…/从…得到",
@@ -703,7 +694,7 @@ const SHOKYU = [
   },
   {
     "lesson": 7,
-    "level": "初級",
+    "level": "N5",
     "pattern": "もうVました",
     "conn": "もう + 動詞ました",
     "meaning": "已经…了",
@@ -734,7 +725,7 @@ const SHOKYU = [
   },
   {
     "lesson": 8,
-    "level": "初級",
+    "level": "N5",
     "pattern": "い形／な形容詞です",
     "conn": "い形容詞です・な形容詞です",
     "meaning": "形容词谓语句",
@@ -765,7 +756,7 @@ const SHOKYU = [
   },
   {
     "lesson": 8,
-    "level": "初級",
+    "level": "N5",
     "pattern": "あまり〜ません",
     "conn": "あまり + 否定形",
     "meaning": "不太…",
@@ -796,7 +787,7 @@ const SHOKYU = [
   },
   {
     "lesson": 8,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Nはどうですか／どんなNですか",
     "conn": "名詞 は どうですか・どんな 名詞",
     "meaning": "…怎么样?/什么样的…?",
@@ -827,7 +818,7 @@ const SHOKYU = [
   },
   {
     "lesson": 9,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Nが好きです／上手です",
     "conn": "名詞 が 好きです・嫌いです・上手です・下手です",
     "meaning": "喜欢/擅长…",
@@ -858,7 +849,7 @@ const SHOKYU = [
   },
   {
     "lesson": 9,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Nがわかります／あります",
     "conn": "名詞 が わかります・あります",
     "meaning": "懂…/有…",
@@ -889,7 +880,7 @@ const SHOKYU = [
   },
   {
     "lesson": 9,
-    "level": "初級",
+    "level": "N5",
     "pattern": "どうして…／〜から",
     "conn": "文 + から",
     "meaning": "为什么…/因为…",
@@ -920,7 +911,7 @@ const SHOKYU = [
   },
   {
     "lesson": 10,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Nがあります／います",
     "conn": "名詞 が あります(物)・います(人・動物)",
     "meaning": "有…(存在)",
@@ -945,7 +936,7 @@ const SHOKYU = [
   },
   {
     "lesson": 10,
-    "level": "初級",
+    "level": "N5",
     "pattern": "N(場所)にNがあります／います",
     "conn": "場所 に 名詞 が あります・います",
     "meaning": "在…有…",
@@ -970,7 +961,7 @@ const SHOKYU = [
   },
   {
     "lesson": 10,
-    "level": "初級",
+    "level": "N5",
     "pattern": "NはN(場所)にあります／います",
     "conn": "名詞 は 場所 に あります・います",
     "meaning": "…在…(所在)",
@@ -1001,7 +992,7 @@ const SHOKYU = [
   },
   {
     "lesson": 11,
-    "level": "初級",
+    "level": "N5",
     "pattern": "数量詞",
     "conn": "〜つ・〜人・〜枚・〜台・〜本・〜冊 など",
     "meaning": "数量词(个/人/张/台…)",
@@ -1032,7 +1023,7 @@ const SHOKYU = [
   },
   {
     "lesson": 11,
-    "level": "初級",
+    "level": "N5",
     "pattern": "期間に〜回",
     "conn": "期間 に 〜回 動詞",
     "meaning": "(时间段)内…次(频率)",
@@ -1063,7 +1054,7 @@ const SHOKYU = [
   },
   {
     "lesson": 11,
-    "level": "初級",
+    "level": "N5",
     "pattern": "数量詞だけ",
     "conn": "数量詞 + だけ",
     "meaning": "只…(仅仅)",
@@ -1094,7 +1085,7 @@ const SHOKYU = [
   },
   {
     "lesson": 12,
-    "level": "初級",
+    "level": "N5",
     "pattern": "N1はN2より〜",
     "conn": "名詞1 は 名詞2 より 形容詞",
     "meaning": "…比…更…",
@@ -1125,7 +1116,7 @@ const SHOKYU = [
   },
   {
     "lesson": 12,
-    "level": "初級",
+    "level": "N5",
     "pattern": "N1とN2とどちらが〜",
     "conn": "名詞1 と 名詞2 と どちらが 〜/〜のほうが〜",
     "meaning": "…和…哪个更…?",
@@ -1156,7 +1147,7 @@ const SHOKYU = [
   },
   {
     "lesson": 12,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Nの中で〜が一番〜",
     "conn": "名詞(範囲) の中で 〜が 一番 〜",
     "meaning": "在…之中…最…",
@@ -1187,7 +1178,7 @@ const SHOKYU = [
   },
   {
     "lesson": 12,
-    "level": "初級",
+    "level": "N5",
     "pattern": "形容詞の過去形",
     "conn": "い形→〜かったです／な形→〜でした",
     "meaning": "形容词过去式",
@@ -1218,7 +1209,7 @@ const SHOKYU = [
   },
   {
     "lesson": 13,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Nがほしいです",
     "conn": "名詞 が ほしいです",
     "meaning": "想要…(东西)",
@@ -1249,7 +1240,7 @@ const SHOKYU = [
   },
   {
     "lesson": 13,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vたいです",
     "conn": "動詞ます形去ます + たいです",
     "meaning": "想做…",
@@ -1280,7 +1271,7 @@ const SHOKYU = [
   },
   {
     "lesson": 13,
-    "level": "初級",
+    "level": "N5",
     "pattern": "N(場所)へVに行きます",
     "conn": "場所 へ 動詞ます形去ます/名詞 に 行きます",
     "meaning": "去…做…(目的)",
@@ -1311,7 +1302,7 @@ const SHOKYU = [
   },
   {
     "lesson": 14,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vてください",
     "conn": "動詞て形 + ください",
     "meaning": "请做…",
@@ -1342,7 +1333,7 @@ const SHOKYU = [
   },
   {
     "lesson": 14,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vています(進行)",
     "conn": "動詞て形 + います",
     "meaning": "正在做…",
@@ -1367,7 +1358,7 @@ const SHOKYU = [
   },
   {
     "lesson": 14,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vましょうか",
     "conn": "動詞ましょうか",
     "meaning": "我来…好吗?(主动帮忙)",
@@ -1398,7 +1389,7 @@ const SHOKYU = [
   },
   {
     "lesson": 15,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vてもいいです",
     "conn": "動詞て形 + もいいです",
     "meaning": "可以做…(许可)",
@@ -1429,7 +1420,7 @@ const SHOKYU = [
   },
   {
     "lesson": 15,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vてはいけません",
     "conn": "動詞て形 + はいけません",
     "meaning": "不可以做…(禁止)",
@@ -1460,7 +1451,7 @@ const SHOKYU = [
   },
   {
     "lesson": 15,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vています(状態・職業)",
     "conn": "動詞て形 + います",
     "meaning": "…着(状态)/从事…",
@@ -1485,7 +1476,7 @@ const SHOKYU = [
   },
   {
     "lesson": 16,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vて、Vて、〜(順序)",
     "conn": "動詞て形 でつなぐ",
     "meaning": "做…,然后做…(先后)",
@@ -1516,7 +1507,7 @@ const SHOKYU = [
   },
   {
     "lesson": 16,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜くて／〜で(並列)",
     "conn": "い形→くて/な形・名詞→で",
     "meaning": "又…又…(并列描述)",
@@ -1547,7 +1538,7 @@ const SHOKYU = [
   },
   {
     "lesson": 16,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vてから",
     "conn": "動詞て形 + から",
     "meaning": "做完…之后再…",
@@ -1578,7 +1569,7 @@ const SHOKYU = [
   },
   {
     "lesson": 16,
-    "level": "初級",
+    "level": "N5",
     "pattern": "N1はN2が〜(属性)",
     "conn": "名詞1 は 名詞2 が 形容詞",
     "meaning": "…的…很…(整体+部分)",
@@ -1609,7 +1600,7 @@ const SHOKYU = [
   },
   {
     "lesson": 17,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vないでください",
     "conn": "動詞ない形 + でください",
     "meaning": "请不要做…",
@@ -1640,7 +1631,7 @@ const SHOKYU = [
   },
   {
     "lesson": 17,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vなければなりません",
     "conn": "動詞ない形去ない + なければなりません",
     "meaning": "必须做…",
@@ -1671,7 +1662,7 @@ const SHOKYU = [
   },
   {
     "lesson": 17,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vなくてもいいです",
     "conn": "動詞ない形去ない + なくてもいいです",
     "meaning": "不做…也可以",
@@ -1702,7 +1693,7 @@ const SHOKYU = [
   },
   {
     "lesson": 18,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vることができます",
     "conn": "動詞辞書形 + ことができます/名詞 が できます",
     "meaning": "会做…/能做…",
@@ -1733,7 +1724,7 @@ const SHOKYU = [
   },
   {
     "lesson": 18,
-    "level": "初級",
+    "level": "N5",
     "pattern": "趣味はVることです",
     "conn": "趣味は 動詞辞書形 + ことです",
     "meaning": "爱好是做…",
@@ -1764,7 +1755,7 @@ const SHOKYU = [
   },
   {
     "lesson": 18,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vる／Nの前に",
     "conn": "動詞辞書形・名詞の + 前に",
     "meaning": "做…之前",
@@ -1795,7 +1786,7 @@ const SHOKYU = [
   },
   {
     "lesson": 19,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vたことがあります",
     "conn": "動詞た形 + ことがあります",
     "meaning": "曾经做过…(经历)",
@@ -1820,7 +1811,7 @@ const SHOKYU = [
   },
   {
     "lesson": 19,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vたり、Vたりします",
     "conn": "動詞た形 + り、動詞た形 + りします",
     "meaning": "又做…又做…(列举)",
@@ -1851,7 +1842,7 @@ const SHOKYU = [
   },
   {
     "lesson": 19,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜くなります／〜になります",
     "conn": "い形→く/な形・名詞→に + なります",
     "meaning": "变得…(变化)",
@@ -1882,7 +1873,7 @@ const SHOKYU = [
   },
   {
     "lesson": 20,
-    "level": "初級",
+    "level": "N5",
     "pattern": "普通形(简体)",
     "conn": "です・ます → 普通形",
     "meaning": "简体句(朋友间口语)",
@@ -1913,7 +1904,7 @@ const SHOKYU = [
   },
   {
     "lesson": 21,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜と思います",
     "conn": "普通形 + と思います",
     "meaning": "我觉得/我认为…",
@@ -1944,7 +1935,7 @@ const SHOKYU = [
   },
   {
     "lesson": 21,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜と言いました",
     "conn": "「引用」/普通形 + と言いました",
     "meaning": "(某人)说了…",
@@ -1975,7 +1966,7 @@ const SHOKYU = [
   },
   {
     "lesson": 21,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vるでしょう?",
     "conn": "普通形 + でしょう?(升调)",
     "meaning": "…对吧?(确认)",
@@ -2006,7 +1997,7 @@ const SHOKYU = [
   },
   {
     "lesson": 22,
-    "level": "初級",
+    "level": "N5",
     "pattern": "名詞修飾節",
     "conn": "普通形 + 名詞",
     "meaning": "…的…(定语从句)",
@@ -2037,7 +2028,7 @@ const SHOKYU = [
   },
   {
     "lesson": 23,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜とき",
     "conn": "普通形・名詞の + とき",
     "meaning": "…的时候",
@@ -2068,7 +2059,7 @@ const SHOKYU = [
   },
   {
     "lesson": 23,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vると、〜",
     "conn": "動詞辞書形 + と",
     "meaning": "一…就…(自然结果)",
@@ -2099,7 +2090,7 @@ const SHOKYU = [
   },
   {
     "lesson": 24,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Nをくれます",
     "conn": "人 は わたしに 名詞 を くれます",
     "meaning": "(别人)给我…",
@@ -2130,7 +2121,7 @@ const SHOKYU = [
   },
   {
     "lesson": 24,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vてあげます／もらいます／くれます",
     "conn": "動詞て形 + あげます・もらいます・くれます",
     "meaning": "为别人做/请别人做/别人为我做",
@@ -2161,7 +2152,7 @@ const SHOKYU = [
   },
   {
     "lesson": 25,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜たら(条件)",
     "conn": "動詞・形容詞た形 + ら",
     "meaning": "如果…的话/…之后",
@@ -2192,7 +2183,7 @@ const SHOKYU = [
   },
   {
     "lesson": 25,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜ても(逆接)",
     "conn": "動詞・形容詞て形 + も",
     "meaning": "即使…也…",
@@ -2223,7 +2214,7 @@ const SHOKYU = [
   },
   {
     "lesson": 26,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜んです",
     "conn": "普通形 + んです",
     "meaning": "(说明原因/关切询问)",
@@ -2254,7 +2245,7 @@ const SHOKYU = [
   },
   {
     "lesson": 26,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vていただけませんか",
     "conn": "動詞て形 + いただけませんか",
     "meaning": "能否请您…?(郑重请求)",
@@ -2285,7 +2276,7 @@ const SHOKYU = [
   },
   {
     "lesson": 26,
-    "level": "初級",
+    "level": "N4",
     "pattern": "疑問詞+Vたらいいですか",
     "conn": "疑問詞 + 動詞た形 + らいいですか",
     "meaning": "该…才好呢?(请教)",
@@ -2316,7 +2307,7 @@ const SHOKYU = [
   },
   {
     "lesson": 27,
-    "level": "初級",
+    "level": "N4",
     "pattern": "可能動詞",
     "conn": "一段:見られる/五段:話せる/する→できる",
     "meaning": "会…/能…(可能形)",
@@ -2347,7 +2338,7 @@ const SHOKYU = [
   },
   {
     "lesson": 27,
-    "level": "初級",
+    "level": "N4",
     "pattern": "見えます／聞こえます",
     "conn": "名詞 が 見えます・聞こえます",
     "meaning": "看得见/听得见(自然感知)",
@@ -2378,7 +2369,7 @@ const SHOKYU = [
   },
   {
     "lesson": 27,
-    "level": "初級",
+    "level": "N4",
     "pattern": "しか〜ません",
     "conn": "名詞 + しか + 否定形",
     "meaning": "只…(带遗憾语气)",
@@ -2409,7 +2400,7 @@ const SHOKYU = [
   },
   {
     "lesson": 28,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vながら",
     "conn": "動詞ます形去ます + ながら",
     "meaning": "一边…一边…",
@@ -2440,7 +2431,7 @@ const SHOKYU = [
   },
   {
     "lesson": 28,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vています(習慣)",
     "conn": "動詞て形 + います",
     "meaning": "(反复的习惯)",
@@ -2465,7 +2456,7 @@ const SHOKYU = [
   },
   {
     "lesson": 28,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜し、〜し",
     "conn": "普通形 + し、普通形 + し",
     "meaning": "又…又…(列举理由)",
@@ -2496,7 +2487,7 @@ const SHOKYU = [
   },
   {
     "lesson": 29,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vています(結果の状態)",
     "conn": "動詞て形 + います",
     "meaning": "…着(结果状态)",
@@ -2521,7 +2512,7 @@ const SHOKYU = [
   },
   {
     "lesson": 29,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vてしまいました",
     "conn": "動詞て形 + しまいました",
     "meaning": "(不小心)…了/彻底…了",
@@ -2546,7 +2537,7 @@ const SHOKYU = [
   },
   {
     "lesson": 30,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vてあります",
     "conn": "動詞て形 + あります",
     "meaning": "(有人特意)…着(准备好的状态)",
@@ -2577,7 +2568,7 @@ const SHOKYU = [
   },
   {
     "lesson": 30,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vておきます",
     "conn": "動詞て形 + おきます",
     "meaning": "事先做好…(准备)",
@@ -2608,7 +2599,7 @@ const SHOKYU = [
   },
   {
     "lesson": 31,
-    "level": "初級",
+    "level": "N4",
     "pattern": "意向形(Vよう)",
     "conn": "五段:行こう/一段:食べよう/する→しよう",
     "meaning": "…吧(意志,简体)",
@@ -2639,7 +2630,7 @@ const SHOKYU = [
   },
   {
     "lesson": 31,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vようと思っています",
     "conn": "意向形 + と思っています",
     "meaning": "打算…(内心的打算)",
@@ -2670,7 +2661,7 @@ const SHOKYU = [
   },
   {
     "lesson": 31,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vるつもりです",
     "conn": "動詞辞書形・ない形 + つもりです",
     "meaning": "打算…/不打算…",
@@ -2701,7 +2692,7 @@ const SHOKYU = [
   },
   {
     "lesson": 31,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vる予定です",
     "conn": "動詞辞書形・名詞の + 予定です",
     "meaning": "预定…(计划安排)",
@@ -2732,7 +2723,7 @@ const SHOKYU = [
   },
   {
     "lesson": 32,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vたほうがいいです",
     "conn": "動詞た形・ない形 + ほうがいいです",
     "meaning": "最好…/最好不要…(建议)",
@@ -2763,7 +2754,7 @@ const SHOKYU = [
   },
   {
     "lesson": 32,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜でしょう(推測)",
     "conn": "普通形 + でしょう",
     "meaning": "大概…吧(推测)",
@@ -2794,7 +2785,7 @@ const SHOKYU = [
   },
   {
     "lesson": 32,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜かもしれません",
     "conn": "普通形 + かもしれません",
     "meaning": "也许…(可能性低)",
@@ -2825,7 +2816,7 @@ const SHOKYU = [
   },
   {
     "lesson": 33,
-    "level": "初級",
+    "level": "N4",
     "pattern": "命令形／禁止形",
     "conn": "五段:行け/一段:食べろ/+ な(禁止)",
     "meaning": "命令/禁止(强硬)",
@@ -2856,7 +2847,7 @@ const SHOKYU = [
   },
   {
     "lesson": 33,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜という意味です",
     "conn": "「〜」は 〜という意味です",
     "meaning": "是…的意思",
@@ -2887,7 +2878,7 @@ const SHOKYU = [
   },
   {
     "lesson": 33,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜と言っていました",
     "conn": "人は 普通形 + と言っていました",
     "meaning": "(某人)说过…(转达)",
@@ -2918,7 +2909,7 @@ const SHOKYU = [
   },
   {
     "lesson": 34,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vた／Nのとおりに",
     "conn": "動詞た形・名詞の + とおりに",
     "meaning": "按照…那样做",
@@ -2949,7 +2940,7 @@ const SHOKYU = [
   },
   {
     "lesson": 34,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vたあとで",
     "conn": "動詞た形・名詞の + あとで",
     "meaning": "…之后",
@@ -2980,7 +2971,7 @@ const SHOKYU = [
   },
   {
     "lesson": 34,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vて／Vないで(付帯)",
     "conn": "動詞て形/ない形 + で",
     "meaning": "(不)…的状态下做…",
@@ -3011,7 +3002,7 @@ const SHOKYU = [
   },
   {
     "lesson": 35,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜ば(条件形)",
     "conn": "五段:押せば/一段:見れば/い形:安ければ",
     "meaning": "如果…就…(假定条件)",
@@ -3042,7 +3033,7 @@ const SHOKYU = [
   },
   {
     "lesson": 35,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜なら",
     "conn": "名詞・普通形 + なら",
     "meaning": "要说…的话(就对方话题建议)",
@@ -3073,7 +3064,7 @@ const SHOKYU = [
   },
   {
     "lesson": 36,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜ように(目的)",
     "conn": "動詞辞書形・ない形 + ように",
     "meaning": "为了能…(目的)",
@@ -3104,7 +3095,7 @@ const SHOKYU = [
   },
   {
     "lesson": 36,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vようになりました",
     "conn": "動詞辞書形(可能形) + ようになりました",
     "meaning": "变得能…了(能力变化)",
@@ -3135,7 +3126,7 @@ const SHOKYU = [
   },
   {
     "lesson": 36,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vようにしています",
     "conn": "動詞辞書形・ない形 + ようにしています",
     "meaning": "坚持做…(努力保持)",
@@ -3166,7 +3157,7 @@ const SHOKYU = [
   },
   {
     "lesson": 37,
-    "level": "初級",
+    "level": "N4",
     "pattern": "受身(被动)",
     "conn": "五段:言われる/一段:見られる/する→される",
     "meaning": "被…(被动)",
@@ -3197,7 +3188,7 @@ const SHOKYU = [
   },
   {
     "lesson": 38,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vるのは〜です",
     "conn": "動詞辞書形 + のは 形容詞です",
     "meaning": "做…(这件事)很…",
@@ -3228,7 +3219,7 @@ const SHOKYU = [
   },
   {
     "lesson": 38,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vるのが〜です",
     "conn": "動詞辞書形 + のが 好き・上手 など",
     "meaning": "喜欢/擅长做…",
@@ -3259,7 +3250,7 @@ const SHOKYU = [
   },
   {
     "lesson": 38,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vるのを忘れました",
     "conn": "動詞辞書形 + のを忘れました",
     "meaning": "忘了做…",
@@ -3290,7 +3281,7 @@ const SHOKYU = [
   },
   {
     "lesson": 38,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜のは〜です(強調)",
     "conn": "強調したい部分を後ろに",
     "meaning": "…的是…(强调句)",
@@ -3321,7 +3312,7 @@ const SHOKYU = [
   },
   {
     "lesson": 39,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜て／〜くて(原因)",
     "conn": "動詞て形・い形くて・な形で",
     "meaning": "因为…(自然感情/状态的原因)",
@@ -3352,7 +3343,7 @@ const SHOKYU = [
   },
   {
     "lesson": 39,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜ので",
     "conn": "普通形(な形・名詞は+な) + ので",
     "meaning": "因为…(委婉客观理由)",
@@ -3383,7 +3374,7 @@ const SHOKYU = [
   },
   {
     "lesson": 40,
-    "level": "初級",
+    "level": "N4",
     "pattern": "疑問詞〜か",
     "conn": "疑問詞 + 普通形 + か",
     "meaning": "…呢(嵌入疑问)",
@@ -3414,7 +3405,7 @@ const SHOKYU = [
   },
   {
     "lesson": 40,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜かどうか",
     "conn": "普通形 + かどうか",
     "meaning": "是否…",
@@ -3445,7 +3436,7 @@ const SHOKYU = [
   },
   {
     "lesson": 40,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vてみます",
     "conn": "動詞て形 + みます",
     "meaning": "试着做…",
@@ -3476,7 +3467,7 @@ const SHOKYU = [
   },
   {
     "lesson": 41,
-    "level": "初級",
+    "level": "N4",
     "pattern": "いただきます／くださいます",
     "conn": "目上の人から:いただく・くださる",
     "meaning": "(敬语)得到/给我",
@@ -3507,7 +3498,7 @@ const SHOKYU = [
   },
   {
     "lesson": 41,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vていただきました／てくださいました",
     "conn": "動詞て形 + いただきます・くださいます",
     "meaning": "(敬语)请人做/别人为我做",
@@ -3538,7 +3529,7 @@ const SHOKYU = [
   },
   {
     "lesson": 42,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜ために(目的)",
     "conn": "動詞辞書形・名詞の + ために",
     "meaning": "为了…(意志性目的)",
@@ -3569,7 +3560,7 @@ const SHOKYU = [
   },
   {
     "lesson": 42,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜のに(用途)",
     "conn": "動詞辞書形 + のに 使います・要ります など",
     "meaning": "用于…(用途/评价)",
@@ -3600,7 +3591,7 @@ const SHOKYU = [
   },
   {
     "lesson": 43,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜そうです(様態)",
     "conn": "動詞ます形去ます・形容詞語幹 + そうです",
     "meaning": "眼看要…/看起来…",
@@ -3631,7 +3622,7 @@ const SHOKYU = [
   },
   {
     "lesson": 43,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vてきます",
     "conn": "動詞て形 + きます",
     "meaning": "去…(马上)回来",
@@ -3662,7 +3653,7 @@ const SHOKYU = [
   },
   {
     "lesson": 44,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜すぎます",
     "conn": "動詞ます形去ます・形容詞語幹 + すぎます",
     "meaning": "过于…/…过头",
@@ -3693,7 +3684,7 @@ const SHOKYU = [
   },
   {
     "lesson": 44,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vやすい／Vにくい",
     "conn": "動詞ます形去ます + やすい・にくい",
     "meaning": "容易…/难以…",
@@ -3724,7 +3715,7 @@ const SHOKYU = [
   },
   {
     "lesson": 44,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜く／〜にします",
     "conn": "い形→く/な形・名詞→に + します",
     "meaning": "把…弄成…(人为改变)",
@@ -3755,7 +3746,7 @@ const SHOKYU = [
   },
   {
     "lesson": 45,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜場合は",
     "conn": "動詞・形容詞普通形・名詞の + 場合は",
     "meaning": "…的情况下(万一)",
@@ -3786,7 +3777,7 @@ const SHOKYU = [
   },
   {
     "lesson": 45,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜のに(逆接)",
     "conn": "普通形(な形・名詞+な) + のに",
     "meaning": "明明…却…(意外/不满)",
@@ -3817,7 +3808,7 @@ const SHOKYU = [
   },
   {
     "lesson": 46,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜ところです",
     "conn": "辞書形+ところ/ている+ところ/た形+ところ",
     "meaning": "正要…/正在…/刚刚…",
@@ -3848,7 +3839,7 @@ const SHOKYU = [
   },
   {
     "lesson": 46,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vたばかりです",
     "conn": "動詞た形 + ばかりです",
     "meaning": "刚…(说话人觉得时间短)",
@@ -3879,7 +3870,7 @@ const SHOKYU = [
   },
   {
     "lesson": 46,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜はずです",
     "conn": "普通形(な形な・名詞の) + はずです",
     "meaning": "按理说应该…(有依据推断)",
@@ -3910,7 +3901,7 @@ const SHOKYU = [
   },
   {
     "lesson": 47,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜そうです(伝聞)",
     "conn": "普通形 + そうです",
     "meaning": "听说…(传闻)",
@@ -3941,7 +3932,7 @@ const SHOKYU = [
   },
   {
     "lesson": 47,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜ようです",
     "conn": "普通形(な形な・名詞の) + ようです",
     "meaning": "好像…(根据观察推测)",
@@ -3972,7 +3963,7 @@ const SHOKYU = [
   },
   {
     "lesson": 48,
-    "level": "初級",
+    "level": "N4",
     "pattern": "使役(させます)",
     "conn": "五段:行かせる/一段:食べさせる/する→させる",
     "meaning": "让/叫(某人)做…",
@@ -4003,7 +3994,7 @@ const SHOKYU = [
   },
   {
     "lesson": 48,
-    "level": "初級",
+    "level": "N4",
     "pattern": "使役て形+いただけませんか",
     "conn": "使役て形 + いただけませんか",
     "meaning": "能否允许我…?(请求许可)",
@@ -4034,7 +4025,7 @@ const SHOKYU = [
   },
   {
     "lesson": 49,
-    "level": "初級",
+    "level": "N4",
     "pattern": "尊敬語",
     "conn": "れます・られます/お〜になります/特殊形",
     "meaning": "尊敬语(抬高对方)",
@@ -4065,7 +4056,7 @@ const SHOKYU = [
   },
   {
     "lesson": 49,
-    "level": "初級",
+    "level": "N4",
     "pattern": "お〜ください",
     "conn": "お + 動詞ます形去ます + ください",
     "meaning": "请您…(郑重指示)",
@@ -4096,7 +4087,7 @@ const SHOKYU = [
   },
   {
     "lesson": 50,
-    "level": "初級",
+    "level": "N4",
     "pattern": "謙譲語",
     "conn": "お〜します・いたします/特殊形(伺う・申す など)",
     "meaning": "谦让语(降低自己)",
@@ -4127,7 +4118,7 @@ const SHOKYU = [
   },
   {
     "lesson": 3,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Nをください",
     "conn": "名詞 を ください",
     "meaning": "请给我…(购物·点单)",
@@ -4158,7 +4149,7 @@ const SHOKYU = [
   },
   {
     "lesson": 4,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜曜日",
     "conn": "日・月・火・水・木・金・土曜日",
     "meaning": "星期…",
@@ -4189,7 +4180,7 @@ const SHOKYU = [
   },
   {
     "lesson": 5,
-    "level": "初級",
+    "level": "N5",
     "pattern": "いつ〜ますか",
     "conn": "いつ + 動詞",
     "meaning": "什么时候…?",
@@ -4220,7 +4211,7 @@ const SHOKYU = [
   },
   {
     "lesson": 5,
-    "level": "初級",
+    "level": "N5",
     "pattern": "どこ[へ]も〜ません",
     "conn": "疑問詞 + も + 否定形",
     "meaning": "哪儿也不…/谁也不…",
@@ -4251,7 +4242,7 @@ const SHOKYU = [
   },
   {
     "lesson": 6,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Nをお願いします",
     "conn": "名詞 を お願いします",
     "meaning": "麻烦给我…(比ください更礼貌)",
@@ -4278,7 +4269,7 @@ const SHOKYU = [
   },
   {
     "lesson": 8,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜が、〜(前置き)",
     "conn": "文 + が、文",
     "meaning": "…,(不过/请问)…(委婉开场)",
@@ -4309,7 +4300,7 @@ const SHOKYU = [
   },
   {
     "lesson": 8,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜ね／〜よ(終助詞)",
     "conn": "文末 + ね・よ",
     "meaning": "…呢(共鸣)/…哦(告知)",
@@ -4336,7 +4327,7 @@ const SHOKYU = [
   },
   {
     "lesson": 9,
-    "level": "初級",
+    "level": "N5",
     "pattern": "よく／あまり／全然",
     "conn": "頻度副詞 + 動詞(全然・あまりは否定)",
     "meaning": "经常/不太/完全不…",
@@ -4367,7 +4358,7 @@ const SHOKYU = [
   },
   {
     "lesson": 10,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Nの上／下／中／隣",
     "conn": "名詞 の 上・下・中・前・後ろ・隣・近く",
     "meaning": "…的上面/里面/旁边(方位)",
@@ -4398,7 +4389,7 @@ const SHOKYU = [
   },
   {
     "lesson": 10,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜や〜(など)",
     "conn": "名詞 や 名詞(など)",
     "meaning": "…和…等(不完全列举)",
@@ -4425,7 +4416,7 @@ const SHOKYU = [
   },
   {
     "lesson": 11,
-    "level": "初級",
+    "level": "N5",
     "pattern": "どのくらい",
     "conn": "どのくらい かかりますか など",
     "meaning": "多长时间/多少(询问程度)",
@@ -4456,7 +4447,7 @@ const SHOKYU = [
   },
   {
     "lesson": 11,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜ずつ",
     "conn": "数量詞 + ずつ",
     "meaning": "每…各…",
@@ -4487,7 +4478,7 @@ const SHOKYU = [
   },
   {
     "lesson": 12,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜と同じ／〜と違います",
     "conn": "名詞 と 同じです・違います",
     "meaning": "和…一样/不一样",
@@ -4514,7 +4505,7 @@ const SHOKYU = [
   },
   {
     "lesson": 13,
-    "level": "初級",
+    "level": "N5",
     "pattern": "何か／どこか",
     "conn": "何か・どこか + 動詞",
     "meaning": "(吃)点什么/(去)个什么地方",
@@ -4545,7 +4536,7 @@ const SHOKYU = [
   },
   {
     "lesson": 13,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vたがっています",
     "conn": "動詞ます形去ます + たがっています",
     "meaning": "(第三人称)想…",
@@ -4576,7 +4567,7 @@ const SHOKYU = [
   },
   {
     "lesson": 14,
-    "level": "初級",
+    "level": "N5",
     "pattern": "V方(かた)",
     "conn": "動詞ます形去ます + 方",
     "meaning": "…的方法(读法/用法/做法)",
@@ -4607,7 +4598,7 @@ const SHOKYU = [
   },
   {
     "lesson": 15,
-    "level": "初級",
+    "level": "N5",
     "pattern": "まだVていません",
     "conn": "まだ + 動詞て形 + いません",
     "meaning": "还没…(与もう〜ました相对)",
@@ -4638,7 +4629,7 @@ const SHOKYU = [
   },
   {
     "lesson": 16,
-    "level": "初級",
+    "level": "N5",
     "pattern": "どうやって",
     "conn": "どうやって + 動詞",
     "meaning": "怎么(做)?(询问方式)",
@@ -4669,7 +4660,7 @@ const SHOKYU = [
   },
   {
     "lesson": 17,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜なくちゃ／〜なきゃ(口語)",
     "conn": "〜なければならない の口語縮約形",
     "meaning": "得…了(口语)",
@@ -4700,7 +4691,7 @@ const SHOKYU = [
   },
   {
     "lesson": 18,
-    "level": "初級",
+    "level": "N5",
     "pattern": "Vることがあります",
     "conn": "動詞辞書形・ない形 + ことがあります",
     "meaning": "有时会…",
@@ -4731,7 +4722,7 @@ const SHOKYU = [
   },
   {
     "lesson": 20,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜かな(口語)",
     "conn": "普通形 + かな",
     "meaning": "…吗/…呢(自言自语的疑问)",
@@ -4762,7 +4753,7 @@ const SHOKYU = [
   },
   {
     "lesson": 21,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜でしょうか",
     "conn": "文 + でしょうか",
     "meaning": "…吗?(比ですか更委婉)",
@@ -4793,7 +4784,7 @@ const SHOKYU = [
   },
   {
     "lesson": 22,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜というN",
     "conn": "名詞 + という + 名詞",
     "meaning": "叫做…的…",
@@ -4824,7 +4815,7 @@ const SHOKYU = [
   },
   {
     "lesson": 24,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜てくれてありがとう",
     "conn": "動詞て形 + くれて、ありがとう",
     "meaning": "谢谢你为我…",
@@ -4855,7 +4846,7 @@ const SHOKYU = [
   },
   {
     "lesson": 25,
-    "level": "初級",
+    "level": "N5",
     "pattern": "もし〜たら",
     "conn": "もし + 〜たら",
     "meaning": "如果…(强调假设)",
@@ -4886,7 +4877,7 @@ const SHOKYU = [
   },
   {
     "lesson": 25,
-    "level": "初級",
+    "level": "N5",
     "pattern": "〜たら(発見)",
     "conn": "〜たら、〜た(過去)",
     "meaning": "一…发现…(意外发现)",
@@ -4917,7 +4908,7 @@ const SHOKYU = [
   },
   {
     "lesson": 26,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜んですが、〜",
     "conn": "〜んですが + 依頼・相談",
     "meaning": "我…,(能不能…)(委婉引出请求)",
@@ -4948,7 +4939,7 @@ const SHOKYU = [
   },
   {
     "lesson": 26,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜たらどうですか",
     "conn": "動詞た形 + らどうですか",
     "meaning": "…怎么样?(提建议)",
@@ -4979,7 +4970,7 @@ const SHOKYU = [
   },
   {
     "lesson": 27,
-    "level": "初級",
+    "level": "N4",
     "pattern": "疑問詞+でも",
     "conn": "何でも・いつでも・どこでも・だれでも",
     "meaning": "无论什么/随时/哪里都…",
@@ -5010,7 +5001,7 @@ const SHOKYU = [
   },
   {
     "lesson": 28,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜とか、〜とか",
     "conn": "名詞・動詞 + とか",
     "meaning": "…啦…啦(口语列举)",
@@ -5041,7 +5032,7 @@ const SHOKYU = [
   },
   {
     "lesson": 29,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜ちゃった(口語)",
     "conn": "〜てしまった の口語縮約形",
     "meaning": "(口语)不小心…了",
@@ -5072,7 +5063,7 @@ const SHOKYU = [
   },
   {
     "lesson": 30,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜まま",
     "conn": "動詞た形・名詞の + まま",
     "meaning": "保持…的状态(没变)",
@@ -5103,7 +5094,7 @@ const SHOKYU = [
   },
   {
     "lesson": 31,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vることにしました",
     "conn": "動詞辞書形・ない形 + ことにしました",
     "meaning": "决定…(自己做的决定)",
@@ -5134,7 +5125,7 @@ const SHOKYU = [
   },
   {
     "lesson": 31,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vることになりました",
     "conn": "動詞辞書形・ない形 + ことになりました",
     "meaning": "(客观)定下来要…",
@@ -5165,7 +5156,7 @@ const SHOKYU = [
   },
   {
     "lesson": 32,
-    "level": "初級",
+    "level": "N4",
     "pattern": "きっと／たぶん／もしかしたら",
     "conn": "副詞 +(でしょう・かもしれません)",
     "meaning": "一定/大概/说不定(推测副词呼应)",
@@ -5196,7 +5187,7 @@ const SHOKYU = [
   },
   {
     "lesson": 33,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vなさい",
     "conn": "動詞ます形去ます + なさい",
     "meaning": "(父母对孩子等)快…!",
@@ -5227,7 +5218,7 @@ const SHOKYU = [
   },
   {
     "lesson": 35,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜ばよかった",
     "conn": "動詞ば形 + よかった",
     "meaning": "要是…就好了(后悔)",
@@ -5258,7 +5249,7 @@ const SHOKYU = [
   },
   {
     "lesson": 37,
-    "level": "初級",
+    "level": "N4",
     "pattern": "迷惑の受身",
     "conn": "わたしは 人に 〜られました",
     "meaning": "被…(受害·添麻烦的被动)",
@@ -5289,7 +5280,7 @@ const SHOKYU = [
   },
   {
     "lesson": 39,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜て、すみません",
     "conn": "動詞て形 + すみません",
     "meaning": "因为…,对不起",
@@ -5320,7 +5311,7 @@ const SHOKYU = [
   },
   {
     "lesson": 40,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vてみたいです",
     "conn": "動詞て形 + みたいです",
     "meaning": "想尝试一次…",
@@ -5351,7 +5342,7 @@ const SHOKYU = [
   },
   {
     "lesson": 43,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Vていきます",
     "conn": "動詞て形 + いきます",
     "meaning": "…了再去/…着去(与てきます相对)",
@@ -5382,7 +5373,7 @@ const SHOKYU = [
   },
   {
     "lesson": 44,
-    "level": "初級",
+    "level": "N4",
     "pattern": "Nにします(選択)",
     "conn": "名詞 + にします",
     "meaning": "决定要…(点单·选择)",
@@ -5413,7 +5404,7 @@ const SHOKYU = [
   },
   {
     "lesson": 45,
-    "level": "初級",
+    "level": "N4",
     "pattern": "いくら〜ても",
     "conn": "いくら + 〜ても",
     "meaning": "无论怎么…都…",
@@ -5444,7 +5435,7 @@ const SHOKYU = [
   },
   {
     "lesson": 46,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜はずがありません",
     "conn": "普通形 + はずがありません",
     "meaning": "不可能…(有依据的否定)",
@@ -5475,7 +5466,7 @@ const SHOKYU = [
   },
   {
     "lesson": 47,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜らしいです",
     "conn": "普通形 + らしいです",
     "meaning": "好像/据说…(听来的推断)",
@@ -5506,7 +5497,7 @@ const SHOKYU = [
   },
   {
     "lesson": 48,
-    "level": "初級",
+    "level": "N4",
     "pattern": "使役受身(させられる)",
     "conn": "五段:飲まされる/一段:食べさせられる",
     "meaning": "被迫做…",
@@ -5537,7 +5528,7 @@ const SHOKYU = [
   },
   {
     "lesson": 49,
-    "level": "初級",
+    "level": "N4",
     "pattern": "お／ご+N(美化語)",
     "conn": "お + 和語/ご + 漢語",
     "meaning": "(礼貌接头词)您的…",
@@ -5568,7 +5559,7 @@ const SHOKYU = [
   },
   {
     "lesson": 50,
-    "level": "初級",
+    "level": "N4",
     "pattern": "〜ております(謙譲)",
     "conn": "動詞て形 + おります",
     "meaning": "(谦让)正在…(商务·电话用语)",
@@ -5600,14 +5591,13 @@ const SHOKYU = [
 ];
 
 export const PATTERNS = [
-  ...SHOKYU.map((p) => ({ ...p, book: "minna" })),
-  ...PATTERNS_CHUKYU.map((p) => ({ ...p, ext: false, book: "minna" })),
-  ...PATTERNS_CHUKYU_03.map((p) => ({ ...p, ext: false, book: "minna" })),
-  ...PATTERNS_N3_PART1.map((p) => ({ ...p, book: "minna" })),
-  ...PATTERNS_N3_FORMREF.map((p) => ({ ...p, book: "minna" })),
-  ...PATTERNS_N3_PART2.map((p) => ({ ...p, book: "minna" })),
-  ...PATTERNS_N3_PART3.map((p) => ({ ...p, book: "minna" })),
-  ...PATTERNS_BIAORI.map((p) => ({ ...p, book: "biaori" })),
+  ...SHOKYU,
+  ...PATTERNS_CHUKYU.map((p) => ({ ...p, ext: false })),
+  ...PATTERNS_CHUKYU_03.map((p) => ({ ...p, ext: false })),
+  ...PATTERNS_N3_PART1,
+  ...PATTERNS_N3_FORMREF,
+  ...PATTERNS_N3_PART2,
+  ...PATTERNS_N3_PART3,
 ].map((p, i) => ({
   ...p,
   id: i,
@@ -5616,12 +5606,5 @@ export const PATTERNS = [
   ...(EXT_STUDY[p.pattern] ? { study: EXT_STUDY[p.pattern] } : {}),
 }));
 
-/* 学习与展示顺序:按教材+课次排序;id 保持稳定,已保存的进度不受影响。
- * 两本教材课号各自从头编,所以排序必须先分教材再按课次,否则两本书会按课号交织在一起。 */
-export const ORDERED = [...PATTERNS].sort((a, b) => a.book.localeCompare(b.book) || a.lesson - b.lesson || a.id - b.id);
-
-/* 按教材过滤后再按课次排序——首页"发新句型"和句型库分组显示都要用这个,
- * 而不是全局的 ORDERED,否则两本教材的课号会混在一起。 */
-export function orderedForBook(book) {
-  return PATTERNS.filter((p) => p.book === book).sort((a, b) => a.lesson - b.lesson || a.id - b.id);
-}
+/* 学习与展示顺序:按课次排序;id 保持稳定,已保存的进度不受影响。 */
+export const ORDERED = [...PATTERNS].sort((a, b) => a.lesson - b.lesson || a.id - b.id);

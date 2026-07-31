@@ -6,7 +6,7 @@
 export const PATTERNS_CHUKYU = [
   {
     "lesson": 51,
-    "level": "中級",
+    "level": "N3",
     "style": "敬体",
     "pattern": "〜てもらえませんか・〜ていただけませんか・〜てもらえないでしょうか・〜ていただけないでしょうか",
     "conn": "動詞て形 + もらえませんか／いただけませんか（更客气：もらえないでしょうか／いただけないでしょうか）",
@@ -37,7 +37,7 @@ export const PATTERNS_CHUKYU = [
   },
   {
     "lesson": 51,
-    "level": "中級",
+    "level": "N3",
     "formality": "书面语",
     "pattern": "〜のようだ・〜のような〜・〜のように…",
     "conn": "名詞 + のようだ／のような + 名詞／のように + 形容詞・動詞",
@@ -76,7 +76,7 @@ export const PATTERNS_CHUKYU = [
   },
   {
     "lesson": 51,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜ことは／が／を",
     "conn": "動詞辞書形・ない形・た形 + こと（は／が／を）",
     "meaning": "…这件事(把动词句变成名词，充当主语或宾语)",
@@ -106,7 +106,7 @@ export const PATTERNS_CHUKYU = [
   },
   {
     "lesson": 51,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜を〜と言う",
     "conn": "名詞1・句 + を + 名詞2 + と言う",
     "meaning": "把…叫做…(给事物下定义、说明名称)",
@@ -132,7 +132,7 @@ export const PATTERNS_CHUKYU = [
   },
   {
     "lesson": 51,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜という〜",
     "conn": "名詞1 + という + 名詞2",
     "meaning": "叫做…的…(介绍对方可能不知道的人、物、地名)",
@@ -162,7 +162,7 @@ export const PATTERNS_CHUKYU = [
   },
   {
     "lesson": 51,
-    "level": "中級",
+    "level": "N3",
     "pattern": "いつ／どこ／何／だれ／どんなに〜ても",
     "conn": "疑問詞 + 〜ても（動詞て形+も／い形容詞くても／な形容詞・名詞でも）",
     "meaning": "无论(何时/何地/什么/谁/多么)…都…",
@@ -200,7 +200,7 @@ export const PATTERNS_CHUKYU = [
   },
   {
     "lesson": 52,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜たら、〜た（結果）",
     "conn": "動詞た形 + ら、〜た",
     "meaning": "做了…之后，(结果)…了(前项动作带来的变化)",
@@ -242,7 +242,7 @@ export const PATTERNS_CHUKYU = [
   },
   {
     "lesson": 52,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜たら、〜た（発見）",
     "conn": "動詞た形 + ら、〜た（後項多为 〜ていた／〜ていました／なかった）",
     "meaning": "一…发现…(做了前项动作时，发现原本就存在的事态)",
@@ -280,7 +280,7 @@ export const PATTERNS_CHUKYU = [
   },
   {
     "lesson": 52,
-    "level": "中級",
+    "level": "N3",
     "formality": "口语",
     "pattern": "〜というのは〜のことだ・〜というのは…ということだ",
     "conn": "名詞 + というのは + 名詞 + のことだ／普通形 + ということだ",
@@ -323,7 +323,7 @@ export const PATTERNS_CHUKYU = [
   },
   {
     "lesson": 52,
-    "level": "中級",
+    "level": "N3",
     "pattern": "…という〜",
     "conn": "普通形 + という + 名詞（話・規則・記事・うわさ・ニュース・意見 など）",
     "meaning": "…这样的…(用一整句话的内容来修饰后面的名词)",
@@ -369,7 +369,7 @@ export const PATTERNS_CHUKYU = [
   },
   {
     "lesson": 52,
-    "level": "中級",
+    "level": "N3",
     "pattern": "…ように言う／注意する／伝える／頼む",
     "conn": "動詞辞書形・ない形 + ように + 言う／注意する／伝える／頼む",
     "meaning": "(转述指示、劝告、请求)叫…做…／提醒…不要…",
@@ -415,7 +415,7 @@ export const PATTERNS_CHUKYU = [
   },
   {
     "lesson": 52,
-    "level": "中級",
+    "level": "N3",
     "formality": "口语",
     "pattern": "〜みたいだ・〜みたいな〜・〜みたいに…",
     "conn": "名詞・普通形 + みたいだ／みたいな + 名詞／みたいに + 形容詞・動詞",

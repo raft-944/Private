@@ -9,7 +9,7 @@
 export const PATTERNS_N3_PART3 = [
   {
     "lesson": 90,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜のは〜からだ／ためだ(首尾呼应说明原因)",
     "conn": "普通形 + のは + 普通形 + からだ／ためだ",
     "meaning": "…的原因,是因为…(先果后因的呼应结构)",
@@ -25,7 +25,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 90,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜のではないだろうか(委婉推测的首尾呼应)",
     "conn": "普通形 + のではないだろうか",
     "meaning": "是不是…呢(委婉主张)",
@@ -40,7 +40,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 91,
-    "level": "中級",
+    "level": "N3",
     "pattern": "文章中的时态一致性(た形 vs ていた的时间层次)",
     "conn": "背景状态用ていた；具体瞬间动作用た形",
     "meaning": "叙述中背景状态与具体动作的时态分工",
@@ -56,7 +56,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 91,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜ている(表结果残留状态,篇章用法)",
     "conn": "瞬间動詞(死ぬ・割れる・結婚するなど) + ている",
     "meaning": "…着(动作完成后留下的状态)",
@@ -74,7 +74,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 92,
-    "level": "中級",
+    "level": "N3",
     "pattern": "自动词 vs 他动词(叙述视点的选择)",
     "conn": "自动词+ている(客观描述状态)；他动词+た(强调动作发出者)",
     "meaning": "客观描述状态 vs 强调是谁做的",
@@ -90,7 +90,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 93,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜てくる・〜ていく(篇章中的时间方向性)",
     "conn": "動詞て形 + くる／いく",
     "meaning": "变化朝现在靠近／朝未来延伸",
@@ -107,7 +107,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 94,
-    "level": "中級",
+    "level": "N3",
     "pattern": "受身・使役・使役受身(叙述视点的固定手段)",
     "conn": "主动句／受身(られる)／使役(させる)／使役受身(させられる)",
     "meaning": "同一件事换视点叙述,情感倾向不同",
@@ -124,7 +124,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 95,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜てあげる・〜てもらう・〜てくれる(篇章中固定叙述视点)",
     "conn": "動詞て形 + あげる／もらう／くれる",
     "meaning": "恩惠发出方向不同,视点也不同",
@@ -141,7 +141,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 96,
-    "level": "中級",
+    "level": "N3",
     "pattern": "指示词こ・そ・あ的篇章衔接功能",
     "conn": "これ／それ／あれ；この／その／あの",
     "meaning": "指代前文已提到的内容",
@@ -156,7 +156,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 97,
-    "level": "中級",
+    "level": "N3",
     "pattern": "「は」与「が」的篇章应用",
     "conn": "は(已知信息/话题)；が(新信息/焦点)",
     "meaning": "已知信息用は,新信息/疑问词主语用が",
@@ -173,7 +173,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 98,
-    "level": "中級",
+    "level": "N3",
     "pattern": "接续词的逻辑关系分类(篇章衔接)",
     "conn": "だから・そのため・したがって(顺接因果)；しかし・けれども・ところが(逆接)；そして・それに・さらに(并列递进)；ところで・さて(转换话题)；ただし・なお(补充说明)",
     "meaning": "接续词按逻辑关系分类,是理解篇章结构的基础",
@@ -192,7 +192,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 99,
-    "level": "中級",
+    "level": "N3",
     "pattern": "文章语气的统一(敬体/简体・である体不能混用)",
     "conn": "全篇统一使用敬体(です・ます)或简体(だ・である),引用他人原话除外",
     "meaning": "全篇文体保持一致,是完形填空判断敬体/简体的重要依据",
@@ -208,7 +208,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 100,
-    "level": "中級",
+    "level": "N3",
     "pattern": "敬语在篇章中的语境一致性(额外补充)",
     "conn": "敬语程度需根据说话人和听话人/话题人物的关系保持前后一致",
     "meaning": "敬语程度突变常是解题线索",
@@ -223,7 +223,7 @@ export const PATTERNS_N3_PART3 = [
   },
   {
     "lesson": 100,
-    "level": "中級",
+    "level": "N3",
     "pattern": "文末表现的语气差异(の／のだ／わけだ／ものだ,额外补充)",
     "conn": "句末选用の／のだ／わけだ／ものだ等不同表达",
     "meaning": "客观陈述/恍然大悟/感慨怀念等不同态度",

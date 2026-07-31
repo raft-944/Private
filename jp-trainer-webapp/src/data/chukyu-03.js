@@ -7,7 +7,7 @@
 export const PATTERNS_CHUKYU_03 = [
   {
     "lesson": 53,
-    "level": "中級",
+    "level": "N3",
     "style": "敬体",
     "pattern": "〜（さ）せてもらえませんか・〜（さ）せていただけませんか・〜（さ）せてもらえないでしょうか・〜（さ）せていただけないでしょうか",
     "conn": "動詞使役形（て形）+ もらえませんか／いただけませんか（更客气：もらえないでしょうか／いただけないでしょうか）",
@@ -28,7 +28,7 @@ export const PATTERNS_CHUKYU_03 = [
   },
   {
     "lesson": 53,
-    "level": "中級",
+    "level": "N3",
     "pattern": "…ことにする",
     "conn": "動詞辞書形・ない形 + ことにする",
     "meaning": "决定…(说话人自己做出的决定)",
@@ -48,7 +48,7 @@ export const PATTERNS_CHUKYU_03 = [
   },
   {
     "lesson": 53,
-    "level": "中級",
+    "level": "N3",
     "pattern": "…ことにしている",
     "conn": "動詞辞書形・ない形 + ことにしている",
     "meaning": "(决定后一直坚持)习惯做…／坚持不做…",
@@ -67,7 +67,7 @@ export const PATTERNS_CHUKYU_03 = [
   },
   {
     "lesson": 53,
-    "level": "中級",
+    "level": "N3",
     "pattern": "…ことになる",
     "conn": "動詞辞書形・ない形 + ことになる",
     "meaning": "(经外部决定)定下来要…",
@@ -87,7 +87,7 @@ export const PATTERNS_CHUKYU_03 = [
   },
   {
     "lesson": 53,
-    "level": "中級",
+    "level": "N3",
     "pattern": "…ことになっている",
     "conn": "動詞辞書形・ない形 + ことになっている",
     "meaning": "按规定…／(预定)要…",
@@ -107,7 +107,7 @@ export const PATTERNS_CHUKYU_03 = [
   },
   {
     "lesson": 53,
-    "level": "中級",
+    "level": "N3",
     "formality": "口语",
     "pattern": "〜てほしい・〜ないでほしい",
     "conn": "動詞て形 + ほしい／動詞ない形 + でほしい",
@@ -129,7 +129,7 @@ export const PATTERNS_CHUKYU_03 = [
   },
   {
     "lesson": 53,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜そうな〜・〜そうに…",
     "conn": "動詞ます形去ます／い形容詞去い／な形容詞語幹 + そうな + 名詞／そうに + 動詞",
     "meaning": "看起来…的…／看起来…地(做)",
@@ -150,7 +150,7 @@ export const PATTERNS_CHUKYU_03 = [
   },
   {
     "lesson": 53,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜なさそう",
     "conn": "い形容詞くない → くなさそう／な形容詞・名詞じゃない → じゃなさそう／動詞ない → なさそう",
     "meaning": "看起来不…(样态的否定)",
@@ -169,7 +169,7 @@ export const PATTERNS_CHUKYU_03 = [
   },
   {
     "lesson": 53,
-    "level": "中級",
+    "level": "N3",
     "pattern": "〜そうもない",
     "conn": "動詞ます形去ます + そうもない（丁寧形：そうもありません）",
     "meaning": "看样子不可能…／怎么也…不了",

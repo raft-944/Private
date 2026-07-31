@@ -203,10 +203,6 @@ const SEEN_TASKS_PER_PATTERN = 6;
 /* 每日作业记住最近抽过哪些句型,再抽的时候降权,避免连着几天都抽到同一批。 */
 const HW_RECENT_MAX = 24;
 
-/* 待复习积压达到"新句型日配额"的这么多倍时,暂停当天新句型引入,先把复习债还上——
-   参照 Anki"复习优先于新卡"的思路,但阈值给宽松点,避免正常的小波动就误伤新句型进度。 */
-const NEW_PATTERN_PAUSE_RATIO = 5;
-
 /* 每日作业连续这么多个批次都没做完,残留的句型题就转入错题本、批次清空清算——
    不能无限累积;対话类残留没有实际判卷内容可转错题本,到这个阈值就直接放弃那道对话。 */
 const HW_BACKLOG_FLUSH_CYCLES = 2;
@@ -2557,11 +2553,15 @@ function AppInner() {
   // 按 lesson→id 重新排过(并且只取当前教材的句型),用它才会先发完第3课剩下那条,再发第4课。
   const unlearned = orderedForBook(currentBook).filter((p) => !db.prog[p.id]);
   const newDoneToday = db.meta.date === t ? db.meta.newDone : 0;
-  // 待复习积压过多时暂停新句型引入,参照 Anki"复习优先于新卡"——阈值是新句型日配额的
-  // NEW_PATTERN_PAUSE_RATIO 倍,门槛给宽松点,避免正常小波动就误伤新句型进度
+  // 待复习积压过多时暂停新句型引入,参照 Anki"复习优先于新卡"——阈值直接就是
+  // "每天复习上限"本身:今天的积压如果已经超过你自己愿意复习的量,就没道理还往
+  // 里面塞新句型。之前这里用的是"新句型日配额 × 固定倍数",和 reviewCap 完全脱节,
+  // 导致"待复习38 < 复习上限40"却仍然提示暂停这种反直觉的情况;现在两处判断
+  // (这里的即时暂停、和上面 capHitStreak 那个连续多天超限自动降档)统一用同一个
+  // 参照物,含义更一致:降档看的是"连续几天不够用",暂停看的是"今天够不够用"。
   // 注意这里必须用 dueAll(积压总量)而不是 dueList(截断后的当天量):
   // dueList 被上限卡在 reviewCap 之后就再也涨不上去了,拿它比阈值会导致新句型永远不暂停
-  const newPatternsPaused = dueAll.length >= db.settings.newPerDay * NEW_PATTERN_PAUSE_RATIO;
+  const newPatternsPaused = dueAll.length >= reviewCap;
   const newSlots = newPatternsPaused ? 0 : Math.max(0, db.settings.newPerDay - newDoneToday);
   const newList = unlearned.slice(0, newSlots);
   const learnedPatterns = PATTERNS.filter((p) => p.book === currentBook && db.prog[p.id]);
@@ -4408,7 +4408,7 @@ function AppInner() {
                 优先做的是间隔最短、逾期最久的(最容易忘的那些)
               </div>
             )}
-            {newPatternsPaused && <div className="pause-hint">⏸ 待复习积压较多,已暂停引入新句型,先把复习消化完</div>}
+            {newPatternsPaused && <div className="pause-hint">⏸ 待复习积压较多({dueAll.length} ≥ 复习上限 {reviewCap}),已暂停引入新句型,先把复习消化完</div>}
             {db.meta.autoDowngradedAt === t && (
               <div className="pause-hint">
                 ⚙️ 连续多天复习上限用满,已自动把每日新句型下调到 {db.settings.newPerDay} 个,
@@ -4874,9 +4874,9 @@ function AppInner() {
               )}
               {/* !freeMode 是"今日の学習"(startSession/resumeSession 里 kind==="srs")专属的信号,
                   homework/weekly/听力/错题重练等其他流程一律 freeMode=true,不会走到这里。
-                  之所以这一批做完了新句型还可能没学:待复习积压达到 NEW_PATTERN_PAUSE_RATIO 倍时
-                  会暂停引入新句型、优先清积压(见 newPatternsPaused),这批复习清完之后积压已经
-                  降下去了,newList 就重新有内容了——不用回首页再点一次"開始",这里直接续上。 */}
+                  之所以这一批做完了新句型还可能没学:待复习积压达到复习上限时会暂停引入
+                  新句型、优先清积压(见 newPatternsPaused),这批复习清完之后积压已经降下去了,
+                  newList 就重新有内容了——不用回首页再点一次"開始",这里直接续上。 */}
               {!freeMode && newList.length > 0 && (
                 <div className="done-more-new">
                   还有 {newList.length} 个新句型待学(刚才复习积压较多,系统临时把新句型往后推了,现在可以继续)

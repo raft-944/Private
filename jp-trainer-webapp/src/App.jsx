@@ -1089,9 +1089,12 @@ ${list}
 按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"n":题号(整数),"answerIndex":你认为正确的选项下标(0到3的整数)}`;
   let arr;
   try {
-    // 每题只需要吐一个 {n, answerIndex},产出很短,不能沿用出题那套"按题数×900"的大预算——
-    // pro 是带思考链的模型,预算上限给太大意味着允许它想得更久,这里的输出体量完全不需要那么多空间
-    arr = await callAIArray(sys, user, items.length, true, "deepseek-v4-pro", Math.min(1500, 60 * items.length + 300));
+    // 每题只需要吐一个 {n, answerIndex},看似产出很短,但 pro 是默认开启思考模式的模型——
+    // 思考过程(reasoning_content)和最终答案共用同一份 max_tokens 预算,预算给太小反而
+    // 更容易被思考本身耗尽、最后写不出答案(finish_reason: length,content 是空的),
+    // 白白烧了一次调用却什么结果都拿不到,比多给一点预算更亏。不用出题那套"按题数×900"
+    // 的大预算(那是给带 taskSegments 的完整出题内容准备的),但也不能压得太小。
+    arr = await callAIArray(sys, user, items.length, true, "deepseek-v4-pro", Math.min(4000, 300 * items.length + 1000));
   } catch {
     return items;
   }
@@ -1117,7 +1120,9 @@ ${list}
    选项站得住脚",flash 这类不带思考链的模型更容易出现看似都对的模糊选项、或者
    某道题其实passage里没有依据。调用方按需传 model="deepseek-v4-pro" 来提高
    这类多步骤推理任务的严谨度(读解只生成一次、后续判断对错是本地比对,pro
-   慢一点/贵一点的成本只发生在生成这一下,不影响做题体验)。 */
+   慢一点/贵一点的成本只发生在生成这一下,不影响做题体验)。
+   pro 默认开启思考模式,思考过程和短文+理解题的正文共用同一份 max_tokens 预算,
+   预算给紧了容易被思考本身耗尽导致内容截断失败,所以给得比看起来"需要的字数"更宽松。 */
 async function genReadingPassage(patterns, model) {
   const sys = `あなたは日本語教師です。请仿照JLPT読解题命题:先写一段连贯的日语短文,再针对这段短文出几道理解题。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const level = highestLevelOf(patterns);
@@ -1132,7 +1137,7 @@ async function genReadingPassage(patterns, model) {
 短文写完后,针对这段短文出 3 道理解题(细节理解/推理/主旨归纳各来一道,不要3道都问同一类问题),每道题4个选项,只有一个选项能从短文内容直接推出或明确支持,其余3个选项要看着有迷惑性(比如偷换了细节、以偏概全、或反了因果关系),但必须明确错——不能出现"两个选项都说得通"这种有争议的题。
 
 输出JSON: {"passage":"短文正文","questions":[{"q":"问题(中文)","options":["选项1","选项2","选项3","选项4"],"answerIndex":正确选项下标(0到3的整数),"explanation":"中文讲解,说明正确答案的依据在短文哪里、其余选项为什么不对,150字以内"},...共3道]}`;
-  const r = await callAI(sys, user, 3800, model);
+  const r = await callAI(sys, user, 6000, model);
   if (!r.passage || !Array.isArray(r.questions) || !r.questions.length) throw new Error("読解生成失败:内容不完整");
   const questions = r.questions.filter((q) => q && q.q && Array.isArray(q.options) && q.options.length === 4 && Number.isInteger(q.answerIndex) && q.answerIndex >= 0 && q.answerIndex <= 3);
   if (!questions.length) throw new Error("読解生成失败:没有一道理解题格式正确");

@@ -32,6 +32,14 @@ export default async function handler(req, res) {
   // 这里不管前端传多少,都保底给够 2048,避免"判卷失败:返回内容不含完整JSON"这类问题
   const outputTokens = Math.max(max_tokens || 0, 2048);
 
+  // DeepSeek V4 系列(flash/pro)现在默认开启"思考模式":思考过程(reasoning_content)
+  // 和最终答案(content)共用同一份 max_tokens 预算,思考本身就可能把预算耗尽,
+  // 导致 content 是空的、finish_reason 变成 "length"(2026年8月起大量"出题失败:
+  // DeepSeek 没有返回内容(finish_reason: length)"报错的根因,不是本项目代码引入的)。
+  // flash 场景选它就是图"快、不用思考链"(出题/判卷这类单步任务),所以显式关闭;
+  // pro 场景(読解生成、文法选择题自我核验)本来就是要用它的思考链,保留默认的开启。
+  const thinking = useModel === "deepseek-v4-flash" ? { type: "disabled" } : { type: "enabled" };
+
   try {
     const messages = [];
     if (system) messages.push({ role: "system", content: system });
@@ -48,6 +56,7 @@ export default async function handler(req, res) {
         messages,
         max_tokens: outputTokens,
         temperature: 0.9,
+        thinking,
       }),
     });
 

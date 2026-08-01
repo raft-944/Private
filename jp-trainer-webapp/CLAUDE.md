@@ -6,8 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目简介
 自建的日语句型练习应用，自用。使用者以中文为母语，已通过 JLPT N4，最终目标 N1。
-句型库不按教材分类，直接按 JLPT 等级(N5/N4/N3/N2/N1)组织，现覆盖 N5-N3 共 300+ 句型，
-正在往 N2→N1 逐级扩充。技术栈：Vite + React 前端，Vercel Serverless 代理 AI 接口，
+句型库不按教材分类，直接按 JLPT 等级(N5/N4/N3/N2/N1)组织，现覆盖 N5-N3 共 340+ 句型，
+正在往 N2→N1 逐级扩充。除了核心的句型 SRS 循环，还有練習帳(知识辨析/场景对话/书面邮件，
+不进排期的自由练习)、JLPT模拟(文法選択+読解)、每日作業/週間チャレンジ/聴解練習、
+首页学习报告(打卡/热力图/薄弱句型)等功能，详见下方 Architecture 部分。技术栈：
+Vite + React 前端，Vercel Serverless 代理 AI 接口，
 Supabase 负责数据库与登录，出题判卷由 AI 完成，语音走 Web Speech API，已部署在 Vercel。
 
 ## 交流方式
@@ -61,12 +64,26 @@ No test runner or lint script is configured in `package.json`.
 
 ## Architecture
 
-### Three-file core, mostly monolithic
+### Core files, mostly monolithic
 
-- `src/App.jsx` (~1700 lines) — the entire application: pattern data, AI prompt/parsing logic, spaced-repetition logic, and the single top-level `AppInner` component that renders every view (`home`, `session`, `library`, `mistakes`) via `view` state, plus a `<style>` block (`Style()`) at the bottom. There is no router and no component-per-file split — new features are typically added as new state/branches inside this one file, following the existing pattern.
+- `src/App.jsx` (~6000 lines) — the entire application: pattern-data assembly re-export, AI prompt/parsing logic for every feature, spaced-repetition logic, and the single top-level `AppInner` component that renders every view via `view` state (`home` | `session` | `library` | `mistakes` | `confusion`(練習帳) | `jlpt`(JLPT模拟, a sub-view reached from inside 練習帳)), plus a `<style>` block (`Style()`) at the bottom. There is no router and no component-per-file split — new features are typically added as new state/branches inside this one file, following the existing pattern. Given the size, prefer `Grep`/targeted `Read` with line ranges over reading the whole file at once.
+- `src/patternsData.js` — assembles the full `PATTERNS` array from `SHOKYU` (inline, N5/N4 content, lessons 1-50) plus several imported files under `src/data/` (`chukyu-01-02.js`, `chukyu-03.js`, `n3-part1.js`, `n3-formref.js`, `n3-part2.js`, `n3-part3.js` — all N3, lessons 51+), assigns the final `id` by array index, and exports `ORDERED` (sorted by lesson then id, used for "which unlearned pattern comes next"). There used to be a multi-textbook (`book` field) mechanism here; it was removed — the library is organized purely by JLPT level now (see below), not by any specific textbook.
+- `schema-v2.js` — documents the named-object schema each pattern uses (`lesson`, `level`, `pattern`, `conn`, `meaning`, `exJP`, `exCN`, `extras`, `contrasts`, `explain`, `ext`, optional `style`/`formality`/`study`). Also contains a one-time `migrate()`/`validate()` pair used only when the library was migrated off its original positional-array (v1) format — dead code today, not part of the runtime bundle, safe to ignore.
+- `src/data/extStudyNotes.js` — detailed "textbook-style" explanations (`study` field: `{form, usages, notes}`) for `ext: true` (supplementary, non-original-textbook) patterns, merged into `PATTERNS` by `patternsData.js` keyed off the `pattern` string.
+- `src/data/scenes.js`, `confusionScenes.js`, `confusionEmails.js` — static content for 每日作業/週間チャレンジ's scripted dialogue scenes, 練習帳's free-practice dialogue scenes, and 練習帳's email-writing topic list, respectively.
 - `src/main.jsx` — auth screens (login/signup/password-reset) built directly with Supabase Auth (`supabase.auth.signInWithPassword` / `signUp` / `resetPasswordForEmail`), plus `Root()` which gates rendering of `<App />` behind a valid session and calls `installStoragePolyfill(userId)` once authenticated. Signup is invite-only: before calling `signUp`, it calls the `redeem_invite_code` Postgres RPC (see `supabase/schema.sql`) to atomically check and consume a shared invite code's remaining uses; if `signUp` then fails, it calls `release_invite_code` to give the slot back.
 - `src/supabaseClient.js` — Supabase client from `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`.
 - `src/storagePolyfill.js` — re-implements the `window.storage.get/set` API that the original Claude Artifact environment provided natively, backed by a Supabase `kv_store` table (`supabase/schema.sql`) scoped by `user_id` with row-level security. **All persistence in `App.jsx` goes through `window.storage`, not direct Supabase calls** — this is intentional, so the app logic ported from the Artifact didn't need to change.
+- `e2e-harness.html` — a standalone HTML entry point that renders `<App />` directly with a `localStorage`-backed `window.storage` polyfill, bypassing Supabase auth entirely (keys prefixed `e2e:`). This is how every headless-Chromium verification in this repo's history has been run: `npx vite --port <n>`, then a Playwright script seeds `localStorage["e2e:jp_srs_v1"]` with a crafted `db` blob and drives the page. Needs a (dummy is fine) `.env` with `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` locally, since `src/supabaseClient.js` is imported unconditionally by `App.jsx` and throws if those are empty — don't commit that `.env`.
+
+### Feature surface (beyond the original SRS loop)
+
+The app grew well past "flashcards with spaced repetition" over time. Besides the core home-page SRS session (`view: "session"`, `db.session.kind: "srs"`), it also has:
+- **每日作業 / 週間チャレンジ** (`db.session.kind: "homework" | "weekly"`) — mixed batches of translation/composition/combo(two-pattern)/dialogue items drawn from already-learned patterns, weighted toward current mistakes/weak spots.
+- **聴解練習** (`db.session.kind: "listen"`) — dictation-style listening practice using the browser's `SpeechSynthesis`, difficulty auto-tiers on cumulative correct count (`listenTier`).
+- **練習帳** (`view: "confusion"`, `confusionSub: "list" | "topicDetail" | "quiz" | "dialogue" | "email"`) — free practice that never touches SRS scheduling/stats/mistake-count logic: 知识辨析 (AI-generated confusable-grammar-point drills, including a special `kind: "verbform"` topic), 场景对话 (scripted + free-practice roleplay dialogues with difficulty tiers, see `DIALOGUE_TIERS`), 书面邮件 (structured business-email writing graded on an 8-dimension rubric).
+- **JLPT模拟** (`view: "jlpt"`, reached from inside 練習帳) — 文法選択 (four-choice cloze questions using each pattern's `contrasts` field as distractor material, then cross-checked by a second, separate AI call using the pro model before being shown to the user — see `verifyGrammarChoiceAnswers`) and 読解 (AI-generated reading passage + comprehension questions, generated with the pro model for the extra reasoning rigor a multi-question passage needs). Both use an open-ended "rolling prefetch" queue (`topUpJlptQuiz`, `JLPT_LOOKAHEAD`) rather than a fixed batch — there is no "done" screen, you just keep going until you stop.
+- **学习报告** (home page, folded into a collapsible section) — streak/longest-streak (derived from `db.studyTime`), a 28-day accuracy heatmap and weak-pattern ranking (derived from `db.dailyStats` / `db.mistakes`), all read-only derived views with no side effects of their own.
 
 ### AI call path
 
@@ -81,10 +98,10 @@ Browser → `POST /api/generate` (`api/generate.js`, Vercel serverless function)
 
 ### Pattern data and learning state
 
-- `PATTERNS` (built from the `RAW` + `EXTRA` arrays at the top of `App.jsx`) is the full static syllabus: `[lesson, jp, conn(接续), cn, exampleJp, exampleCn]` tuples, given a stable numeric `id` by array position. **Never reorder or delete entries from `RAW`/`EXTRA`** — `id` is persisted in every user's saved progress (`db.prog[id]`) and in exported/imported backups; only append.
-- `db` (shape: `DEFAULT_DB` in `App.jsx`) holds SRS progress (`prog`), settings, daily/weekly counters (`meta`), a mistake log (`mistakes`), stats, and an in-progress `session` snapshot for resuming interrupted sessions. It's persisted as one JSON blob under a fixed key (`STORE_KEY = "jp_srs_v1"`) via `window.storage`.
-- `mergeDb()` does a field-by-field merge of saved data over `DEFAULT_DB` (not a shallow spread) specifically so older saved blobs missing newer nested fields (e.g. a `settings.voiceURI` added later) don't lose those fields on load. Extend this function, don't bypass it, when adding new nested `db` fields.
-- Session types (`kind` in the resumable snapshot): `srs` (daily due + new items), `homework`, `weekly`, `listen` — each has its own `begin*Item`/queue-building function; resuming reconstructs the queue from persisted pattern `id`s via `PATTERNS[id]`.
+- `PATTERNS` (imported into `App.jsx` from `src/patternsData.js`, see above) is the full syllabus in the named-object (schema-v2) format, `id` assigned by final array position. **Never reorder, delete, or insert-in-the-middle** — `id` is persisted in every user's saved progress (`db.prog[id]`) and in exported/imported backups; new content is always appended at the end of `PATTERNS`, which in practice means adding a new lesson number higher than any existing one in a new (or existing) `src/data/*.js` file and wiring it into the spread in `patternsData.js`.
+- `db` (shape: `DEFAULT_DB` in `App.jsx`) holds SRS progress (`prog`), settings, daily/weekly counters (`meta`), a mistake log (`mistakes`), several stats buckets (`stats`, `listenStats`, `dialogueStats`, `choiceStats`, `readingStats`), a per-day accuracy map (`dailyStats`, for the home-page heatmap), a per-day study-time map (`studyTime`, for streak/averages), per-pattern recent-question history (`qHist`, for out-title avoidance), recently-drawn homework pattern ids (`hwRecent`), an in-progress-homework-batch backlog (`hwBacklog`), and an in-progress `session` snapshot for resuming interrupted sessions. It's persisted as one JSON blob under a fixed key (`STORE_KEY = "jp_srs_v1"`) via `window.storage`.
+- `mergeDb()` does a field-by-field merge of saved data over `DEFAULT_DB` (not a shallow spread) specifically so older saved blobs missing newer nested fields (e.g. a `settings.voiceURI` added later) don't lose those fields on load. Extend this function, don't bypass it, when adding new nested `db` fields. Fields removed from `DEFAULT_DB` over time (e.g. the old `settings.book` from the since-removed multi-textbook mechanism) are harmless to leave sitting unread in old saved blobs — `mergeDb`'s spread just carries them along unused, no migration needed.
+- Session types (`kind` in the resumable snapshot): `srs` (daily due + new items), `homework`, `weekly`, `listen` — each has its own `begin*Item`/queue-building function; resuming reconstructs the queue from persisted pattern `id`s via `PATTERNS[id]`. 練習帳 and JLPT模拟 are deliberately *not* session types — they're free practice that never touches `db.prog`/`db.stats`/the resumable-session mechanism at all.
 - Text-to-speech for listening practice uses the browser's native `SpeechSynthesis` (`speakJa`), not an API — free and no quota impact.
 
 ### Data model constraints

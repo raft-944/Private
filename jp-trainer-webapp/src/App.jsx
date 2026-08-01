@@ -379,11 +379,22 @@ function listenTier(ok) {
   return { name: "短句", spec: "句子长度8~14个日语字符,单句,结构简单清晰。" };
 }
 
-/* 出题/判卷时对 AI 说的难度基准,统一由句型的 level 字段决定:
-   初級(大家的日语初级 I+II,第1~50课)按 N4,中級(第51课起)按 N3~N2。
+/* 出题/判卷时对 AI 说的难度基准,直接用句型自己的 level 字段(N5~N1)。
    这是唯一改这个映射关系的地方。 */
 function levelBenchmark(level) {
   return level || "N4";
+}
+
+const JLPT_LEVEL_ORDER = ["N5", "N4", "N3", "N2", "N1"];
+/* 読解短文要覆盖好几个已学句型,难度基准不能只看其中一个——只要用到了任何一个
+   较难的句型,整篇短文的词汇语法门槛都要跟上,不能被同批里更简单的句型拉低。
+   取这批句型里最高(最难)的那个等级作为整篇短文的基准。 */
+function highestLevelOf(patterns) {
+  let best = "N5";
+  for (const p of patterns) {
+    if (JLPT_LEVEL_ORDER.indexOf(p.level) > JLPT_LEVEL_ORDER.indexOf(best)) best = p.level;
+  }
+  return best;
 }
 
 /* 練習帳(易混点辨析/场景对话)不挂在具体句型上,没有现成的 level 字段可用,
@@ -577,10 +588,13 @@ async function callAI(system, user, maxTokens = 4200, model) {
   throw lastErr;
 }
 
-/* 批量版:一次调用要多道题,maxTokens按题数放大一些,避免写到一半被截断 */
-async function callAIArray(system, user, itemCount, background, model) {
+/* 批量版:一次调用要多道题,maxTokens按题数放大一些,避免写到一半被截断。
+   maxTokensOverride 给"每条输出本来就很短"的场景用(比如核验只需要吐一个下标),
+   不传就用默认的按题数放大公式。 */
+async function callAIArray(system, user, itemCount, background, model, maxTokensOverride) {
   // 每条题目现在还要顺带出 taskSegments(逐词切分),比之前占的篇幅稍大,预算相应调高
-  const text = await callAIRaw(system, user, Math.min(8000, 900 * Math.max(itemCount, 1) + 700), background, model);
+  const budget = maxTokensOverride || Math.min(8000, 900 * Math.max(itemCount, 1) + 700);
+  const text = await callAIRaw(system, user, budget, background, model);
   const jsonStr = extractFirstJsonArray(text);
   if (!jsonStr) throw new Error("返回内容不含完整JSON数组:" + text.slice(0, 80));
   const parsed = JSON.parse(jsonStr);
@@ -604,7 +618,7 @@ function speakJa(text, rate = 1, voiceURI) {
 }
 
 async function genComboQuestion(p1, p2, avoid) {
-  const sys = `あなたは日本語教師です。学習者:句型A对应 JLPT ${levelBenchmark(p1.level)},句型B对应 JLPT ${levelBenchmark(p2.level)}。出题词汇和语法请分别符合各自句型的难度基准,不要因为其中一个句型简单/难就把另一个也拉到同一水平。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
+  const sys = `あなたは日本語教師です。学習者:句型A对应 JLPT ${levelBenchmark(p1.level)},句型B对应 JLPT ${levelBenchmark(p2.level)}。出题词汇和语法请分别符合各自句型的难度基准,不要因为其中一个句型简单/难就把另一个也拉到同一水平。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `请出一道"複合作文"练习题,要求学习者在同一句话(或简短的两三句对话)中,同时正确使用以下两个句型。
 句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})${styleTagText(p1)}${explainBriefText(p1)}
 句型B: ${p2.pattern}(${p2.conn} / ${p2.meaning})${styleTagText(p2)}${explainBriefText(p2)}
@@ -849,7 +863,7 @@ async function annotateWords(jpTextRaw) {
 }
 
 async function gradeCombo(p1, p2, q, answer) {
-  const sys = `你是一位耐心细致的日语老师,负责判卷和讲解。${EXPLAIN_LANG_RULE}学习者水平:句型A ${levelBenchmark(p1.level)},句型B ${levelBenchmark(p2.level)}。判卷标准需分别符合各自句型的难度基准。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
+  const sys = `你是一位耐心细致的日语老师,负责判卷和讲解。${EXPLAIN_LANG_RULE}学习者水平:句型A ${levelBenchmark(p1.level)},句型B ${levelBenchmark(p2.level)}。判卷标准需分别符合各自句型的难度基准。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `句型A: ${p1.pattern}(${p1.conn} / ${p1.meaning})
 【句型A教材解释】${explainText(p1)}
 【句型A易混淆点】${contrastsText(p1)}${styleTagText(p1)}
@@ -926,7 +940,7 @@ async function gradeListening(p, q, answer) {
 async function genQuestion(p, avoid, forceType) {
   const type = forceType || (Math.random() < 0.6 ? "translation" : "composition");
   const topic = TOPICS[Math.floor(Math.random() * TOPICS.length)];
-  const sys = `あなたは日本語教師です。学習者:JLPT ${levelBenchmark(p.level)}水平。出题词汇和语法必须限定在该难度范围内。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
+  const sys = `あなたは日本語教師です。学習者:JLPT ${levelBenchmark(p.level)}水平。出题词汇和语法必须限定在该难度范围内。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `请围绕以下句型出一道练习题。
 句型: ${p.pattern}
 接续: ${p.conn}
@@ -1075,7 +1089,9 @@ ${list}
 按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"n":题号(整数),"answerIndex":你认为正确的选项下标(0到3的整数)}`;
   let arr;
   try {
-    arr = await callAIArray(sys, user, items.length, true, "deepseek-v4-pro");
+    // 每题只需要吐一个 {n, answerIndex},产出很短,不能沿用出题那套"按题数×900"的大预算——
+    // pro 是带思考链的模型,预算上限给太大意味着允许它想得更久,这里的输出体量完全不需要那么多空间
+    arr = await callAIArray(sys, user, items.length, true, "deepseek-v4-pro", Math.min(1500, 60 * items.length + 300));
   } catch {
     return items;
   }
@@ -1104,7 +1120,7 @@ ${list}
    慢一点/贵一点的成本只发生在生成这一下,不影响做题体验)。 */
 async function genReadingPassage(patterns, model) {
   const sys = `あなたは日本語教師です。请仿照JLPT読解题命题:先写一段连贯的日语短文,再针对这段短文出几道理解题。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
-  const level = patterns.some((p) => p.level === "中級") ? "N3〜N2" : "N4";
+  const level = highestLevelOf(patterns);
   const list = patterns.map((p) => `${p.pattern}(${p.conn} / ${p.meaning})`).join("、");
   const user = `学习者水平:JLPT ${level}。请写一段 300～450 字的日语短文(可以是随笔、说明文、书信等体裁,自行选一个合适的),文中要自然地用上以下这些已学句型(不要求每个都用、也不要求只用这些,但至少覆盖其中大半):${list}
 
@@ -1259,7 +1275,7 @@ ${candList}
 }
 
 async function gradeAnswer(p, q, answer, hintedWords) {
-  const sys = `你是一位耐心细致的日语老师,负责判卷和讲解。${EXPLAIN_LANG_RULE}学习者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号",否则会破坏JSON格式。`;
+  const sys = `你是一位耐心细致的日语老师,负责判卷和讲解。${EXPLAIN_LANG_RULE}学习者水平:${levelBenchmark(p.level)}。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `句型: ${p.pattern}(${p.conn} / ${p.meaning})
 【教材解释】${explainText(p)}
 【易混淆点】${contrastsText(p)}${styleTagText(p)}
@@ -1971,7 +1987,7 @@ function AppInner() {
       vv.removeEventListener("scroll", update);
     };
   }, []);
-  const [view, setView] = useState("home"); // home | session | library | mistakes
+  const [view, setView] = useState("home"); // home | session | library | mistakes | confusion(練習帳) | jlpt(JLPT模拟,練習帳的子视图)
   const loaded = useRef(false);
 
   /* --- 学习会话状态 --- */
@@ -2092,6 +2108,9 @@ function AppInner() {
     return `情景对话练习\n场景: ${scene.background}\n学生演: ${scene.userRole} / AI演: ${scene.aiRole}\n目标: ${scene.goal}\n对话记录:\n${historyText}\n先生的总评: ${review.summary}\n可以改进的地方: ${review.issues}${review.suggestions ? `\n更地道的说法: ${review.suggestions}` : ""}`;
   };
   const [weeklyFormal, setWeeklyFormal] = useState(false);
+  // 首页"设置与备份""学习报告"这两个折叠区块,手风琴式(同一时间最多展开一个),
+  // 默认都收起——都是调整频率低/优先级不高的内容,收起能让首页别一打开就一长串
+  const [homeOpenSection, setHomeOpenSection] = useState(null); // null | "settings" | "report"
   const [showExport, setShowExport] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
@@ -4395,9 +4414,7 @@ function AppInner() {
                 先消化积压。想调回去可以在设置里改。
               </div>
             )}
-            {PATTERNS.length === 0 ? (
-              <div className="all-done serif">这本教材还没有内容 📭<br /><span className="all-done-sub">句型还没录入,切到别的教材看看吧</span></div>
-            ) : db.session && !staleSrsSession && !staleHwSession ? null : dueList.length + newList.length > 0 ? (
+            {db.session && !staleSrsSession && !staleHwSession ? null : dueList.length + newList.length > 0 ? (
               <button className="btn-main" onClick={startSession}>開始 · 今日の学習</button>
             ) : (
               <div className="all-done serif">今日の分は終わりました 🎌<br /><span className="all-done-sub">今天的任务已全部完成,明天见</span></div>
@@ -4488,107 +4505,126 @@ function AppInner() {
             )}
           </section>
 
-          {/* 注意这里必须展开 ...d.settings:以前写成 settings:{newPerDay:...} 会把整个
-              settings 换掉,顺手把已选的听力语音(voiceURI)清空 */}
-          <section className="settings-row">
-            <span>每天新学句型</span>
-            <div className="stepper">
-              <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, newPerDay: Math.max(0, d.settings.newPerDay - 1) } }))}>−</button>
-              <b>{db.settings.newPerDay}</b>
-              <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, newPerDay: Math.min(20, d.settings.newPerDay + 1) } }))}>＋</button>
-            </div>
-          </section>
-
-          <section className="settings-row">
-            <span>每天复习上限</span>
-            <div className="stepper">
-              <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, reviewCap: Math.max(10, (d.settings.reviewCap || REVIEW_CAP_DEFAULT) - 5) } }))}>−</button>
-              <b>{db.settings.reviewCap || REVIEW_CAP_DEFAULT}</b>
-              <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, reviewCap: Math.min(200, (d.settings.reviewCap || REVIEW_CAP_DEFAULT) + 5) } }))}>＋</button>
-            </div>
-          </section>
-          <div className="settings-note">
-            超出上限的到期句型会顺延到之后,不会消失。进入 N3/N2 之后句子变长、单题更费时,
-            可以把这个数字调低。
-          </div>
-
           {db.stats.total > 0 && (
             <div className="mini-stats">累计答题 {db.stats.total} · 正确率 {Math.round((db.stats.ok / db.stats.total) * 100)}%</div>
           )}
 
-          {db.stats.total > 0 && (
-            <section className="report-section">
-              <div className="report-head">学习报告</div>
-              <div className="streak-row">
-                <div className="streak-block">
-                  <div className="streak-num">🔥{streak}</div>
-                  <div className="streak-label">连续学习(天)</div>
-                </div>
-                <div className="streak-block">
-                  <div className="streak-num">{longestStreak}</div>
-                  <div className="streak-label">最长记录(天)</div>
-                </div>
-              </div>
-              <div className="heatmap-label">近{HEATMAP_DAYS}天正确率</div>
-              <div className="heatmap-row">
-                {heatmapCells.map((c) => <div key={c.date} className={"heatmap-cell " + c.cls} />)}
-              </div>
-              {weakPatternRanking.length > 0 && (
-                <>
-                  <div className="heatmap-label">薄弱句型(近30天错题最多)</div>
-                  <div className="weak-list">
-                    {weakPatternRanking.map((w) => (
-                      <div key={w.p.id} className="weak-item">
-                        <span className="serif">{w.p.pattern}</span>
-                        <span className="weak-count">错 {w.count} 次</span>
-                      </div>
-                    ))}
+          <section className="cf-section">
+            <button className="cf-section-head" onClick={() => setHomeOpenSection((s) => (s === "settings" ? null : "settings"))}>
+              <span className="cf-section-title">设置与备份</span>
+              <span className="cf-section-meta">每天新学 {db.settings.newPerDay} · 复习上限 {db.settings.reviewCap || REVIEW_CAP_DEFAULT}</span>
+              <span className="cf-section-arrow">{homeOpenSection === "settings" ? "−" : "+"}</span>
+            </button>
+            {homeOpenSection === "settings" && (
+              <div className="cf-section-body">
+                {/* 注意这里必须展开 ...d.settings:以前写成 settings:{newPerDay:...} 会把整个
+                    settings 换掉,顺手把已选的听力语音(voiceURI)清空 */}
+                <section className="settings-row">
+                  <span>每天新学句型</span>
+                  <div className="stepper">
+                    <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, newPerDay: Math.max(0, d.settings.newPerDay - 1) } }))}>−</button>
+                    <b>{db.settings.newPerDay}</b>
+                    <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, newPerDay: Math.min(20, d.settings.newPerDay + 1) } }))}>＋</button>
                   </div>
-                </>
+                </section>
+
+                <section className="settings-row">
+                  <span>每天复习上限</span>
+                  <div className="stepper">
+                    <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, reviewCap: Math.max(10, (d.settings.reviewCap || REVIEW_CAP_DEFAULT) - 5) } }))}>−</button>
+                    <b>{db.settings.reviewCap || REVIEW_CAP_DEFAULT}</b>
+                    <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, reviewCap: Math.min(200, (d.settings.reviewCap || REVIEW_CAP_DEFAULT) + 5) } }))}>＋</button>
+                  </div>
+                </section>
+                <div className="settings-note">
+                  超出上限的到期句型会顺延到之后,不会消失。进入 N3/N2 之后句子变长、单题更费时,
+                  可以把这个数字调低。
+                </div>
+
+                <section className="backup-section">
+                  <div className="backup-head">数据备份(跨设备手动搬运,以防云端存储连不上)</div>
+                  <div className="btn-row">
+                    <button className="btn-mini" onClick={() => { setShowExport(true); setShowImport(false); }}>导出进度</button>
+                    <button className="btn-mini ghost" onClick={() => { setShowImport(true); setShowExport(false); }}>导入进度</button>
+                  </div>
+                  {showExport && (
+                    <div className="backup-card">
+                      <div className="backup-title">复制下面这段文字,保存到备忘录/微信"文件传输助手"里,换设备时粘贴进"导入进度"即可</div>
+                      <textarea className="backup-box" readOnly value={JSON.stringify(db)} onFocus={(e) => e.target.select()} />
+                      <div className="btn-row">
+                        <button className="btn-mini" onClick={copyExport}>复制</button>
+                        <button className="btn-mini ghost" onClick={() => setShowExport(false)}>关闭</button>
+                      </div>
+                      {copyMsg && <div className="copy-msg">{copyMsg}</div>}
+                    </div>
+                  )}
+                  {showImport && (
+                    <div className="backup-card">
+                      <div className="backup-title">粘贴之前导出的文字,会覆盖当前设备上的记录</div>
+                      <textarea className="backup-box" value={importText} onChange={(e) => setImportText(e.target.value)} placeholder="粘贴导出的内容…" />
+                      <div className="btn-row">
+                        <button className="btn-mini" onClick={doImport}>确认导入(覆盖当前记录)</button>
+                        <button className="btn-mini ghost" onClick={() => { setShowImport(false); setImportText(""); setImportMsg(""); }}>取消</button>
+                      </div>
+                      {importMsg && <div className="copy-msg">{importMsg}</div>}
+                    </div>
+                  )}
+                </section>
+
+                <section className="account-section">
+                  <button
+                    className="btn-mini ghost"
+                    onClick={async () => {
+                      if (!window.confirm("确定要退出登录吗?进度已经存在云端,重新登录后还在。")) return;
+                      await supabase.auth.signOut();
+                      window.location.reload();
+                    }}
+                  >退出登录</button>
+                </section>
+              </div>
+            )}
+          </section>
+
+          {db.stats.total > 0 && (
+            <section className="cf-section">
+              <button className="cf-section-head" onClick={() => setHomeOpenSection((s) => (s === "report" ? null : "report"))}>
+                <span className="cf-section-title">学习报告</span>
+                <span className="cf-section-meta">🔥{streak} 连续 · 最长{longestStreak}天</span>
+                <span className="cf-section-arrow">{homeOpenSection === "report" ? "−" : "+"}</span>
+              </button>
+              {homeOpenSection === "report" && (
+                <div className="cf-section-body">
+                  <div className="streak-row">
+                    <div className="streak-block">
+                      <div className="streak-num">🔥{streak}</div>
+                      <div className="streak-label">连续学习(天)</div>
+                    </div>
+                    <div className="streak-block">
+                      <div className="streak-num">{longestStreak}</div>
+                      <div className="streak-label">最长记录(天)</div>
+                    </div>
+                  </div>
+                  <div className="heatmap-label">近{HEATMAP_DAYS}天正确率</div>
+                  <div className="heatmap-row">
+                    {heatmapCells.map((c) => <div key={c.date} className={"heatmap-cell " + c.cls} />)}
+                  </div>
+                  {weakPatternRanking.length > 0 && (
+                    <>
+                      <div className="heatmap-label">薄弱句型(近30天错题最多)</div>
+                      <div className="weak-list">
+                        {weakPatternRanking.map((w) => (
+                          <div key={w.p.id} className="weak-item">
+                            <span className="serif">{w.p.pattern}</span>
+                            <span className="weak-count">错 {w.count} 次</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
               )}
             </section>
           )}
-
-          <section className="backup-section">
-            <div className="backup-head">数据备份(跨设备手动搬运,以防云端存储连不上)</div>
-            <div className="btn-row">
-              <button className="btn-mini" onClick={() => { setShowExport(true); setShowImport(false); }}>导出进度</button>
-              <button className="btn-mini ghost" onClick={() => { setShowImport(true); setShowExport(false); }}>导入进度</button>
-            </div>
-            {showExport && (
-              <div className="backup-card">
-                <div className="backup-title">复制下面这段文字,保存到备忘录/微信"文件传输助手"里,换设备时粘贴进"导入进度"即可</div>
-                <textarea className="backup-box" readOnly value={JSON.stringify(db)} onFocus={(e) => e.target.select()} />
-                <div className="btn-row">
-                  <button className="btn-mini" onClick={copyExport}>复制</button>
-                  <button className="btn-mini ghost" onClick={() => setShowExport(false)}>关闭</button>
-                </div>
-                {copyMsg && <div className="copy-msg">{copyMsg}</div>}
-              </div>
-            )}
-            {showImport && (
-              <div className="backup-card">
-                <div className="backup-title">粘贴之前导出的文字,会覆盖当前设备上的记录</div>
-                <textarea className="backup-box" value={importText} onChange={(e) => setImportText(e.target.value)} placeholder="粘贴导出的内容…" />
-                <div className="btn-row">
-                  <button className="btn-mini" onClick={doImport}>确认导入(覆盖当前记录)</button>
-                  <button className="btn-mini ghost" onClick={() => { setShowImport(false); setImportText(""); setImportMsg(""); }}>取消</button>
-                </div>
-                {importMsg && <div className="copy-msg">{importMsg}</div>}
-              </div>
-            )}
-          </section>
-
-          <section className="account-section">
-            <button
-              className="btn-mini ghost"
-              onClick={async () => {
-                if (!window.confirm("确定要退出登录吗?进度已经存在云端,重新登录后还在。")) return;
-                await supabase.auth.signOut();
-                window.location.reload();
-              }}
-            >退出登录</button>
-          </section>
         </main>
       )}
 
@@ -5017,9 +5053,7 @@ function AppInner() {
             {cfOpenSection === "jlpt" && (
               <div className="cf-section-body">
                 <div className="cf-note">仿真题的四选一形式,想练多少练多少,不进复习排期,答错记进錯題本</div>
-                {PATTERNS.length === 0 ? (
-                  <div className="cf-empty"><div>这本教材还没有内容,切到别的教材看看吧</div></div>
-                ) : learnedIds.length === 0 ? (
+                {learnedIds.length === 0 ? (
                   <div className="cf-empty"><div>先学几个句型,再来做模拟题吧</div></div>
                 ) : (
                   <div className="jlpt-row">
@@ -5646,10 +5680,8 @@ html,body{overflow-x:hidden}
 .stepper button{width:30px;height:30px;border-radius:8px;border:1px solid var(--line);background:none;font-size:16px;cursor:pointer;color:var(--ai-deep)}
 .mini-stats{margin-top:14px;font-size:12px;color:var(--ink-soft);text-align:center}
 
-/* 学习报告:优先级最低的锦上添花区块,特意放在首页最下方、字号比其它区块小一号,
-   视觉上不和"待复习/新句型/開始"这些真正每天要用的东西抢注意力 */
-.report-section{margin-top:18px;padding-top:14px;border-top:1px dashed var(--line)}
-.report-head{font-size:11px;color:var(--ink-soft);letter-spacing:1px;margin-bottom:10px;text-align:center}
+/* 学习报告:优先级最低的锦上添花区块,折叠在 cf-section 手风琴里,默认收起,
+   不和"待复习/新句型/開始"这些真正每天要用的东西抢注意力 */
 .streak-row{display:flex;justify-content:center;gap:32px;margin-bottom:14px}
 .streak-block{text-align:center}
 .streak-num{font-size:20px;font-weight:700;color:var(--ai-deep)}

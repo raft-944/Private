@@ -2015,22 +2015,26 @@ function AppInner() {
     return () => { window.speechSynthesis.onvoiceschanged = null; };
   }, []);
 
-  /* 底部导航栏改用 position:fixed 后,靠 visualViewport 感知虚拟键盘弹出的高度,
-     动态把 --kb-inset 设成"被键盘挡住的那部分高度",导航栏的 bottom 用这个变量偏移——
+  /* 底部导航栏用 position:fixed 钉在视口底部,靠 visualViewport 感知虚拟键盘有没有弹出——
      iOS Safari 的 100dvh 不会因为键盘弹出而缩小,单纯用 dvh 算不出键盘挡了多少,
-     必须用 visualViewport 实测。没有 visualViewport 的浏览器(极少数)就保持 0,不做处理。 */
+     必须用 visualViewport 实测。没有 visualViewport 的浏览器(极少数)就不做处理,
+     导航栏保持常显。
+     以前键盘弹起时是把导航栏顶到键盘上方(--kb-inset 偏移 bottom),但这样一来,
+     打字答题时导航栏会悬在答题框/提交按钮附近的屏幕中间,和当前操作区挤在一起、
+     很容易被误点,反而更乱——用户反馈"这四个按钮出现在屏幕上会干扰答题"。
+     现在改成:键盘弹起时导航栏直接隐藏(不需要在打字的时候切换到别的一级页面),
+     收起键盘后自动恢复常显、贴在真正的视口底部。 */
   useEffect(() => {
     const vv = window.visualViewport;
     if (!vv) return;
     const root = document.documentElement;
     const update = () => {
       const raw = window.innerHeight - vv.height - vv.offsetTop;
-      // 只有明显是软键盘(高度可观)才把导航栏顶上去。iOS Safari 的底部工具栏
-      // 收缩/展开会让 innerHeight 和 visualViewport.height 差出几十像素,这个小差值
-      // 不是键盘,却会被误当成键盘、把固定在底部的导航栏顶起来留出一片空白(用户反馈的bug)。
-      // 键盘至少一两百像素高,设个阈值把工具栏这种小差值滤掉。
-      const kb = raw > 150 ? raw : 0;
-      root.style.setProperty("--kb-inset", kb + "px");
+      // 只有明显是软键盘(高度可观)才隐藏导航栏。iOS Safari 的底部工具栏收缩/展开
+      // 会让 innerHeight 和 visualViewport.height 差出几十像素,这个小差值不是键盘,
+      // 键盘至少一两百像素高,设个阈值把工具栏这种小差值滤掉,不能因为它就隐藏导航栏。
+      const kbOpen = raw > 150;
+      root.classList.toggle("kb-open", kbOpen);
     };
     update();
     vv.addEventListener("resize", update);
@@ -2039,6 +2043,29 @@ function AppInner() {
       vv.removeEventListener("resize", update);
       vv.removeEventListener("scroll", update);
     };
+  }, []);
+  /* iOS Safari 的 position:fixed 老毛病(见 .nav 样式旁边的注释)不是只在"做完一组题、
+     从答题框切到讲评列表"这一个时机会犯——讲评页/结果页本来就长,任何让页面变得更高的
+     互动(比如展开一条追问 FollowUpAsk、展开被折叠的答对题、追问回复陆续到达)都可能
+     触发同一个毛病,而这些互动没法在几个固定的 phase 切换点上一次性堵住。
+     用 ResizeObserver 盯着整个文档的高度,只要变了就强制给导航栏来一次"隐藏再显示"——
+     这个开关在同一帧内完成,浏览器不会真的画出"消失"这一帧,但足以让 WebKit
+     按当前真实视口重新计算这个 fixed 元素的位置,而不是沿用它上一次算出来的(可能已经
+     不对的)位置。比 phase 切换时的 scrollTo(0,0) 更通用,两者不冲突、可以都留着。 */
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined") return;
+    // 导航栏在 db 还没读完(读盘是异步的)之前不存在,所以每次回调时现查,
+    // 不能在 effect 顶部只查一次缓存下来——那样如果这次挂载时 db 还没就绪、
+    // nav 还没渲染出来,就会一直拿着一个 null 直到组件重新挂载,形同失效。
+    const ro = new ResizeObserver(() => {
+      const nav = document.querySelector("nav.nav");
+      if (!nav) return;
+      nav.style.display = "none";
+      void nav.offsetHeight; // 强制读一次布局,确保上面这行已经生效,不会被浏览器合并跳过
+      nav.style.display = "";
+    });
+    ro.observe(document.body);
+    return () => ro.disconnect();
   }, []);
   const [view, setView] = useState("home"); // home | session | library | mistakes | confusion(練習帳) | jlpt(JLPT模拟,練習帳的子视图)
   const loaded = useRef(false);
@@ -5719,7 +5746,6 @@ function Style() {
   color-scheme:light;
   --paper:#F5F3EC; --card:#FFFFFF; --ink:#2A2B30; --ink-soft:#6B6D76;
   --ai:#2E4A7D; --ai-deep:#223A5E; --shu:#C0392F; --line:#E4E0D4;
-  --kb-inset:0px;
   --tint-red-bg:#FCEBE9; --tint-red2-bg:#FBEAEA; --tint-red2-border:#EAC5C5; --tint-red-onuser:#F6D6D1;
   --tint-blue-bg:#EAF0F9; --tint-blue2-bg:#DCE6F4;
   --tint-brown-bg:#F6ECE4; --tint-brown-fg:#9A6B3F;
@@ -6222,20 +6248,22 @@ html,body{overflow-x:hidden}
 
 /* 用 position:fixed(而不是原来的 sticky+margin-top:auto flex 技巧)钉在视口底部:
    sticky 在 .app 内容比屏幕高的时候会跟内容"脱节",出现下面还露出一截内容的错位;
-   fixed 直接锚定视口,不受 .app 实际高度影响。bottom 用 --kb-inset(JS通过
-   visualViewport算出来的键盘遮挡高度)动态偏移,键盘弹起时导航栏跟着提到键盘上方,
-   不会留出一大片空白。left/transform 是为了在宽屏上跟 .app 的居中对齐,
-   手机端视口本来就比640px窄,效果等同于占满宽度。 */
+   fixed 直接锚定视口,不受 .app 实际高度影响。left/transform 是为了在宽屏上跟 .app
+   的居中对齐,手机端视口本来就比640px窄,效果等同于占满宽度。
+   键盘弹起时(root 带 kb-open 类,见 visualViewport 那个 effect)直接隐藏导航栏——
+   以前是顶到键盘上方,但那样打字答题时导航栏会悬在答题框/提交按钮附近、
+   跟当前操作区挤在一起,容易被误点也显得乱;藏起来最干净,收起键盘后自动恢复。 */
 /* translateZ(0)+backface-visibility 是给 iOS Safari 的兜底:这类"position:fixed 的
    元素在页面高度变化后飘在半空、没贴在真正视口底部"的问题是 WebKit 一个老毛病
    (常见触发点:内容从矮变高/从高变矮,比如做完一组题后从答题框切到一整页讲评列表),
    强制把导航栏提升成独立合成层,能让浏览器按视口而不是按上一次的文档流布局来定位它。
    这是社区里公认的常见缓解手段,但这个沙盒环境没有真机 Safari,没法验证是否根治——
    如果重新部署后这个问题还在,请告诉我具体是哪个操作触发的,我再针对性排查。 */
-.nav{position:fixed;left:50%;bottom:var(--kb-inset,0px);
+.nav{position:fixed;left:50%;bottom:0;
   transform:translateX(-50%) translateZ(0);-webkit-backface-visibility:hidden;backface-visibility:hidden;
   width:100%;max-width:640px;display:flex;flex:0 0 auto;
   background:var(--card);border-top:1px solid var(--line);padding:6px 0 max(6px, env(safe-area-inset-bottom));z-index:10}
+.kb-open .nav{display:none}
 .nav-btn{flex:1;padding:12px 0;background:none;border:none;font-size:14px;color:var(--ink-soft);cursor:pointer;letter-spacing:2px}
 .nav-btn.on{color:var(--ai-deep);font-weight:700}
 

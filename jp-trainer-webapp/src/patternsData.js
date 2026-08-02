@@ -1874,6 +1874,7 @@ const SHOKYU = [
   {
     "lesson": 20,
     "level": "N5",
+    "style": "简体",
     "pattern": "普通形(简体)",
     "conn": "です・ます → 普通形",
     "meaning": "简体句(朋友间口语)",

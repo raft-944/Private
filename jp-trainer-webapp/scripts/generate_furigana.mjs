@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import kuromoji from "kuromoji";
+import kanjidic from "kanjidic";
 import { PATTERNS } from "../src/patternsData.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -62,6 +63,116 @@ function splitOkurigana(surface, reading) {
   return { kanjiPart, kanjiReading, okuri };
 }
 
+const DAKUTEN = { か:"が",き:"ぎ",く:"ぐ",け:"げ",こ:"ご", さ:"ざ",し:"じ",す:"ず",せ:"ぜ",そ:"ぞ",
+  た:"だ",ち:"ぢ",つ:"づ",て:"で",と:"ど", は:"ば",ひ:"び",ふ:"ぶ",へ:"べ",ほ:"ぼ" };
+
+/* 每个汉字在 KANJIDIC 里查到的候选读音(去掉训读里的送假名部分、去掉前缀/后缀标记的"-"),
+   查不到这个字(生僻字/々之类的叠字符号)就返回 null,调用方遇到 null 就放弃整个词元的
+   逐字拆分,只按整体读音标注(安全兜底)。 */
+const candidateCache = new Map();
+function getCandidates(char) {
+  if (candidateCache.has(char)) return candidateCache.get(char);
+  let entry;
+  try { entry = kanjidic.lookup(char); } catch { entry = null; }
+  if (!entry) { candidateCache.set(char, null); return null; }
+  const set = new Set();
+  (entry.onyomi || []).forEach((r) => set.add(kataToHira(r)));
+  (entry.kunyomi || []).forEach((r) => {
+    const stem = r.split(".")[0].replace(/^-/, "").replace(/-$/, "");
+    if (stem) set.add(stem);
+  });
+  const list = [...set].filter(Boolean);
+  candidateCache.set(char, list);
+  return list;
+}
+
+/* 把一个"纯汉字"词元(比如"会社"、"皆様"、"一人暮")按 KANJIDIC 候选读音回溯拆成
+   每个字自己的读音,要求拆出来的读音依次拼起来跟词元整体读音一字不差才算数;
+   非首字额外允许浊音变(健康的"康"不需要,但花火的"火"读"び"这种要靠这个才行)。
+   多个字都能满足时不刻意找"最好"的一种,找到第一个能完整拼上的组合就采用——
+   反正目的只是"这个字对应哪几个假名",不是判断哪种读法在语义上更常见。
+   任何一步找不到候选、或者怎么试都拼不出完整读音,就返回 null(调用方会整体标注,不细分)。 */
+function decomposeKanjiRun(chars, targetReading) {
+  const perCharCandidates = [];
+  for (const c of chars) {
+    const base = getCandidates(c);
+    if (!base || !base.length) return null;
+    perCharCandidates.push(base);
+  }
+  function backtrack(charIdx, readIdx, acc) {
+    if (charIdx === chars.length) return readIdx === targetReading.length ? acc : null;
+    const remaining = targetReading.slice(readIdx);
+    for (const cand of perCharCandidates[charIdx]) {
+      const tries = charIdx === 0 ? [cand] : [cand, ...(DAKUTEN[cand[0]] ? [DAKUTEN[cand[0]] + cand.slice(1)] : [])];
+      for (const t of tries) {
+        if (remaining.startsWith(t)) {
+          const r = backtrack(charIdx + 1, readIdx + t.length, [...acc, t]);
+          if (r) return r;
+        }
+      }
+    }
+    return null;
+  }
+  const result = backtrack(0, 0, []);
+  if (!result) return null;
+  return chars.map((c, i) => [c, result[i]]);
+}
+
+/* 把一个"纯汉字"词元(kanjiPart,可能只有1个字,也可能好几个字连在一起)转成
+   要塞进 segs 数组里的东西:1个字就直接整体一对[字,读音];好几个字先试试
+   decomposeKanjiRun 能不能拆到每个字自己的读音,拆不出来就整体当1段处理
+   (不会出现"标了但标错"的情况,只是granularity粗一点)。 */
+function kanjiSpanSegs(kanjiPart, kanjiReading) {
+  const chars = [...kanjiPart];
+  if (chars.length <= 1) return [[kanjiPart, kanjiReading]];
+  const decomposed = decomposeKanjiRun(chars, kanjiReading);
+  return decomposed || [[kanjiPart, kanjiReading]];
+}
+
+/* 有些复合动词词元本身就带着中间的假名(比如"走り出し"= 走+り+出+し,"り"是送假名,
+   不是在词元末尾而是夹在两个汉字中间),splitOkurigana 只处理"末尾"这一种情况,
+   处理不了这种。这里对整个词元(汉字+假名混在一起,包括末尾的送假名)做一次性回溯:
+   假名字符的读音就是它自己(本来就写在那里,不用猜),汉字字符按 KANJIDIC 候选去试,
+   跟 decomposeKanjiRun 一样要求首尾对得上整个词元的读音才算数。
+   拆成功就返回“每个字自己的段”(假名会在外层按需要合并成一段纯文本,汉字各自一段),
+   拆不出来(比如候选字典查不到某个字、或者怎么拼都拼不满)就返回 null,
+   调用方会退回到"先按末尾送假名切一刀,剩下的汉字块再尝试拆"这条老路径。 */
+function decomposeFullToken(surface, reading) {
+  const chars = [...surface];
+  const perCharCandidates = chars.map((c) => (KANA_CHAR.test(c) ? [c] : getCandidates(c)));
+  if (perCharCandidates.some((c) => !c || !c.length)) return null;
+  function backtrack(i, readIdx, acc) {
+    if (i === chars.length) return readIdx === reading.length ? acc : null;
+    const remaining = reading.slice(readIdx);
+    const isKanji = !KANA_CHAR.test(chars[i]);
+    for (const cand of perCharCandidates[i]) {
+      const tries = i === 0 || !isKanji ? [cand] : [cand, ...(DAKUTEN[cand[0]] ? [DAKUTEN[cand[0]] + cand.slice(1)] : [])];
+      for (const t of tries) {
+        if (remaining.startsWith(t)) {
+          const r = backtrack(i + 1, readIdx + t.length, [...acc, isKanji ? [chars[i], t] : chars[i]]);
+          if (r) return r;
+        }
+      }
+    }
+    return null;
+  }
+  return backtrack(0, 0, []);
+}
+
+/* decomposeFullToken 拆出来的是"每个字一项"的扁平列表,相邻的纯假名项(字符串)
+   合并成一段,汉字项([字,读音])各自独立保留,拼成最终要塞进 segs 的数组。 */
+function mergeFullTokenResult(items) {
+  const out = [];
+  let buf = "";
+  for (const item of items) {
+    if (typeof item === "string") { buf += item; continue; }
+    if (buf) { out.push(buf); buf = ""; }
+    out.push(item);
+  }
+  if (buf) out.push(buf);
+  return out;
+}
+
 /* 把一句话切成 [表层文字, 读音?] 的分段数组;没有汉字的分段(纯假名/标点/数字/英文)
    不带读音(前端渲染时原样显示,不套 <ruby>),有汉字的分段才带上对应假名读音。
    相邻的"没有汉字的分段"合并成一段,减少数组项数、也让标点紧跟在词后面不会被单独包一层。 */
@@ -74,14 +185,23 @@ function toSegments(tokens) {
     if (HAS_KANJI.test(surface)) {
       const reading = t.reading ? kataToHira(t.reading) : "";
       if (!reading) { flushPlain(); segs.push(surface); continue; }
+      const full = decomposeFullToken(surface, reading);
+      flushPlain();
+      if (full) {
+        const merged = mergeFullTokenResult(full);
+        // 末尾如果是纯假名段,先放进 plainBuf(而不是直接落进 segs),这样能跟下一个
+        // 词元开头的假名接着合并,不会因为在词元边界切开而多出没必要的分段
+        const last = merged[merged.length - 1];
+        if (typeof last === "string") { segs.push(...merged.slice(0, -1)); plainBuf += last; }
+        else segs.push(...merged);
+        continue;
+      }
       const split = splitOkurigana(surface, reading);
       if (split) {
-        flushPlain();
-        segs.push([split.kanjiPart, split.kanjiReading]);
+        segs.push(...kanjiSpanSegs(split.kanjiPart, split.kanjiReading));
         plainBuf += split.okuri;
       } else {
-        flushPlain();
-        segs.push([surface, reading]);
+        segs.push(...kanjiSpanSegs(surface, reading));
       }
     } else {
       plainBuf += surface;

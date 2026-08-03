@@ -4,6 +4,7 @@ import { PATTERNS, ORDERED } from "./patternsData.js";
 import { SCENES, resolveScenePatterns } from "./data/scenes.js";
 import { CONFUSION_SCENES } from "./data/confusionScenes.js";
 import { CONFUSION_EMAIL_TOPICS } from "./data/confusionEmails.js";
+import { FURIGANA } from "./data/furigana.js";
 
 /* 到期队列的排序:按"最容易遗忘"排——①间隔档位(lv)低的优先,它们记得最不牢;
    ②同档位里逾期越久的优先。复习上限截断时,留下的就一定是最该先复习的那些。
@@ -696,6 +697,25 @@ function ExAudioBtn({ text }) {
         audio.play().catch(() => setFailed(true));
       }}
     >🔊</button>
+  );
+}
+
+/* 句型库例句的假名注音(离线批量用 kuromoji 分词生成好的静态数据,见 scripts/generate_furigana.mjs,
+   不是运行时现分词)。按内容哈希查表,和例句配音用的是同一套哈希算法,查不到就原样显示纯文本——
+   AI临场生成的对话/阅读句子等动态内容没有预生成注音,不强求覆盖。 */
+function KanjiText({ text, className }) {
+  const segs = text ? FURIGANA[hashStr(text)] : null;
+  if (!segs) return <span className={className}>{text}</span>;
+  return (
+    <span className={className}>
+      {segs.map((seg, i) =>
+        Array.isArray(seg) ? (
+          <ruby key={i} className="kj-ruby">{seg[0]}<rt>{seg[1]}</rt></ruby>
+        ) : (
+          <span key={i}>{seg}</span>
+        )
+      )}
+    </span>
   );
 }
 
@@ -1907,7 +1927,7 @@ function PatternLecture({ p, defaultOpen }) {
                   <div className="lec-usage-head"><span className="lec-usage-no">{i + 1}</span>{u.use}</div>
                   {(u.ex || []).map((e, j) => (
                     <div key={j} className="lec-ex">
-                      <div className="serif lec-ex-jp">{e[0]}<ExAudioBtn text={e[0]} /></div>
+                      <div className="serif lec-ex-jp"><KanjiText text={e[0]} /><ExAudioBtn text={e[0]} /></div>
                       <div className="lec-ex-cn">{e[1]}</div>
                     </div>
                   ))}
@@ -1932,7 +1952,7 @@ function PatternLecture({ p, defaultOpen }) {
               <label>その他の例文</label>
               {extras.map((e, i) => (
                 <div key={i} className="lec-ex">
-                  <div className="serif lec-ex-jp">{e[0]}<ExAudioBtn text={e[0]} /></div>
+                  <div className="serif lec-ex-jp"><KanjiText text={e[0]} /><ExAudioBtn text={e[0]} /></div>
                   <div className="lec-ex-cn">{e[1]}</div>
                 </div>
               ))}
@@ -5213,7 +5233,8 @@ function AppInner() {
                         {pr ? <span className="badge badge-on">Lv{pr.lv} · {pr.due <= t ? "今日到期" : pr.due + " 复习"}</span> : <span className="badge">未学</span>}
                       </div>
                       <div className="pr-meaning">{p.meaning} 〔{p.conn}〕</div>
-                      <div className="pr-ex serif">{p.exJP}<ExAudioBtn text={p.exJP} /></div>
+                      <div className="pr-ex serif"><KanjiText text={p.exJP} /><ExAudioBtn text={p.exJP} /></div>
+                      <div className="pr-ex-cn">{p.exCN}</div>
                       <PatternLecture p={p} />
                       <button className="btn-mini" onClick={() => startFree(p)}>练一题(不影响排期)</button>
                     </div>
@@ -6225,7 +6246,8 @@ html,body{overflow-x:hidden}
 .badge-on{background:var(--tint-blue-bg);color:var(--ai)}
 .badge-ext{background:var(--tint-brown-bg);color:var(--tint-brown-fg)}
 .pr-meaning{font-size:13px;color:var(--ink-soft);margin-top:4px}
-.pr-ex{font-size:14px;margin-top:4px}
+.pr-ex{font-size:14px;margin-top:4px;line-height:2.1}
+.pr-ex-cn{font-size:12px;color:var(--ink-soft);line-height:1.6;margin-top:2px}
 
 /* 句型讲解(句型库 / 新句型介绍页共用)。排版照教材语法页的层次:
    接续在最上,然后是编号分开的用法+例句,最后是注意事项和易混淆。 */
@@ -6246,8 +6268,9 @@ html,body{overflow-x:hidden}
 .lec-usage-no{flex:0 0 auto;width:16px;height:16px;border-radius:50%;background:var(--ai);color:#fff;
   display:inline-flex;align-items:center;justify-content:center;font-size:10px;margin-top:2px}
 .lec-ex{margin:5px 0 0 22px;padding-left:8px;border-left:2px solid var(--line)}
-.lec-ex-jp{font-size:14px;color:var(--ai-deep);line-height:1.7}
+.lec-ex-jp{font-size:14px;color:var(--ai-deep);line-height:2.1}
 .lec-ex-cn{font-size:12px;color:var(--ink-soft);line-height:1.6}
+.kj-ruby rt{font-size:10px;color:var(--ink-soft);user-select:none;font-weight:400}
 .lec-note{font-size:12px;color:var(--shu);line-height:1.7;margin-bottom:3px}
 .lec-text{font-size:13px;line-height:1.8;color:var(--ink)}
 .lec-contrast{margin-bottom:8px}

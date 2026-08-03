@@ -1800,7 +1800,13 @@ function WordHintText({ text, words, onHintWord, className }) {
    segments 为空(还没到位)时原样显示纯文本。 */
 function ChineseTaskText({ text, segments, sentence, targetDesc, onReveal, className }) {
   const [entries, setEntries] = useState({}); // i -> {status:"loading"|"shown"|"hidden", jp, yomi}
-  if (!segments || !segments.length) return <span className={className}>{text}</span>;
+  /* 兜底:题面是照着 segments 渲染的,所以 segments 拼起来必须和原题面一字不差,
+     否则显示出来的题目就不是真正的题目了(漏字/漏标点都会让人按错的题意作答,
+     等判卷时才发现对不上)。对不上就干脆不做分词、原样显示题面——
+     宁可失去"点词查释义"这个辅助功能,也不能把题目本身显示错。 */
+  if (!segments || !segments.length || segments.join("") !== text) {
+    return <span className={className}>{text}</span>;
+  }
 
   const isPunct = (s) => /^[，。？！、,.!?()（）「」『』\s]+$/.test(s);
 
@@ -2131,29 +2137,11 @@ function AppInner() {
       vv.removeEventListener("scroll", update);
     };
   }, []);
-  /* iOS Safari 的 position:fixed 老毛病(见 .nav 样式旁边的注释)不是只在"做完一组题、
-     从答题框切到讲评列表"这一个时机会犯——讲评页/结果页本来就长,任何让页面变得更高的
-     互动(比如展开一条追问 FollowUpAsk、展开被折叠的答对题、追问回复陆续到达)都可能
-     触发同一个毛病,而这些互动没法在几个固定的 phase 切换点上一次性堵住。
-     用 ResizeObserver 盯着整个文档的高度,只要变了就强制给导航栏来一次"隐藏再显示"——
-     这个开关在同一帧内完成,浏览器不会真的画出"消失"这一帧,但足以让 WebKit
-     按当前真实视口重新计算这个 fixed 元素的位置,而不是沿用它上一次算出来的(可能已经
-     不对的)位置。比 phase 切换时的 scrollTo(0,0) 更通用,两者不冲突、可以都留着。 */
-  useEffect(() => {
-    if (typeof ResizeObserver === "undefined") return;
-    // 导航栏在 db 还没读完(读盘是异步的)之前不存在,所以每次回调时现查,
-    // 不能在 effect 顶部只查一次缓存下来——那样如果这次挂载时 db 还没就绪、
-    // nav 还没渲染出来,就会一直拿着一个 null 直到组件重新挂载,形同失效。
-    const ro = new ResizeObserver(() => {
-      const nav = document.querySelector("nav.nav");
-      if (!nav) return;
-      nav.style.display = "none";
-      void nav.offsetHeight; // 强制读一次布局,确保上面这行已经生效,不会被浏览器合并跳过
-      nav.style.display = "";
-    });
-    ro.observe(document.body);
-    return () => ro.disconnect();
-  }, []);
+  /* 页面内容的滚动容器(见渲染处的 .app-scroll)。以前 body 直接滚、导航栏靠
+     position:fixed 钉在底部,于是要用 scrollTo/ResizeObserver 之类的手段反复"戳"
+     WebKit 重算 fixed 元素位置;现在改成容器内部滚动、导航栏是普通流里的兄弟节点,
+     那些补丁就都不需要了,只保留这个 ref 用来在换页时把内容滚回顶部。 */
+  const scrollRef = useRef(null);
   const [view, setView] = useState("home"); // home | session | library | mistakes | confusion(練習帳) | jlpt(JLPT模拟,練習帳的子视图)
   const loaded = useRef(false);
 
@@ -2241,7 +2229,13 @@ function AppInner() {
      "这道题的语法点描述"这两样准备好交给渲染,不需要单独的 state/effect。 */
   const taskSegmentsFor = (question) => {
     if (!question || question.type === "listening" || question.jpTask || !question.task) return null;
-    const segs = Array.isArray(question.taskSegments) && question.taskSegments.length ? question.taskSegments : naiveSegmentChinese(question.task);
+    /* AI 给的 taskSegments 必须拼回原题面一字不差才能用:题面是照着 segments 渲染的
+       (见 ChineseTaskText),AI 万一漏字、漏标点(实测见过把"怎么样?是什么样的店?"
+       两个问号吃掉),做题时看到的题目就和判卷页显示的原题对不上了——用户会先按残缺的
+       题面作答,判卷时才发现题目其实还有后半句。拼不回去就退回本地分词,
+       本地分词是从题面自己切出来的,拼回去必然一致。 */
+    const aiSegs = Array.isArray(question.taskSegments) && question.taskSegments.length ? question.taskSegments : null;
+    const segs = aiSegs && aiSegs.join("") === question.task ? aiSegs : naiveSegmentChinese(question.task);
     return capSegmentLength(segs);
   };
   const taskTargetDescFor = (item) => item && item.p ? `${item.p.pattern}(${item.p.conn} / ${item.p.meaning})`
@@ -2619,20 +2613,18 @@ function AppInner() {
      看起来像"漏了前面几题"。waiting 现在也展示讲评列表(见下方渲染),所以一并加入。
      dialoguePhase 切到 reviewed 同理:结束对话时人往往已经把聊天记录翻到底部,
      复盘的讲评内容却是从顶上开始写的。
-     顺带:iOS Safari 有个老毛病——页面高度在不触发滚动事件的情况下变化时(比如这里
-     从"一个按钮"变成"一长串列表"),position:fixed 的底部导航栏有时会按旧高度定位、
-     悬在半空而不是贴在真正的视口底部。这个 scrollTo 顺手充当了一次强制滚动,
-     能让浏览器重新计算 fixed 元素的位置,是缓解该问题的手段之一(不能保证根治,
-     因为这类 WebKit 渲染问题在这个沙盒环境里没有真机 Safari 可复现验证)。
+     注意滚的是 .app-scroll 这个容器而不是 window:页面滚动条现在在这个容器上,
+     body 本身是不滚动的(见 .app / .app-scroll 样式),window.scrollTo 对它没有作用。
      (和其它 effect 一样,必须写在 `if (!db) return` 之前——hooks 数量不能变) */
+  const scrollTop = () => { if (scrollRef.current) scrollRef.current.scrollTop = 0; };
   useEffect(() => {
-    if (phase === "chunk" || phase === "done" || phase === "waiting") window.scrollTo(0, 0);
+    if (phase === "chunk" || phase === "done" || phase === "waiting") scrollTop();
   }, [phase]);
   useEffect(() => {
-    if (dialoguePhase === "reviewed") window.scrollTo(0, 0);
+    if (dialoguePhase === "reviewed") scrollTop();
   }, [dialoguePhase]);
   useEffect(() => {
-    if (cfDialoguePhase === "reviewed") window.scrollTo(0, 0);
+    if (cfDialoguePhase === "reviewed") scrollTop();
   }, [cfDialoguePhase]);
 
   const confirmFirstUse = () => {
@@ -4579,6 +4571,11 @@ function AppInner() {
   return (
     <div className="app">
       <Style />
+      {/* 页面内容单独放在一个自己滚动的容器里,底部导航栏是它的兄弟节点。
+          这样导航栏就是普通流里的一个 flex 项、天然待在视口底部,不再需要 position:fixed
+          ——iOS Safari 那些"fixed 元素飘在半空/跟着页面往上滑/残影"的老毛病,
+          根源就是 fixed 元素的合成层与滚动不同步,不用 fixed 就整类问题都不存在了。 */}
+      <div className="app-scroll" ref={scrollRef}>
       <header className="top">
         <div className="brand serif">句型道場</div>
         <div className="brand-sub">JLPT N5〜N1 · 遗忘曲线</div>
@@ -5843,6 +5840,8 @@ function AppInner() {
         </main>
       )}
 
+      </div>
+
       {/* ---------- 底部导航 ---------- */}
       <nav className="nav">
         {[["home", "今日"], ["library", "句型库"], ["confusion", "練習帳"], ["mistakes", "錯題本"]].map(([v, label]) => (
@@ -5903,9 +5902,17 @@ button{appearance:none;-webkit-appearance:none;font:inherit;line-height:1.2;colo
 /* 兜底:任何一处文字算漏了 overflow-wrap 导致顶出边界,横向滚动也就止于裁切,
    不会让整个页面出现可以左右滑动的横向滚动条(那样体验更差,而且会带偏底部导航栏的定位)。 */
 html,body{overflow-x:hidden}
-.app{min-height:100vh;min-height:100dvh;background:var(--paper);color:var(--ink);
+/* 整个应用固定成"一屏高"的竖向 flex:内容区(.app-scroll)自己滚,底部导航栏是它下面
+   的兄弟节点。这样导航栏不需要 position:fixed 就永远待在屏幕底部,也就绕开了 iOS Safari
+   那一整类 fixed 元素的渲染问题(飘在半空、跟着内容往上滑、留下残影)。
+   100dvh 写在 100vh 后面做渐进增强:老浏览器用 vh,新浏览器用会随地址栏伸缩的 dvh。 */
+.app{height:100vh;height:100dvh;overflow:hidden;background:var(--paper);color:var(--ink);
   font-family:"Noto Sans JP","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
   max-width:640px;margin:0 auto;display:flex;flex-direction:column}
+/* overscroll-behavior:contain 防止滚到底/顶时把滚动传给 body(iOS 上那会带出橡皮筋效果,
+   看起来像整个界面连同导航栏一起被拖动)。 */
+.app-scroll{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;
+  overscroll-behavior-y:contain}
 .serif{font-family:"Noto Sans JP","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif}
 
 .top{padding:20px 20px 6px;display:flex;align-items:baseline;gap:10px}
@@ -5913,7 +5920,9 @@ html,body{overflow-x:hidden}
 .brand-sub{font-size:11px;color:var(--ink-soft);letter-spacing:1px}
 .warn{margin:8px 20px;padding:8px 12px;background:var(--tint-red-bg);color:var(--shu);font-size:12px;border-radius:8px}
 
-.page{padding:12px 20px calc(66px + env(safe-area-inset-bottom))}
+/* 底部不再需要给 fixed 导航栏预留 66px:导航栏已经在滚动区外面、不会盖住内容了,
+   这里只留一点正常的页尾留白。 */
+.page{padding:12px 20px 20px}
 .page-title{font-size:18px;margin:6px 0 14px;color:var(--ai-deep)}
 .date-line{font-size:12px;color:var(--ink-soft);margin-bottom:10px}
 .resume-card{background:var(--tint-amber-bg);border:1px solid var(--tint-amber-border);border-radius:14px;padding:16px;margin-bottom:14px}
@@ -5948,12 +5957,19 @@ html,body{overflow-x:hidden}
 .btn-main:disabled{background:var(--disabled-bg);cursor:not-allowed}
 .btn-ghost{padding:14px 16px;background:none;border:1px solid var(--line);border-radius:12px;color:var(--ink-soft);cursor:pointer;font-size:14px;white-space:nowrap}
 .btn-row{display:flex;align-items:stretch;gap:10px;margin-top:12px}
-.btn-row .btn-main{margin-top:0}
 /* "不会写"和"提交"这一对高度不一致的根因是各自靠 padding+line-height 撑出来的内容高度,
    在不同字号/不同字体回退下不保证严格成比例(用户反馈过实机上两个按钮高度对不上)。
-   与其继续跟 line-height/字体度量较劲,不如给这一行里的两个按钮定死同一个高度,
-   内容用 flex 居中——这样高度完全由这个数字决定,不再受字号、字体、行高细节影响。 */
-.btn-row .btn-ghost,.btn-row .btn-main{height:50px;display:flex;align-items:center;justify-content:center}
+   与其继续跟 line-height/字体度量较紧,不如给这一行里的两个按钮定死同一个高度,
+   内容用 flex 居中——这样高度完全由这个数字决定,不再受字号、字体、行高细节影响。
+
+   margin-top 也必须在这里一并归零,而且要用重复类名 .btn-row.btn-row 把特异度
+   抬到 (0,3,0):后面还有 ".card .btn-main 设 margin-top:16px" 这类"卡片里的主按钮
+   和上文之间留白"的规则,它和普通的 ".btn-row .btn-main" 是同样的 (0,2,0) 特异度、
+   又写在更后面,按 CSS 的后来者胜规则会盖掉这里——那正是"看答案"和"提交"两个按钮
+   明明一样高、却整体错开 16px 的原因(只有右边那个吃到了 margin-top)。
+   抬高特异度而不是靠调整规则顺序,这样以后往下追加样式也不会再把它盖掉。 */
+.btn-row.btn-row .btn-ghost,.btn-row.btn-row .btn-main{
+  margin:0;height:50px;display:flex;align-items:center;justify-content:center}
 .btn-mini{padding:6px 12px;font-size:12px;border:1px solid var(--ai);color:var(--ai);background:none;border-radius:8px;cursor:pointer;margin-top:8px}
 .btn-mini.ghost{border-color:var(--line);color:var(--ink-soft)}
 .quit-link{display:block;margin:18px auto 0;background:none;border:none;color:var(--ink-soft);font-size:12px;text-decoration:underline;cursor:pointer}
@@ -6396,16 +6412,12 @@ html,body{overflow-x:hidden}
    键盘弹起时(root 带 kb-open 类,见 visualViewport 那个 effect)直接隐藏导航栏——
    以前是顶到键盘上方,但那样打字答题时导航栏会悬在答题框/提交按钮附近、
    跟当前操作区挤在一起,容易被误点也显得乱;藏起来最干净,收起键盘后自动恢复。 */
-/* translateZ(0)+backface-visibility 是给 iOS Safari 的兜底:这类"position:fixed 的
-   元素在页面高度变化后飘在半空、没贴在真正视口底部"的问题是 WebKit 一个老毛病
-   (常见触发点:内容从矮变高/从高变矮,比如做完一组题后从答题框切到一整页讲评列表),
-   强制把导航栏提升成独立合成层,能让浏览器按视口而不是按上一次的文档流布局来定位它。
-   这是社区里公认的常见缓解手段,但这个沙盒环境没有真机 Safari,没法验证是否根治——
-   如果重新部署后这个问题还在,请告诉我具体是哪个操作触发的,我再针对性排查。 */
-.nav{position:fixed;left:50%;bottom:0;
-  transform:translateX(-50%) translateZ(0);-webkit-backface-visibility:hidden;backface-visibility:hidden;
-  width:100%;max-width:640px;display:flex;flex:0 0 auto;
-  background:var(--card);border-top:1px solid var(--line);padding:6px 0 max(6px, env(safe-area-inset-bottom));z-index:10}
+/* 导航栏现在是 .app 这个"一屏高"flex 容器里的最后一个子项,靠 flex 布局本身待在底部,
+   不再用 position:fixed——之前那套 fixed + translateZ(0) + backface-visibility 的
+   合成层写法是在跟 WebKit 的 fixed 元素渲染 bug 较劲(飘在半空/跟着页面往上滑/残影),
+   治标不治本;换成普通流之后这类问题从根上就不存在了,那些 hack 也一并删掉。 */
+.nav{flex:0 0 auto;width:100%;display:flex;
+  background:var(--card);border-top:1px solid var(--line);padding:6px 0 max(6px, env(safe-area-inset-bottom))}
 .kb-open .nav{display:none}
 .nav-btn{flex:1;padding:12px 0;background:none;border:none;font-size:14px;color:var(--ink-soft);cursor:pointer;letter-spacing:2px}
 .nav-btn.on{color:var(--ai-deep);font-weight:700}

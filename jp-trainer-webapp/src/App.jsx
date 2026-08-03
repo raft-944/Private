@@ -894,6 +894,17 @@ function capSegmentLength(segments) {
   return out;
 }
 
+/* 题面要用的分词。题面是照着分词结果渲染的(见 ChineseTaskText),所以分词拼起来必须
+   和题面原文一字不差,否则显示出来的题目就不是真正的题目了——AI 实测会漏字漏标点
+   (把"怎么样?是什么样的店?"两个问号吃掉),用户就会按残缺的题意作答,判卷时才发现
+   题目还有后半句。拼不回去就退回本地分词(本地分词是从题面自己切出来的,必然拼得回去)。
+   主线做题和練習帳两条路径都必须走这个函数,不要各自再写一遍取 taskSegments 的逻辑。 */
+function segmentsForTask(task, aiSegments) {
+  if (!task) return null;
+  const ai = Array.isArray(aiSegments) && aiSegments.length ? aiSegments : null;
+  return capSegmentLength(ai && ai.join("") === task ? ai : naiveSegmentChinese(task));
+}
+
 /* 点开某个中文词/短语现查的日语说法,按(句子+词)缓存,同一句题面里查过的词不用重复调AI。
    yomi 是假名读音——很多日语单词本来就是汉字写法(比如"数学"日语也写"数学"),
    这种情况下光给汉字对学习者没有任何新信息,真正有用的是"这个词读作什么/怎么写出来",
@@ -2108,7 +2119,7 @@ function AppInner() {
     return () => { window.speechSynthesis.onvoiceschanged = null; };
   }, []);
 
-  /* 底部导航栏用 position:fixed 钉在视口底部,靠 visualViewport 感知虚拟键盘有没有弹出——
+  /* 底部导航栏靠 visualViewport 感知虚拟键盘有没有弹出——
      iOS Safari 的 100dvh 不会因为键盘弹出而缩小,单纯用 dvh 算不出键盘挡了多少,
      必须用 visualViewport 实测。没有 visualViewport 的浏览器(极少数)就不做处理,
      导航栏保持常显。
@@ -2238,14 +2249,7 @@ function AppInner() {
      "这道题的语法点描述"这两样准备好交给渲染,不需要单独的 state/effect。 */
   const taskSegmentsFor = (question) => {
     if (!question || question.type === "listening" || question.jpTask || !question.task) return null;
-    /* AI 给的 taskSegments 必须拼回原题面一字不差才能用:题面是照着 segments 渲染的
-       (见 ChineseTaskText),AI 万一漏字、漏标点(实测见过把"怎么样?是什么样的店?"
-       两个问号吃掉),做题时看到的题目就和判卷页显示的原题对不上了——用户会先按残缺的
-       题面作答,判卷时才发现题目其实还有后半句。拼不回去就退回本地分词,
-       本地分词是从题面自己切出来的,拼回去必然一致。 */
-    const aiSegs = Array.isArray(question.taskSegments) && question.taskSegments.length ? question.taskSegments : null;
-    const segs = aiSegs && aiSegs.join("") === question.task ? aiSegs : naiveSegmentChinese(question.task);
-    return capSegmentLength(segs);
+    return segmentsForTask(question.task, question.taskSegments);
   };
   const taskTargetDescFor = (item) => item && item.p ? `${item.p.pattern}(${item.p.conn} / ${item.p.meaning})`
     : item && item.p1 ? `${item.p1.pattern}(${item.p1.meaning}) + ${item.p2.pattern}(${item.p2.meaning})`
@@ -5265,7 +5269,16 @@ function AppInner() {
           })()}
 
           {phase !== "done" && (
-            <button className="quit-link" onClick={() => setView("home")}>中断,返回首页(进度已保存)</button>
+            /* 文案要和实际情况相符,不能一律写"进度已保存":
+               ①自由练习/錯題本一键练习(都带 freeMode)根本不写断点快照(见快照 effect 里
+                 `if (!kind) return`),中断就是真的结束了;
+               ②新句型组/顽固特训组是一整组一起结算的,快照只记到"第几项",组内已经答过的
+                 那几道不会被保留,中断后这一组要从头再来。
+               以前统一写"进度已保存",②的情况会让人以为答过的几道还在,回来发现又是全新的
+               五道题,就是用户说的"重新出五道题让我继续答题"。 */
+            <button className="quit-link" onClick={() => setView("home")}>
+              {freeMode ? "中断,返回首页" : phase === "group" ? "中断,返回首页(这一组要重新做)" : "中断,返回首页(进度已保存)"}
+            </button>
           )}
         </main>
       )}
@@ -5506,7 +5519,7 @@ function AppInner() {
                 <ChineseTaskText
                   key={cfQuizIdx + ":" + cfQuiz.questions[cfQuizIdx].task}
                   text={cfQuiz.questions[cfQuizIdx].task}
-                  segments={capSegmentLength(Array.isArray(cfQuiz.questions[cfQuizIdx].taskSegments) && cfQuiz.questions[cfQuizIdx].taskSegments.length ? cfQuiz.questions[cfQuizIdx].taskSegments : naiveSegmentChinese(cfQuiz.questions[cfQuizIdx].task))}
+                  segments={segmentsForTask(cfQuiz.questions[cfQuizIdx].task, cfQuiz.questions[cfQuizIdx].taskSegments)}
                   sentence={cfQuiz.questions[cfQuizIdx].task}
                   targetDesc={`${cfQuiz.items[cfQuizIdx].head}(${cfQuiz.items[cfQuizIdx].sub}): ${cfQuiz.items[cfQuizIdx].note}`}
                 />
@@ -6434,17 +6447,15 @@ html,body{overflow-x:hidden}
 .cf-email-dim-label{flex:0 0 auto;font-weight:700;color:var(--ai-deep)}
 .cf-email-dim-note{color:var(--ink-soft);flex:1 1 auto}
 
-/* 用 position:fixed(而不是原来的 sticky+margin-top:auto flex 技巧)钉在视口底部:
-   sticky 在 .app 内容比屏幕高的时候会跟内容"脱节",出现下面还露出一截内容的错位;
-   fixed 直接锚定视口,不受 .app 实际高度影响。left/transform 是为了在宽屏上跟 .app
-   的居中对齐,手机端视口本来就比640px窄,效果等同于占满宽度。
+/* 导航栏是 .app 这个"一屏高"flex 容器里的最后一个子项,靠 flex 布局本身待在底部。
+   历史:早先用过 sticky+margin-top:auto,再后来改成 position:fixed 并叠了
+   translateZ(0)+backface-visibility 的合成层 hack,都是在跟 WebKit 的 fixed 元素渲染
+   bug 较劲(飘在半空/跟着页面往上滑/留残影),治标不治本。现在内容区(.app-scroll)
+   自己滚、导航栏是它的兄弟节点,压根不是"浮"在页面上的元素,这类问题从根上消失,
+   那些 hack 也就全删了。
    键盘弹起时(root 带 kb-open 类,见 visualViewport 那个 effect)直接隐藏导航栏——
    以前是顶到键盘上方,但那样打字答题时导航栏会悬在答题框/提交按钮附近、
    跟当前操作区挤在一起,容易被误点也显得乱;藏起来最干净,收起键盘后自动恢复。 */
-/* 导航栏现在是 .app 这个"一屏高"flex 容器里的最后一个子项,靠 flex 布局本身待在底部,
-   不再用 position:fixed——之前那套 fixed + translateZ(0) + backface-visibility 的
-   合成层写法是在跟 WebKit 的 fixed 元素渲染 bug 较劲(飘在半空/跟着页面往上滑/残影),
-   治标不治本;换成普通流之后这类问题从根上就不存在了,那些 hack 也一并删掉。 */
 .nav{flex:0 0 auto;width:100%;display:flex;
   background:var(--card);border-top:1px solid var(--line);padding:6px 0 max(6px, env(safe-area-inset-bottom))}
 .kb-open .nav{display:none}

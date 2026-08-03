@@ -12,6 +12,7 @@ import { PATTERNS_N3_FORMREF } from "./data/n3-formref.js";
 import { PATTERNS_N3_PART2 } from "./data/n3-part2.js";
 import { PATTERNS_N3_PART3 } from "./data/n3-part3.js";
 import { PATTERNS_N2_PART1 } from "./data/n2-part1.js";
+import { PATTERNS_N1_PART1 } from "./data/n1-part1.js";
 import { EXT_STUDY } from "./data/extStudyNotes.js";
 
 const SHOKYU = [
@@ -5601,6 +5602,7 @@ export const PATTERNS = [
   ...PATTERNS_N3_PART2,
   ...PATTERNS_N3_PART3,
   ...PATTERNS_N2_PART1,
+  ...PATTERNS_N1_PART1,
 ].map((p, i) => ({
   ...p,
   id: i,

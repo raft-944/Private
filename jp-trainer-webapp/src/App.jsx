@@ -4961,7 +4961,9 @@ function AppInner() {
                         })()
                       ) : (
                         <>
-                          <div className={"q-task serif" + (gq.jpTask ? " q-task-instr" : "")}>{gq.task}</div>
+                          <div className={"q-task serif" + (gq.jpTask ? " q-task-instr" : "")}>
+                            <ChineseTaskText key={i + ":" + gq.task} text={gq.task} segments={taskSegmentsFor(gq)} sentence={gq.task} targetDesc={taskTargetDescFor({ p: groupState.p })} onReveal={markHinted} />
+                          </div>
                           <textarea
                             className="answer-box serif"
                             value={groupState.answers[i]}

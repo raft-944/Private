@@ -703,20 +703,19 @@ function ExAudioBtn({ text }) {
 /* 句型库例句的假名注音(离线批量用 kuromoji 分词生成好的静态数据,见 scripts/generate_furigana.mjs,
    不是运行时现分词)。按内容哈希查表,和例句配音用的是同一套哈希算法,查不到就原样显示纯文本——
    AI临场生成的对话/阅读句子等动态内容没有预生成注音,不强求覆盖。 */
+function renderFuriganaSegs(segs) {
+  return segs.map((seg, i) =>
+    Array.isArray(seg) ? (
+      <ruby key={i} className="kj-ruby">{seg[0]}<rt>{seg[1]}</rt></ruby>
+    ) : (
+      <span key={i}>{seg}</span>
+    )
+  );
+}
 function KanjiText({ text, className }) {
   const segs = text ? FURIGANA[hashStr(text)] : null;
   if (!segs) return <span className={className}>{text}</span>;
-  return (
-    <span className={className}>
-      {segs.map((seg, i) =>
-        Array.isArray(seg) ? (
-          <ruby key={i} className="kj-ruby">{seg[0]}<rt>{seg[1]}</rt></ruby>
-        ) : (
-          <span key={i}>{seg}</span>
-        )
-      )}
-    </span>
-  );
+  return <span className={className}>{renderFuriganaSegs(segs)}</span>;
 }
 
 async function genComboQuestion(p1, p2, avoid) {
@@ -1727,29 +1726,62 @@ grammarMistakes: 如果邮件里存在明显的句型使用错误(活用错误�
 }
 
 /* ================= 生词点选提示组件 =================
-   words 没传入(还没加载好/加载失败)时,退化成离线注音(KanjiText,查不到假名数据就原样显示纯文本)——
-   不能阻塞主流程,而且离线注音本来就是秒出的,没必要等 AI 词表加载完才显示假名。
-   words 传入后,读音直接常显(不用再点一次才看到,和句型库/讲解页的自动注音保持一致),
-   点一下追加显示中文释义,再点一下收起,循环。 */
+   假名读音一律用离线注音(FURIGANA,和句型库/讲解页同一份数据,细到每个汉字),不用 AI
+   给的 words 读音——AI 切词是按"适合查词的自然单位"分的,经常几个词粘成一大块(比如
+   "娘は犬を"整块一个读音),如果拿它来常显读音,会变成整句话重新用假名写一遍,看着
+   很奇怪,而且和讲解区里同一句例句的离线注音对不上,一眼就能看出两处不一致。
+   words 仍然用来做"点一下看中文释义"这个增强功能:按字符位置把离线注音的每个分段
+   归到对应的 AI 词块里,点这个词块范围内任意一个字都能看到这个词块的释义;
+   如果 AI 切的词块拼起来对不上原句(万一AI没按提示词的要求做),就放弃这个点选功能,
+   只显示离线注音,不强行把对不上的数据揉在一起。 */
 function WordHintText({ text, words, onHintWord, className }) {
   const [clicks, setClicks] = useState({});
-  if (!words || !words.length) return <KanjiText text={text} className={className} />;
+  const segs = text ? FURIGANA[hashStr(text)] : null;
+  if (!segs) return <span className={className}>{text}</span>;
+
+  let wordRanges = null;
+  if (words && words.length && words.map((w) => w.surface).join("") === text) {
+    let offset = 0;
+    wordRanges = words.map((w) => {
+      const range = [offset, offset + w.surface.length];
+      offset += w.surface.length;
+      return range;
+    });
+  }
+
+  if (!wordRanges) return <span className={className}>{renderFuriganaSegs(segs)}</span>;
+
+  // 按字符位置把每个离线注音分段归到对应的 AI 词块下标,再把连续同属一个词块的分段合并成一组
+  let charOffset = 0;
+  const groups = [];
+  for (const seg of segs) {
+    const surface = Array.isArray(seg) ? seg[0] : seg;
+    const start = charOffset;
+    charOffset += surface.length;
+    const wIdx = wordRanges.findIndex(([s, e]) => start >= s && start < e);
+    const last = groups[groups.length - 1];
+    if (last && last.wIdx === wIdx) last.segs.push(seg);
+    else groups.push({ wIdx, segs: [seg] });
+  }
+
   return (
     <span className={className}>
-      {words.map((w, i) => {
-        const shown = !!clicks[i];
+      {groups.map((g, gi) => {
+        const inner = renderFuriganaSegs(g.segs);
+        if (g.wIdx === -1) return <span key={gi}>{inner}</span>;
+        const w = words[g.wIdx];
+        const shown = !!clicks[g.wIdx];
         return (
-          <span key={i}>
-            <ruby
+          <span key={gi}>
+            <span
               className={"wh-word" + (shown ? " wh-hinted" : "")}
               onClick={() => {
-                setClicks((c) => ({ ...c, [i]: !c[i] }));
+                setClicks((c) => ({ ...c, [g.wIdx]: !c[g.wIdx] }));
                 onHintWord && onHintWord(w.surface);
               }}
             >
-              {w.surface}
-              <rt>{w.yomi}</rt>
-            </ruby>
+              {inner}
+            </span>
             {shown && <span className="wh-meaning">({w.meaning})</span>}
           </span>
         );

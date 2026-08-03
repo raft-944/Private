@@ -1727,29 +1727,30 @@ grammarMistakes: 如果邮件里存在明显的句型使用错误(活用错误�
 }
 
 /* ================= 生词点选提示组件 =================
-   words 没传入(还没加载好/加载失败)时,原样显示纯文本,不可点击——不能阻塞主流程。
-   words 传入后,按词切分成可点击的片段:第一次点显示假名读音(ruby注音),
-   第二次点在后面追加显示中文释义,第三次点收起,循环。 */
+   words 没传入(还没加载好/加载失败)时,退化成离线注音(KanjiText,查不到假名数据就原样显示纯文本)——
+   不能阻塞主流程,而且离线注音本来就是秒出的,没必要等 AI 词表加载完才显示假名。
+   words 传入后,读音直接常显(不用再点一次才看到,和句型库/讲解页的自动注音保持一致),
+   点一下追加显示中文释义,再点一下收起,循环。 */
 function WordHintText({ text, words, onHintWord, className }) {
   const [clicks, setClicks] = useState({});
-  if (!words || !words.length) return <span className={className}>{text}</span>;
+  if (!words || !words.length) return <KanjiText text={text} className={className} />;
   return (
     <span className={className}>
       {words.map((w, i) => {
-        const st = clicks[i] || 0;
+        const shown = !!clicks[i];
         return (
           <span key={i}>
             <ruby
-              className={"wh-word" + (st > 0 ? " wh-hinted" : "")}
+              className={"wh-word" + (shown ? " wh-hinted" : "")}
               onClick={() => {
-                setClicks((c) => ({ ...c, [i]: ((c[i] || 0) + 1) % 3 }));
+                setClicks((c) => ({ ...c, [i]: !c[i] }));
                 onHintWord && onHintWord(w.surface);
               }}
             >
               {w.surface}
-              {st > 0 && <rt>{w.yomi}</rt>}
+              <rt>{w.yomi}</rt>
             </ruby>
-            {st > 1 && <span className="wh-meaning">({w.meaning})</span>}
+            {shown && <span className="wh-meaning">({w.meaning})</span>}
           </span>
         );
       })}
@@ -4882,7 +4883,7 @@ function AppInner() {
               <div className="intro-row"><label>接続</label><div className="serif">{groupState.p.conn}</div></div>
               <div className="intro-row"><label>意味</label><div>{groupState.p.meaning}</div></div>
               <div className="intro-row"><label>例文</label><div><div className="serif ex-jp"><WordHintText text={groupState.p.exJP} words={exWords} onHintWord={markHinted} /><ExAudioBtn text={groupState.p.exJP} /></div><div className="ex-cn">{groupState.p.exCN}</div></div></div>
-              {exWords && <div className="wh-tip-note">生词不认识?点一下看读音,再点一下看释义</div>}
+              {exWords && <div className="wh-tip-note">生词不认识?点一下看中文释义</div>}
               <PatternLecture key={groupState.p.id} p={groupState.p} defaultOpen={true} />
               {groupState.loadErr ? (
                 <div className="group-load-err">

@@ -42,6 +42,25 @@ function kataToHira(s) {
 }
 
 const HAS_KANJI = /[一-龯々]/;
+const KANA_CHAR = /[ぁ-んァ-ヶー]/;
+
+/* kuromoji 分词经常把"汉字+送假名"当一个词元(比如"飼い"),reading 给的是整个词元的读音
+   "かい"——如果直接把"かい"整个套在"飼い"上面,视觉上会让人以为"飼"这一个字就读"かい"
+   (其实"い"是词元里本来就有的假名,不需要再标注,只有"飼"这个汉字读"か")。
+   这里把词元末尾本来就是假名的部分(送假名)从读音里剥离出来,只给汉字部分标注,
+   剥离不干净(读音结尾对不上送假名文字,比如浊音变化等特殊情况)就整个词元一起标注、不细分,
+   保底不出现"标了但是标错"的情况。 */
+function splitOkurigana(surface, reading) {
+  let i = surface.length;
+  while (i > 0 && KANA_CHAR.test(surface[i - 1])) i--;
+  const kanjiPart = surface.slice(0, i);
+  const okuri = surface.slice(i);
+  if (!okuri || !kanjiPart) return null;
+  if (!reading.endsWith(okuri)) return null;
+  const kanjiReading = reading.slice(0, reading.length - okuri.length);
+  if (!kanjiReading) return null;
+  return { kanjiPart, kanjiReading, okuri };
+}
 
 /* 把一句话切成 [表层文字, 读音?] 的分段数组;没有汉字的分段(纯假名/标点/数字/英文)
    不带读音(前端渲染时原样显示,不套 <ruby>),有汉字的分段才带上对应假名读音。
@@ -49,17 +68,26 @@ const HAS_KANJI = /[一-龯々]/;
 function toSegments(tokens) {
   const segs = [];
   let plainBuf = "";
+  const flushPlain = () => { if (plainBuf) { segs.push(plainBuf); plainBuf = ""; } };
   for (const t of tokens) {
     const surface = t.surface_form;
     if (HAS_KANJI.test(surface)) {
-      if (plainBuf) { segs.push(plainBuf); plainBuf = ""; }
       const reading = t.reading ? kataToHira(t.reading) : "";
-      segs.push(reading ? [surface, reading] : surface);
+      if (!reading) { flushPlain(); segs.push(surface); continue; }
+      const split = splitOkurigana(surface, reading);
+      if (split) {
+        flushPlain();
+        segs.push([split.kanjiPart, split.kanjiReading]);
+        plainBuf += split.okuri;
+      } else {
+        flushPlain();
+        segs.push([surface, reading]);
+      }
     } else {
       plainBuf += surface;
     }
   }
-  if (plainBuf) segs.push(plainBuf);
+  flushPlain();
   return segs;
 }
 

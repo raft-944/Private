@@ -3186,6 +3186,26 @@ function AppInner() {
     }
   };
 
+  /* 用户在普通到期复习题上手动"标记顽固,现在练"——不等 missTotal 自然攒够
+     STUBBORN_TRIGGER 次、也不等下一次开场才排到它,当场把这一题所在的队列位换成
+     顽固特训组、原地立刻开始。当前这道还没提交的题就此放弃,不计入任何统计——
+     用户是主动选择跳过它换成更扎实的练法,不是答错。
+     如果这个句型已经在顽固状态里(比如正攒着阶段A的第2轮),不重置进度,直接把
+     "现在轮到的这一轮"提前跑一遍,阶段/连续轮数照旧累计。 */
+  const markStubbornNow = () => {
+    const item = queue[idx];
+    if (!item || !item.p) return;
+    const p = item.p;
+    setDb((d) => {
+      const prog = d.prog[p.id] || { lv: 0, ok: 0, ng: 0, learnedDate: t };
+      if (prog.stubborn) return d;
+      return { ...d, prog: { ...d.prog, [p.id]: { ...prog, stubborn: { phase: "A", clean: 0, due: t } } } };
+    });
+    setQueue((q) => q.map((it, i) => (i === idx ? { p, isStubborn: true, reps: STUBBORN_REPS } : it)));
+    setAnswer(""); setQ(null); setHintedWords([]); setExWords(null);
+    beginGroup({ p, isStubborn: true, reps: STUBBORN_REPS });
+  };
+
   /* 组里某一道题单独重新出题:批量结果缺这一位、或者单独补题也失败了,都会走到这个按钮 */
   const retryGroupQuestion = (i) => {
     const g = groupState;
@@ -4783,6 +4803,13 @@ function AppInner() {
                   <span className="pattern-lesson">第{cur.p.lesson}課</span>
                 </>
               )}
+              {/* 只在普通到期复习的题上出现:顽固特训是挂在 prog[pid].stubborn 这个SRS排期状态上的,
+                  新句型(还没学过)、每日作业/每周挑战/聴解/錯題本重练/自由练习(freeMode,本来
+                  就设计成不碰排期)都没有对应语境,硬加进去只会让逻辑绕。放在讲评断点/结果页
+                  不会出现的这个头部行右侧,不占用额外的页面高度。 */}
+              {phase === "question" && !freeMode && !weeklyMode && !homeworkMode && !listenMode && !drillMode && (
+                <button className="btn-mark-stubborn" onClick={markStubbornNow}>🔥 标记顽固,现在练</button>
+              )}
             </div>
           )}
 
@@ -5926,6 +5953,10 @@ html,body{overflow-x:hidden}
 .pattern-head{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
 .pattern-name{font-size:20px;font-weight:700;color:var(--ai-deep)}
 .pattern-lesson{font-size:12px;color:var(--ink-soft)}
+/* margin-left:auto 把这个按钮推到 .pattern-head 这一行的最右侧,利用已有的头部空间,
+   不额外占页面高度——用户明确要求别再往下加按钮,页面已经够长了 */
+.btn-mark-stubborn{margin-left:auto;flex:0 0 auto;padding:6px 10px;font-size:12px;white-space:nowrap;
+  border:1px solid var(--tint-amber-fg);color:var(--tint-amber-fg);background:var(--tint-amber-bg);border-radius:8px;cursor:pointer}
 .tag{font-size:11px;padding:3px 8px;border-radius:6px;letter-spacing:1px}
 .tag-new{background:var(--tint-blue-bg);color:var(--ai)}
 .tag-rev{background:var(--tint-brown-bg);color:var(--tint-brown-fg)}

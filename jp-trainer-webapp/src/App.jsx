@@ -665,6 +665,40 @@ function speakJa(text, rate = 1, voiceURI) {
   return true;
 }
 
+/* 句型库例句的真人配音(Azure ja-JP-NanamiNeural,离线批量生成好的静态mp3,不是临场调AI)。
+   文件名按句子文本内容哈希出来,不用句型id+下标这种位置编号——extras 在 PatternLecture
+   里会按"是否和 study 例句重复"被过滤掉一部分,过滤后的下标和原始数组下标对不上,
+   按内容哈希就没有这个问题,只要文本一字不差,不管它在数组里第几个都能找到同一份音频。
+   这个哈希算法和 scripts/generate_audio.mjs 里的必须完全一致,两边算出来的文件名才对得上。 */
+function hashStr(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+function exAudioUrl(text) {
+  return text ? `/audio/${hashStr(text)}.mp3` : null;
+}
+/* 例句旁边的播放按钮:音频文件是离线批量生成的,不保证每一句都已经配好——
+   还没配的、或者文件本来就不存在,点了就静默失败(不弹错误,不影响正常做题/阅读),
+   等哪天补跑了 generate_audio.mjs 自然就能播了。 */
+function ExAudioBtn({ text }) {
+  const [failed, setFailed] = useState(false);
+  const url = exAudioUrl(text);
+  if (!url || failed) return null;
+  return (
+    <button
+      type="button"
+      className="ex-audio-btn"
+      aria-label="播放例句发音"
+      onClick={() => {
+        const audio = new Audio(url);
+        audio.onerror = () => setFailed(true);
+        audio.play().catch(() => setFailed(true));
+      }}
+    >🔊</button>
+  );
+}
+
 async function genComboQuestion(p1, p2, avoid) {
   const sys = `あなたは日本語教師です。学習者:句型A对应 JLPT ${levelBenchmark(p1.level)},句型B对应 JLPT ${levelBenchmark(p2.level)}。出题词汇和语法请分别符合各自句型的难度基准,不要因为其中一个句型简单/难就把另一个也拉到同一水平。只输出JSON,不要输出任何其他文字、说明或Markdown。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `请出一道"複合作文"练习题,要求学习者在同一句话(或简短的两三句对话)中,同时正确使用以下两个句型。
@@ -1873,7 +1907,7 @@ function PatternLecture({ p, defaultOpen }) {
                   <div className="lec-usage-head"><span className="lec-usage-no">{i + 1}</span>{u.use}</div>
                   {(u.ex || []).map((e, j) => (
                     <div key={j} className="lec-ex">
-                      <div className="serif lec-ex-jp">{e[0]}</div>
+                      <div className="serif lec-ex-jp">{e[0]}<ExAudioBtn text={e[0]} /></div>
                       <div className="lec-ex-cn">{e[1]}</div>
                     </div>
                   ))}
@@ -1898,7 +1932,7 @@ function PatternLecture({ p, defaultOpen }) {
               <label>その他の例文</label>
               {extras.map((e, i) => (
                 <div key={i} className="lec-ex">
-                  <div className="serif lec-ex-jp">{e[0]}</div>
+                  <div className="serif lec-ex-jp">{e[0]}<ExAudioBtn text={e[0]} /></div>
                   <div className="lec-ex-cn">{e[1]}</div>
                 </div>
               ))}
@@ -4827,7 +4861,7 @@ function AppInner() {
               )}
               <div className="intro-row"><label>接続</label><div className="serif">{groupState.p.conn}</div></div>
               <div className="intro-row"><label>意味</label><div>{groupState.p.meaning}</div></div>
-              <div className="intro-row"><label>例文</label><div><div className="serif ex-jp"><WordHintText text={groupState.p.exJP} words={exWords} onHintWord={markHinted} /></div><div className="ex-cn">{groupState.p.exCN}</div></div></div>
+              <div className="intro-row"><label>例文</label><div><div className="serif ex-jp"><WordHintText text={groupState.p.exJP} words={exWords} onHintWord={markHinted} /><ExAudioBtn text={groupState.p.exJP} /></div><div className="ex-cn">{groupState.p.exCN}</div></div></div>
               {exWords && <div className="wh-tip-note">生词不认识?点一下看读音,再点一下看释义</div>}
               <PatternLecture key={groupState.p.id} p={groupState.p} defaultOpen={true} />
               {groupState.loadErr ? (
@@ -5179,7 +5213,7 @@ function AppInner() {
                         {pr ? <span className="badge badge-on">Lv{pr.lv} · {pr.due <= t ? "今日到期" : pr.due + " 复习"}</span> : <span className="badge">未学</span>}
                       </div>
                       <div className="pr-meaning">{p.meaning} 〔{p.conn}〕</div>
-                      <div className="pr-ex serif">{p.exJP}</div>
+                      <div className="pr-ex serif">{p.exJP}<ExAudioBtn text={p.exJP} /></div>
                       <PatternLecture p={p} />
                       <button className="btn-mini" onClick={() => startFree(p)}>练一题(不影响排期)</button>
                     </div>
@@ -5965,6 +5999,9 @@ html,body{overflow-x:hidden}
 .intro-row{display:flex;gap:14px;margin-bottom:14px;font-size:15px;line-height:1.7}
 .intro-row label{flex:0 0 40px;font-size:12px;color:var(--shu);letter-spacing:2px;padding-top:3px}
 .ex-jp{font-size:16px} .ex-cn{font-size:13px;color:var(--ink-soft);margin-top:2px}
+.ex-audio-btn{display:inline-flex;align-items:center;justify-content:center;margin-left:6px;
+  width:22px;height:22px;padding:0;font-size:13px;line-height:1;vertical-align:middle;
+  border:1px solid var(--line);border-radius:50%;background:var(--card);color:var(--ai);cursor:pointer}
 .intro-reps-note{font-size:12px;color:var(--ink-soft);margin-bottom:10px}
 
 /* 讲解+堆叠题(新句型学习/顽固句型特训共用) */

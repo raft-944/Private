@@ -42,7 +42,14 @@ function escapeXml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 
-async function synth(text) {
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/* Azure 语音的免费/低配额档位并发上限很低,批量跑几百条很容易触发 429(限流),
+   不是密钥或网络的问题,等一下重试就行。这里对 429(以及偶发的 5xx)做退避重试,
+   优先看响应带没带 Retry-After 头,没带就按 3s→6s→12s→24s→48s 递增等待。 */
+async function synth(text, attempt = 1) {
   const ssml = `<speak version='1.0' xml:lang='ja-JP'><voice xml:lang='ja-JP' xml:gender='Female' name='ja-JP-NanamiNeural'>${escapeXml(text)}</voice></speak>`;
   const res = await fetch(`https://${REGION}.tts.speech.microsoft.com/cognitiveservices/v1`, {
     method: "POST",
@@ -55,6 +62,14 @@ async function synth(text) {
     body: ssml,
   });
   if (!res.ok) {
+    const retriable = res.status === 429 || res.status >= 500;
+    if (retriable && attempt <= 6) {
+      const retryAfter = Number(res.headers.get("retry-after"));
+      const waitMs = retryAfter > 0 ? retryAfter * 1000 : Math.min(3000 * 2 ** (attempt - 1), 60000);
+      console.log(`  限流/服务端繁忙(HTTP ${res.status}),等 ${Math.round(waitMs / 1000)}秒后重试(第${attempt}次)…`);
+      await sleep(waitMs);
+      return synth(text, attempt + 1);
+    }
     const body = await res.text().catch(() => "");
     throw new Error(`HTTP ${res.status} ${body.slice(0, 300)}`);
   }
@@ -78,7 +93,9 @@ async function main() {
   const sentences = collectSentences();
   console.log(`共 ${sentences.length} 条不重复例句需要配音`);
   let done = 0, skipped = 0, failed = 0;
-  const CONCURRENCY = 4;
+  // 并发调低是因为免费/低配额档位对同时请求数限制很严,并发一高就大量429限流,
+  // 单个跑虽然慢一点但基本不会再被限流(遇到429/5xx也会自动退避重试,见 synth())
+  const CONCURRENCY = 1;
   let idx = 0;
   async function worker() {
     while (idx < sentences.length) {

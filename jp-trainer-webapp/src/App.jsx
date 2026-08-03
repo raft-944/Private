@@ -2142,6 +2142,15 @@ function AppInner() {
      WebKit 重算 fixed 元素位置;现在改成容器内部滚动、导航栏是普通流里的兄弟节点,
      那些补丁就都不需要了,只保留这个 ref 用来在换页时把内容滚回顶部。 */
   const scrollRef = useRef(null);
+
+  /* 首页那张"有未完成的今日学习"卡片上的次要按钮。以前它叫"放弃",而且真的把
+     db.session 删掉——已经做到第39题的断点、以及快照里存着的那些已经生成好的题面
+     全部作废,回头只能从头再排一遍队列。用户反馈这个代价完全没必要:
+     他只是想先不做了,不是想把进度扔掉。
+     现在改成纯粹的"稍后再做":只把卡片在本次打开期间收起来(纯 UI 状态,不落盘),
+     db.session 原样保留,想继续时点主按钮就能接着上次的进度做下去。
+     (必须和其它 hooks 一样声明在 `if (!db) return` 之前——hooks 数量不能变) */
+  const [resumeHidden, setResumeHidden] = useState(false);
   const [view, setView] = useState("home"); // home | session | library | mistakes | confusion(練習帳) | jlpt(JLPT模拟,練習帳的子视图)
   const loaded = useRef(false);
 
@@ -3429,7 +3438,6 @@ function AppInner() {
     }
   };
 
-  const discardSession = () => setDb((d) => ({ ...d, session: null }));
 
   const copyExport = async () => {
     const text = JSON.stringify(db);
@@ -3776,6 +3784,21 @@ function AppInner() {
   /* 组里 reps 道题全部判完后,点"完成"触发:按 kind 分派到对应的结账函数,
      清空 groupState 退出这个页面,然后照常 next() 推进到 outer queue 的下一位——
      组现在只占1个队列槽位,next() 不需要知道"组"这回事,当成普通一步前进即可。 */
+  /* 组页面底部那个按钮的文案。以前新句型组固定写"完成,看讲评 →",但这是错的:
+     组内每道题的判卷讲评就在这一页上当场展示了(所以 willBreakForChunk 对组item
+     直接返回 false,根本不会再跳到分段讲评页),按下去其实是"结束这个句型、去下一项"。
+     文案却承诺"看讲评",于是点完看到的要么是下一个句型、要么是最后的结果页,
+     都和"看讲评"对不上,用户反馈"讲评我已经在上面看完了,点了却像又回到这五道题"。
+     改成如实说明按下去会发生什么:后面还有内容就是"去下一个",到队尾就是"完成今日学習"。 */
+  const groupFinishLabel = () => {
+    if (!groupState) return "";
+    const left = groupState.statuses.filter((s) => s !== "done").length;
+    if (left > 0) return `还有 ${left} 题未完成`;
+    const isLast = idx + 1 >= queue.length;
+    if (groupState.kind === "new") return isLast ? "这个句型学完了 · 完成今日学習" : "这个句型学完了 · 下一个 →";
+    return isLast ? "完成这一轮特训 · 完成今日学習" : "完成这一轮特训 →";
+  };
+
   const finishGroup = () => {
     const g = groupState;
     if (!g || !g.statuses.every((s) => s === "done")) return;
@@ -4588,7 +4611,7 @@ function AppInner() {
         <main className="page">
           <div className="date-line">{t}(北京时间)</div>
 
-          {db.session && !staleSrsSession && !staleHwSession && (
+          {db.session && !staleSrsSession && !staleHwSession && !resumeHidden && (
             <section className="resume-card">
               <div className="resume-text">
                 有未完成的{db.session.kind === "homework" ? "每日作业" : db.session.kind === "weekly" ? "每周挑战" : "今日学习"}
@@ -4596,7 +4619,7 @@ function AppInner() {
               </div>
               <div className="btn-row">
                 <button className="btn-main" onClick={resumeSession}>继续做</button>
-                <button className="btn-ghost" onClick={discardSession}>放弃</button>
+                <button className="btn-ghost" onClick={() => setResumeHidden(true)}>稍后再做</button>
               </div>
             </section>
           )}
@@ -4628,7 +4651,13 @@ function AppInner() {
                 先消化积压。想调回去可以在设置里改。
               </div>
             )}
-            {db.session && !staleSrsSession && !staleHwSession ? null : dueList.length + newList.length + stubbornList.length > 0 ? (
+            {/* 有未完成的进度时,这个主按钮走"接着上次继续"而不是重排队列——
+                否则点"稍后再做"收起提醒卡片之后,再点这个按钮就等于把断点冲掉、
+                从头再来一遍,那就又回到用户抱怨的"进度清零"了。
+                卡片还显示着的时候不重复出按钮(卡片上已经有"继续做"了)。 */}
+            {db.session && !staleSrsSession && !staleHwSession ? (
+              resumeHidden ? <button className="btn-main" onClick={resumeSession}>继续 · 今日の学習(第 {db.session.idx + 1}/{db.session.items.length} 题)</button> : null
+            ) : dueList.length + newList.length + stubbornList.length > 0 ? (
               <button className="btn-main" onClick={startSession}>開始 · 今日の学習</button>
             ) : (
               <div className="all-done serif">今日の分は終わりました 🎌<br /><span className="all-done-sub">今天的任务已全部完成,明天见</span></div>
@@ -4990,7 +5019,7 @@ function AppInner() {
                     </div>
                   ))}
                   <button className="btn-main" disabled={!groupState.statuses.every((s) => s === "done")} onClick={finishGroup}>
-                    {groupState.statuses.every((s) => s === "done") ? (groupState.kind === "new" ? "完成,看讲评 →" : "完成这一轮特训 →") : `还有 ${groupState.statuses.filter((s) => s !== "done").length} 题未完成`}
+                    {groupFinishLabel()}
                   </button>
                 </>
               )}

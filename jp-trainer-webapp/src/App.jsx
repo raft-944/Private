@@ -5771,6 +5771,18 @@ function Style() {
   }
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+/* 重置 <button> 的系统原生外观:不加这条,iOS Safari 会给 button 套一层系统按钮的
+   默认样式(自带一套不受 CSS padding/line-height 完全控制的内部尺寸),同一个 .btn-row
+   里字号/字重不同的两个按钮(比如"不会写,看答案"和"提交"那一对)就可能算出不一样的
+   高度,即使两边 CSS padding 写的是同一个值——这是用户反馈"两个按钮高度不一致"的根因。
+   只重置外观和字体继承,不动 background/border/color——那些各个 .btn-* 类自己会设,
+   类选择器的优先级本来就高于这里的标签选择器,不会被这条覆盖掉。 */
+/* line-height 也在这里定死(不留给默认的 "normal"):"normal" 由字体自己的
+   行高métrics决定,不同字号在同一字体下往往不是线性缩放的,CJK 字体尤其明显——
+   这正是"不会写"和"提交"两个按钮字号不同(14px/16px)却算出不成比例高度差的根因,
+   不是简单的 padding 没对齐。定死成 1.2 后,两边的内容高度只随字号线性变化,
+   同样的 padding 才能真正拼出同样的按钮高度。 */
+button{appearance:none;-webkit-appearance:none;font:inherit;line-height:1.2;color:inherit}
 /* 兜底:任何一处文字算漏了 overflow-wrap 导致顶出边界,横向滚动也就止于裁切,
    不会让整个页面出现可以左右滑动的横向滚动条(那样体验更差,而且会带偏底部导航栏的定位)。 */
 html,body{overflow-x:hidden}
@@ -5818,8 +5830,13 @@ html,body{overflow-x:hidden}
 .btn-main:hover{background:var(--ai-deep)}
 .btn-main:disabled{background:var(--disabled-bg);cursor:not-allowed}
 .btn-ghost{padding:14px 16px;background:none;border:1px solid var(--line);border-radius:12px;color:var(--ink-soft);cursor:pointer;font-size:14px;white-space:nowrap}
-.btn-row{display:flex;gap:10px;margin-top:12px}
+.btn-row{display:flex;align-items:stretch;gap:10px;margin-top:12px}
 .btn-row .btn-main{margin-top:0}
+/* "不会写"和"提交"这一对高度不一致的根因是各自靠 padding+line-height 撑出来的内容高度,
+   在不同字号/不同字体回退下不保证严格成比例(用户反馈过实机上两个按钮高度对不上)。
+   与其继续跟 line-height/字体度量较劲,不如给这一行里的两个按钮定死同一个高度,
+   内容用 flex 居中——这样高度完全由这个数字决定,不再受字号、字体、行高细节影响。 */
+.btn-row .btn-ghost,.btn-row .btn-main{height:50px;display:flex;align-items:center;justify-content:center}
 .btn-mini{padding:6px 12px;font-size:12px;border:1px solid var(--ai);color:var(--ai);background:none;border-radius:8px;cursor:pointer;margin-top:8px}
 .btn-mini.ghost{border-color:var(--line);color:var(--ink-soft)}
 .quit-link{display:block;margin:18px auto 0;background:none;border:none;color:var(--ink-soft);font-size:12px;text-decoration:underline;cursor:pointer}

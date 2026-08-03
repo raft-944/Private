@@ -29,8 +29,11 @@ export default async function handler(req, res) {
   const useModel = ALLOWED_MODELS.includes(model) ? model : MODEL;
 
   // DeepSeek 有时候比 Claude 更啰嗦,1200 tokens 容易在写判卷讲解时被截断导致JSON不完整
-  // 这里不管前端传多少,都保底给够 2048,避免"判卷失败:返回内容不含完整JSON"这类问题
-  const outputTokens = Math.max(max_tokens || 0, 2048);
+  // 这里不管前端传多少,都保底给够 2048,避免"判卷失败:返回内容不含完整JSON"这类问题。
+  // 上限 16000:这个接口没有登录校验(谁知道地址都能调),不封顶的话一个请求就能点名
+  // 要几十万 token、直接烧掉账号额度。本站自己用到的最大值是 8000 再翻倍重试 = 16000
+  // (见 callAI 的两档预算和 callAIArray 的 Math.min(8000,...)),取这个数不影响正常功能。
+  const outputTokens = Math.min(Math.max(max_tokens || 0, 2048), 16000);
 
   // DeepSeek V4 系列(flash/pro)现在默认开启"思考模式":思考过程(reasoning_content)
   // 和最终答案(content)共用同一份 max_tokens 预算,思考本身就可能把预算耗尽,

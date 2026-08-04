@@ -234,28 +234,62 @@ function Root() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  if (session === undefined) return <div style={S.loading}>読み込み中…</div>;
-  if (recovering && session) return <ResetPasswordScreen onDone={() => setRecovering(false)} />;
-  if (!session) return <AuthScreen />;
+  // 登录之前的这几屏各自带上 AuthStyle(配色变量);登录之后 App.jsx 自己的 Style()
+  // 会定义同一套变量,所以这里不需要、也不该再重复挂一份
+  if (session === undefined) return <><AuthStyle /><div style={S.loading}>読み込み中…</div></>;
+  if (recovering && session) return <><AuthStyle /><ResetPasswordScreen onDone={() => setRecovering(false)} /></>;
+  if (!session) return <><AuthStyle /><AuthScreen /></>;
 
   installStoragePolyfill(session.user.id);
   return <App />;
 }
 
+/* 登录/注册界面的配色变量。取值和 App.jsx 里 Style() 定义的那套完全一致(浅色/深色两套),
+   这样"登录页 → 登录进去之后的正式界面"不会在深色模式下突然从浅色跳成深色。
+   两个文件各写一份而不是共用:App.jsx 那份是几千行样式里的一小段,单独抽文件反而更绕,
+   而这里只需要其中十来个变量。改配色时记得两边一起改。
+   color-scheme 必须跟着设:不设的话浏览器仍按浅色渲染 <input> 的原生部分(光标、
+   自动填充的黄色背景、密码框的小眼睛图标),深色背景配浅色控件会很突兀。 */
+function AuthStyle() {
+  return (
+    <style>{`
+:root{
+  color-scheme:light;
+  --paper:#F5F3EC; --card:#FFFFFF; --ink:#2A2B30; --ink-soft:#6B6D76;
+  --ai:#2E4A7D; --ai-deep:#223A5E; --shu:#C0392F; --line:#E4E0D4;
+  --tint-red-bg:#FCEBE9; --tint-green-bg:#E4F0EC; --tint-green-fg:#2E7D5B;
+  --tint-input-bg:#FDFCF9; --auth-shadow:rgba(34,58,94,.08);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    color-scheme:dark;
+    --paper:#18181A; --card:#232326; --ink:#EDEAE2; --ink-soft:#A6A296;
+    --ai:#7FA3D9; --ai-deep:#A9C3E8; --shu:#E2685C; --line:#38383C;
+    --tint-red-bg:#3A2323; --tint-green-bg:#1F332B; --tint-green-fg:#6FBE97;
+    --tint-input-bg:#1F1F21; --auth-shadow:rgba(0,0,0,.4);
+  }
+}
+body{background:var(--paper)}
+    `}</style>
+  );
+}
+
+/* 颜色一律走上面那套 CSS 变量(内联 style 里可以直接写 var(...)),不要写死十六进制,
+   否则深色模式下这个界面又会变回刺眼的浅色。 */
 const S = {
-  wrap: { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#F5F3EC", fontFamily: "'Noto Sans SC',-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif", padding: 20 },
-  card: { width: "100%", maxWidth: 360, background: "#fff", borderRadius: 16, padding: 28, boxShadow: "0 2px 16px rgba(34,58,94,.08)" },
-  title: { fontSize: 22, fontWeight: 700, color: "#223A5E", marginBottom: 4 },
-  sub: { fontSize: 12, color: "#6B6D76", marginBottom: 20 },
-  modeTitle: { fontSize: 15, fontWeight: 600, color: "#2A2B30", marginBottom: 14, paddingBottom: 10, borderBottom: "1px solid #E4E0D4" },
-  input: { width: "100%", padding: "12px 14px", fontSize: 16, border: "1.5px solid #E4E0D4", borderRadius: 10, marginBottom: 10, boxSizing: "border-box", background: "#FDFCF9", color: "#2A2B30" },
-  btn: { width: "100%", padding: "13px", fontSize: 15, fontWeight: 600, color: "#fff", background: "#2E4A7D", border: "none", borderRadius: 10, cursor: "pointer", marginTop: 4 },
-  err: { color: "#C0392F", fontSize: 13, marginTop: 12, lineHeight: 1.6, background: "#FCEBE9", padding: "10px 12px", borderRadius: 8 },
-  msg: { color: "#2E7D5B", fontSize: 13, marginTop: 12, lineHeight: 1.7, background: "#E4F0EC", padding: "10px 12px", borderRadius: 8 },
+  wrap: { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "var(--paper)", fontFamily: "'Noto Sans SC',-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif", padding: 20 },
+  card: { width: "100%", maxWidth: 360, background: "var(--card)", borderRadius: 16, padding: 28, boxShadow: "0 2px 16px var(--auth-shadow)" },
+  title: { fontSize: 22, fontWeight: 700, color: "var(--ai-deep)", marginBottom: 4 },
+  sub: { fontSize: 12, color: "var(--ink-soft)", marginBottom: 20 },
+  modeTitle: { fontSize: 15, fontWeight: 600, color: "var(--ink)", marginBottom: 14, paddingBottom: 10, borderBottom: "1px solid var(--line)" },
+  input: { width: "100%", padding: "12px 14px", fontSize: 16, border: "1.5px solid var(--line)", borderRadius: 10, marginBottom: 10, boxSizing: "border-box", background: "var(--tint-input-bg)", color: "var(--ink)" },
+  btn: { width: "100%", padding: "13px", fontSize: 15, fontWeight: 600, color: "#fff", background: "var(--ai)", border: "none", borderRadius: 10, cursor: "pointer", marginTop: 4 },
+  err: { color: "var(--shu)", fontSize: 13, marginTop: 12, lineHeight: 1.6, background: "var(--tint-red-bg)", padding: "10px 12px", borderRadius: 8 },
+  msg: { color: "var(--tint-green-fg)", fontSize: 13, marginTop: 12, lineHeight: 1.7, background: "var(--tint-green-bg)", padding: "10px 12px", borderRadius: 8 },
   links: { display: "flex", justifyContent: "space-between", marginTop: 16, gap: 10 },
-  link: { fontSize: 13, color: "#2E4A7D", cursor: "pointer", textDecoration: "underline" },
-  hint: { fontSize: 12, color: "#6B6D76", marginTop: 16, lineHeight: 1.7, paddingTop: 14, borderTop: "1px dashed #E4E0D4" },
-  loading: { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: "#6B6D76", fontFamily: "sans-serif", background: "#F5F3EC" },
+  link: { fontSize: 13, color: "var(--ai)", cursor: "pointer", textDecoration: "underline" },
+  hint: { fontSize: 12, color: "var(--ink-soft)", marginTop: 16, lineHeight: 1.7, paddingTop: 14, borderTop: "1px dashed var(--line)" },
+  loading: { minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--ink-soft)", fontFamily: "sans-serif", background: "var(--paper)" },
 };
 
 createRoot(document.getElementById("root")).render(<Root />);

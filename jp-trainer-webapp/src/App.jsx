@@ -344,6 +344,105 @@ function aggregateNewPatternVerdict(results) {
    数才真正移除。所有错题清除逻辑(SRS的重练、練習帳的重练)都共用这一个阈值。 */
 const MISTAKE_CLEAR_STREAK = 3;
 
+/* 首页学习报告里那条正确率热力图显示最近多少天。放在模块顶层(原来在组件内部)
+   是因为下面的使用手册也要引用这个数字,手册不能把它手写死。 */
+const HEATMAP_DAYS = 28;
+
+/* ================= 使用手册("我的"页面里展示) =================
+   写给第一次用这个 App 的人看,不是写给开发者看的:讲"这个功能是干嘛的、该怎么用",
+   不讲实现。里面的具体数字(复习间隔、几道题、几次算掌握)全部从上面那些常量取,
+   不要在文案里手写死——以后调常量时手册会跟着变,不会出现"手册说5次、代码其实是3次"
+   这种对不上的情况。 */
+const MANUAL_SECTIONS = [
+  {
+    id: "start",
+    title: "从这里开始",
+    paras: [
+      "这是一个按 JLPT 等级(N5〜N1)组织的日语句型练习工具,一共收录 " + PATTERNS.length + " 个句型。核心用法很简单:每天打开首页,点「今日学习」,把系统安排给你的那些题做完就行。剩下的都是可选的加练。",
+      "题目和批改都由 AI 完成——你用中文/日文写出句子,AI 会指出语法、助词、动词变形、以及「语法虽然对但场合/语气不合适」这类问题,并给出参考答案。",
+      "第一次用建议先去「句型库」翻一翻,对整个库的结构有个印象,然后回首页开始学。",
+    ],
+  },
+  {
+    id: "srs",
+    title: "今日学习:复习排期是怎么算的",
+    paras: [
+      "这个 App 按遗忘曲线安排复习:一个句型答对之后,下次复习会隔得更久——依次是 " + INTERVALS.join("、") + " 天。答错则退回更短的间隔,重新往上爬。所以你不需要自己决定「今天该复习哪些」,打开首页就是当天该做的。",
+      "「今日学习」里会混三种东西:①今天到期该复习的句型;②当天新学的句型(默认每天几个,可以在首页「设置与备份」里调);③需要专项特训的顽固句型(见下一节)。",
+      "学新句型时是「讲解 + " + NEW_PATTERN_REPS + " 道题」一整页做完:上面是这个句型的用法讲解,下面 " + NEW_PATTERN_REPS + " 道题一次性出好,你可以边看讲解边做,每道题单独批改,全部做完才算学完这个句型。",
+      "复习题每做 " + REVIEW_CHUNK + " 道会插入一次讲评小结,让你回顾刚才那几道的批改结果,不用等全部做完。",
+      "如果某天到期的句型特别多,可以在首页「设置与备份」里调低「每天复习上限」(默认 " + REVIEW_CAP_DEFAULT + " 道),超出的会自动顺延到之后几天,不会消失。",
+    ],
+  },
+  {
+    id: "stubborn",
+    title: "顽固句型特训",
+    paras: [
+      "有些句型就是反复记不住。当一个句型累计答错超过 " + STUBBORN_TRIGGER + " 次,它会自动进入「顽固特训」;你也可以在批改结果里点「🔥 标记顽固」手动把某个句型丢进去,不用等它自然攒够次数。",
+      "特训是「" + STUBBORN_REPS + " 道题一组、全对才算过一轮」:错任何一道这一轮就不算数,要连续 " + STUBBORN_CLEAN_NEEDED + " 轮全对才算初步过关。",
+      "初步过关之后不会马上放你走——" + STUBBORN_CONFIRM_GAP + " 天后还会再考你一次,通过了才真正毕业。这一步是故意的:同一周之内连着做对,很可能只是短期记住了,隔一周还记得才算真的会。",
+      "特训期间这个句型的正常复习排期会暂停,只走特训流程,毕业后再回到正常排期。",
+    ],
+  },
+  {
+    id: "grading",
+    title: "批改标准怎么看",
+    paras: [
+      "每道题的批改结果分三档:「正解」(语法和句型用法都对,允许和参考答案不同的自然说法)、「惜しい」(句型用对了,但有助词、活用、时态之类的小错)、「違う」(没用上目标句型,或有严重错误、意思不对)。",
+      "批改会依据每个句型自带的教材解释和易混淆点,所以就算你写的句子语法完全正确,如果用错了场合、文体(敬体/简体混用)或语气,也会被指出来,不会简单判个对就完事。",
+      "有个细节值得知道:如果你的错误跟目标句型无关(比如单词写错、跟句型无关的助词),这个句型的复习间隔不会因此缩短——不会因为一个无关的词就认为你「这个句型没掌握」。但错题还是会进錯題本,那个词确实该练。",
+      "批改完可以针对这道题继续追问(比如「为什么不能用〜たら?」),AI 会紧扣这道题回答。",
+    ],
+  },
+  {
+    id: "practice",
+    title: "其他练习:每日作業 / 週間チャレンジ / 聴解",
+    paras: [
+      "这三个在首页,都是从你「已经学过」的句型里出题,不影响复习排期,做不做都行。",
+      "每日作業:4 道造句 + 5 道翻译 + 1 个情景对话,会优先混入你当前的错题。适合每天正课做完之后再加练一轮。",
+      "週間チャレンジ:5 道複合作文(一句话里同时用两个句型)+ 3 道本周弱点重测,比每日作業难一档。",
+      "聴解練習:8 道听写题,只放声音、你写出听到的假名就行(不用管汉字),也不需要翻译。累计答对得多了会自动升难度档位。用的是浏览器自带的朗读功能,建议用 Chrome/Edge/Safari。",
+    ],
+  },
+  {
+    id: "notebook",
+    title: "練習帳与 JLPT 模拟",
+    paras: [
+      "「練習帳」是完全自由的练习区,不进复习排期、不计入任何每日/每周统计,想练多少练多少。里面有三块:",
+      "知识辨析——针对容易混淆的语法点(比如各种「〜ば/〜たら/〜と」)专门出对比题,还有一个专门练动词变形的分类。",
+      "场景对话——和 AI 角色扮演走完一个完整场景(点餐、问路、看病之类),有轻松/普通/挑战三档,档位差别在于对方说话多自然、会不会临时抛意外状况,不是语法难度。",
+      "书面邮件——写日语商务邮件,按称呼、寒暄、自报身份、正文等八个维度批改。",
+      "「JLPT模拟」在練習帳里面进,有文法選択(四选一填空)和読解(短文+理解题)两种,是无限刷的模式,想停就停。文法选择题出完之后会再让 AI 独立解一遍,答案对不上的题会直接丢掉不给你看,尽量避免出到有歧义的题。",
+    ],
+  },
+  {
+    id: "mistakes",
+    title: "錯題本",
+    paras: [
+      "答错的题会自动进錯題本,可以随时回去重练。",
+      "重练答对一次不会马上移除——要连续答对 " + MISTAKE_CLEAR_STREAK + " 次才算真的掌握、从本子里消失。中间错一次就重新计数。这是为了避免蒙对一次就当学会了。",
+      "錯題本最多保留最近 100 条,超出的旧记录会自动清掉。",
+    ],
+  },
+  {
+    id: "data",
+    title: "学习记录与备份",
+    paras: [
+      "首页底部的「学习报告」里能看到:连续打卡天数、最长记录、近 " + HEATMAP_DAYS + " 天的正确率热力图,以及最近错得最多的薄弱句型排行。",
+      "所有进度都存在云端,换设备登录同一个账号就能接着学,不需要手动同步。",
+      "如果担心万一,首页「设置与备份」里有「导出进度」——复制那段文字存到备忘录里,以后可以用「导入进度」还原。一般用不上,属于双保险。",
+    ],
+  },
+  {
+    id: "quota",
+    title: "关于免费额度",
+    paras: [
+      "出题和批改都要调用 AI,是有成本的,所以每个账号有 ¥" + FREE_QUOTA_RMB.toFixed(2) + " 的免费体验额度,用量会按实际消耗扣除,在本页上方可以随时看到还剩多少。",
+      "额度用完之后,已经学过的内容、错题本、学习记录都还在,只是暂时不能再出新题和批改了。",
+    ],
+  },
+];
+
 /* 安全地合并存档:旧版本存下来的数据可能缺少新版本才有的字段(比如后来才加的 voiceURI、listenStats),
    如果直接用 {...DEFAULT_DB, ...saved} 这种浅合并,saved.settings 会把整个 settings 对象替换掉、
    新加的子字段就没了。这里对几个嵌套对象逐层补齐,保证老存档导进来也不会缺字段。 */
@@ -2406,6 +2505,8 @@ function AppInner() {
      还能正常改密码,不该被额度查询的失败连累。 */
   const [acctEmail, setAcctEmail] = useState(null); // null=还没读 | "" (读取失败) | 邮箱字符串
   const [acctQuota, setAcctQuota] = useState(null); // null=还没读 | "error" | {spentRmb, unlimited}
+  const [acctOpenSection, setAcctOpenSection] = useState(null); // 手册/账户设置的折叠,同时只展开一个
+  const [openManual, setOpenManual] = useState(null); // 使用手册里展开的是哪一节
   const [newPw, setNewPw] = useState("");
   const [newPw2, setNewPw2] = useState("");
   const [pwBusy, setPwBusy] = useState(false);
@@ -2912,7 +3013,6 @@ function AppInner() {
     }
     return Math.max(longest, streak);
   })();
-  const HEATMAP_DAYS = 28;
   const heatmapCells = Array.from({ length: HEATMAP_DAYS }, (_, i) => {
     const d = addDays(t, i - (HEATMAP_DAYS - 1));
     const day = db.dailyStats[d];
@@ -4947,17 +5047,7 @@ function AppInner() {
                     </div>
                   )}
                 </section>
-
-                <section className="account-section">
-                  <button
-                    className="btn-mini ghost"
-                    onClick={async () => {
-                      if (!window.confirm("确定要退出登录吗?进度已经存在云端,重新登录后还在。")) return;
-                      await supabase.auth.signOut();
-                      window.location.reload();
-                    }}
-                  >退出登录</button>
-                </section>
+                {/* 退出登录挪到了「我的」页面(账户相关的东西都收在那边),这里不再重复放一个 */}
               </div>
             )}
           </section>
@@ -6034,79 +6124,144 @@ function AppInner() {
       )}
 
       {/* ---------- 我的 ---------- */}
-      {view === "account" && (
+      {view === "account" && (() => {
+        // 额度条:unlimited 账号不显示进度条(没有"用了百分之多少"这回事);
+        // 花超了额度也把进度条封在 100%,不让它溢出到容器外面
+        const quotaPct = acctQuota && acctQuota !== "error" && !acctQuota.unlimited
+          ? Math.min(100, (acctQuota.spentRmb / FREE_QUOTA_RMB) * 100)
+          : 0;
+        const quotaLow = quotaPct >= 80; // 快用完了就把进度条标红提醒
+        return (
         <main className="page">
-          <section className="card">
-            <div className="acct-section-title">账户</div>
-            <div className="acct-row">
-              <span className="acct-label">登录邮箱</span>
-              <span className="acct-value">
-                {acctEmail === null ? "…" : acctEmail || "读取失败"}
-              </span>
+          <section className="acct-hero">
+            <div className="acct-hero-top">
+              <div className="acct-avatar">{(acctEmail || "?").slice(0, 1).toUpperCase()}</div>
+              <div className="acct-hero-info">
+                <div className="acct-hero-email">{acctEmail === null ? "读取中…" : acctEmail || "邮箱读取失败"}</div>
+                <div className="acct-hero-sub">句型道場 · 已收录 {PATTERNS.length} 个句型</div>
+              </div>
             </div>
-            <div className="acct-row">
-              <span className="acct-label">免费额度</span>
-              <span className="acct-value">
-                {acctQuota === null ? (
-                  "…"
-                ) : acctQuota === "error" ? (
-                  <>
-                    读取失败 <button className="btn-mini" onClick={loadAccountInfo}>重试</button>
-                  </>
-                ) : acctQuota.unlimited ? (
-                  "无限额度"
-                ) : (
-                  `已用 ¥${acctQuota.spentRmb.toFixed(2)} / 共 ¥${FREE_QUOTA_RMB.toFixed(2)}`
-                )}
-              </span>
+
+            <div className="acct-quota">
+              {acctQuota === null ? (
+                <div className="acct-quota-label">额度读取中…</div>
+              ) : acctQuota === "error" ? (
+                <div className="acct-quota-label">
+                  额度读取失败 <button className="btn-mini" onClick={loadAccountInfo}>重试</button>
+                </div>
+              ) : acctQuota.unlimited ? (
+                <div className="acct-quota-label">免费额度:<b>无限额度</b></div>
+              ) : (
+                <>
+                  <div className="acct-quota-label">
+                    <span>免费额度</span>
+                    <span className={quotaLow ? "acct-quota-num low" : "acct-quota-num"}>
+                      还剩 ¥{Math.max(0, FREE_QUOTA_RMB - acctQuota.spentRmb).toFixed(2)} / ¥{FREE_QUOTA_RMB.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="acct-quota-bar">
+                    <div className={quotaLow ? "acct-quota-fill low" : "acct-quota-fill"} style={{ width: quotaPct + "%" }} />
+                  </div>
+                </>
+              )}
             </div>
           </section>
 
-          <section className="card">
-            <div className="acct-section-title">修改密码</div>
-            <input
-              className="acct-input"
-              type="password"
-              placeholder="新密码(至少 6 位)"
-              autoComplete="new-password"
-              value={newPw}
-              onChange={(e) => setNewPw(e.target.value)}
-            />
-            <input
-              className="acct-input"
-              type="password"
-              placeholder="再输一次新密码"
-              autoComplete="new-password"
-              value={newPw2}
-              onChange={(e) => setNewPw2(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && submitChangePassword()}
-            />
-            <button className="btn-outline" onClick={submitChangePassword} disabled={pwBusy}>
-              {pwBusy ? "保存中…" : "保存新密码"}
+          {/* 使用手册:内容在 MANUAL_SECTIONS 里,这里只负责折叠渲染 */}
+          <section className="cf-section">
+            <button className="cf-section-head" onClick={() => setAcctOpenSection((s) => (s === "manual" ? null : "manual"))}>
+              <span className="cf-section-title">使用手册</span>
+              <span className="cf-section-meta">{MANUAL_SECTIONS.length} 节</span>
+              <span className="cf-section-arrow">{acctOpenSection === "manual" ? "−" : "+"}</span>
             </button>
-            {pwErr && <div className="err-text">{pwErr}</div>}
-            {pwMsg && <div className="copy-msg">{pwMsg}</div>}
+            {acctOpenSection === "manual" && (
+              <div className="cf-section-body">
+                {MANUAL_SECTIONS.map((sec) => (
+                  <div key={sec.id} className="manual-block">
+                    <button className="manual-head" onClick={() => setOpenManual(openManual === sec.id ? null : sec.id)}>
+                      <span>{sec.title}</span>
+                      <span className="manual-arrow">{openManual === sec.id ? "−" : "+"}</span>
+                    </button>
+                    {openManual === sec.id && (
+                      <div className="manual-body">
+                        {sec.paras.map((p, i) => <p key={i}>{p}</p>)}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
 
-          <section className="card">
-            <div className="acct-section-title">修改邮箱</div>
-            <input
-              className="acct-input"
-              type="email"
-              placeholder="新邮箱"
-              autoComplete="email"
-              value={newEmail}
-              onChange={(e) => setNewEmail(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && submitChangeEmail()}
-            />
-            <button className="btn-outline" onClick={submitChangeEmail} disabled={emailBusy}>
-              {emailBusy ? "提交中…" : "修改邮箱"}
+          {/* 账户设置:改密码/改邮箱平时折叠起来,不占地方 */}
+          <section className="cf-section">
+            <button className="cf-section-head" onClick={() => setAcctOpenSection((s) => (s === "security" ? null : "security"))}>
+              <span className="cf-section-title">账户设置</span>
+              <span className="cf-section-meta">改密码 · 改邮箱</span>
+              <span className="cf-section-arrow">{acctOpenSection === "security" ? "−" : "+"}</span>
             </button>
-            {emailErr && <div className="err-text">{emailErr}</div>}
-            {emailMsg && <div className="copy-msg">{emailMsg}</div>}
+            {acctOpenSection === "security" && (
+              <div className="cf-section-body">
+                <div className="acct-form">
+                  <div className="acct-form-title">修改密码</div>
+                  <input
+                    className="acct-input"
+                    type="password"
+                    placeholder="新密码(至少 6 位)"
+                    autoComplete="new-password"
+                    value={newPw}
+                    onChange={(e) => setNewPw(e.target.value)}
+                  />
+                  <input
+                    className="acct-input"
+                    type="password"
+                    placeholder="再输一次新密码"
+                    autoComplete="new-password"
+                    value={newPw2}
+                    onChange={(e) => setNewPw2(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && submitChangePassword()}
+                  />
+                  <button className="btn-outline" onClick={submitChangePassword} disabled={pwBusy}>
+                    {pwBusy ? "保存中…" : "保存新密码"}
+                  </button>
+                  {pwErr && <div className="err-text">{pwErr}</div>}
+                  {pwMsg && <div className="copy-msg">{pwMsg}</div>}
+                </div>
+
+                <div className="acct-form">
+                  <div className="acct-form-title">修改邮箱</div>
+                  <input
+                    className="acct-input"
+                    type="email"
+                    placeholder="新邮箱"
+                    autoComplete="email"
+                    value={newEmail}
+                    onChange={(e) => setNewEmail(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && submitChangeEmail()}
+                  />
+                  <button className="btn-outline" onClick={submitChangeEmail} disabled={emailBusy}>
+                    {emailBusy ? "提交中…" : "修改邮箱"}
+                  </button>
+                  {emailErr && <div className="err-text">{emailErr}</div>}
+                  {emailMsg && <div className="copy-msg">{emailMsg}</div>}
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section className="account-section">
+            <button
+              className="btn-mini ghost"
+              onClick={async () => {
+                if (!window.confirm("确定要退出登录吗?进度已经存在云端,重新登录后还在。")) return;
+                await supabase.auth.signOut();
+                window.location.reload();
+              }}
+            >退出登录</button>
           </section>
         </main>
-      )}
+        );
+      })()}
 
       </div>
 
@@ -6320,11 +6475,38 @@ html,body{overflow-x:hidden}
 .copy-msg{margin-top:8px;font-size:12px;color:var(--ai)}
 
 /* ---------- 我的(账户) ---------- */
-.acct-section-title{font-size:15px;font-weight:700;color:var(--ai-deep);letter-spacing:1px;margin-bottom:12px}
-.acct-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px dashed var(--line)}
-.acct-row:last-child{border-bottom:none}
-.acct-label{font-size:13px;color:var(--ink-soft)}
-.acct-value{font-size:13px;color:var(--ink);font-weight:600}
+/* 顶部这块用主题蓝的浅底色和整页其它白卡片区分开,让"这是你自己的账户信息"一眼可辨 */
+.acct-hero{background:var(--tint-blue-bg);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:14px}
+.acct-hero-top{display:flex;align-items:center;gap:14px}
+.acct-avatar{width:46px;height:46px;flex:0 0 auto;border-radius:50%;background:var(--ai);color:#fff;
+  display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700}
+.acct-hero-info{min-width:0} /* 不给 flex 子项设 min-width:0,下面的邮箱就没法正常省略号截断 */
+.acct-hero-email{font-size:15px;font-weight:600;color:var(--ink);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acct-hero-sub{font-size:11px;color:var(--ink-soft);margin-top:3px}
+.acct-quota{margin-top:16px;padding-top:14px;border-top:1px dashed var(--line)}
+.acct-quota-label{display:flex;justify-content:space-between;align-items:center;gap:8px;
+  font-size:12px;color:var(--ink-soft);margin-bottom:8px}
+.acct-quota-label .btn-mini{margin-top:0}
+.acct-quota-num{font-weight:700;color:var(--ai-deep)}
+.acct-quota-num.low{color:var(--shu)}
+.acct-quota-bar{height:6px;background:var(--tint-neutral-bg);border-radius:99px;overflow:hidden}
+.acct-quota-fill{height:100%;background:var(--ai);border-radius:99px;transition:width .3s}
+.acct-quota-fill.low{background:var(--shu)}
+
+/* 使用手册:外层是和練習帳一样的 cf-section 折叠,里面每一节再各自折叠 */
+.manual-block{margin-bottom:8px}
+.manual-head{width:100%;display:flex;justify-content:space-between;align-items:center;gap:8px;
+  padding:12px 14px;background:var(--card);border:1px solid var(--line);border-radius:12px;
+  font-size:14px;font-weight:600;cursor:pointer;color:var(--ink);text-align:left}
+.manual-arrow{font-size:15px;color:var(--ink-soft);flex:0 0 auto}
+.manual-body{padding:12px 14px 4px}
+.manual-body p{font-size:13px;line-height:1.85;color:var(--ink);margin-bottom:10px}
+.manual-body p:last-child{margin-bottom:0}
+
+.acct-form{margin-bottom:18px}
+.acct-form:last-child{margin-bottom:0}
+.acct-form-title{font-size:13px;font-weight:600;color:var(--ai-deep);margin-bottom:10px}
 .acct-input{width:100%;padding:11px 12px;font-size:16px;border:1px solid var(--line);border-radius:8px;
   background:var(--tint-input-bg);color:var(--ink);margin-bottom:10px;box-sizing:border-box}
 

@@ -368,10 +368,10 @@ const MANUAL_SECTIONS = [
     title: "今日学习:复习排期是怎么算的",
     paras: [
       "这个 App 按遗忘曲线安排复习:一个句型答对之后,下次复习会隔得更久——依次是 " + INTERVALS.join("、") + " 天。答错则退回更短的间隔,重新往上爬。所以你不需要自己决定「今天该复习哪些」,打开首页就是当天该做的。",
-      "「今日学习」里会混三种东西:①今天到期该复习的句型;②当天新学的句型(默认每天几个,可以在首页「设置与备份」里调);③需要专项特训的顽固句型(见下一节)。",
+      "「今日学习」里会混三种东西:①今天到期该复习的句型;②当天新学的句型(默认每天几个,可以在「我的 → 设置与备份」里调);③需要专项特训的顽固句型(见下一节)。",
       "学新句型时是「讲解 + " + NEW_PATTERN_REPS + " 道题」一整页做完:上面是这个句型的用法讲解,下面 " + NEW_PATTERN_REPS + " 道题一次性出好,你可以边看讲解边做,每道题单独批改,全部做完才算学完这个句型。",
       "复习题每做 " + REVIEW_CHUNK + " 道会插入一次讲评小结,让你回顾刚才那几道的批改结果,不用等全部做完。",
-      "如果某天到期的句型特别多,可以在首页「设置与备份」里调低「每天复习上限」(默认 " + REVIEW_CAP_DEFAULT + " 道),超出的会自动顺延到之后几天,不会消失。",
+      "如果某天到期的句型特别多,可以在「我的 → 设置与备份」里调低「每天复习上限」(默认 " + REVIEW_CAP_DEFAULT + " 道),超出的会自动顺延到之后几天,不会消失。",
     ],
   },
   {
@@ -430,7 +430,7 @@ const MANUAL_SECTIONS = [
     paras: [
       "首页底部的「学习报告」里能看到:连续打卡天数、最长记录、近 " + HEATMAP_DAYS + " 天的正确率热力图,以及最近错得最多的薄弱句型排行。",
       "所有进度都存在云端,换设备登录同一个账号就能接着学,不需要手动同步。",
-      "如果担心万一,首页「设置与备份」里有「导出进度」——复制那段文字存到备忘录里,以后可以用「导入进度」还原。一般用不上,属于双保险。",
+      "如果担心万一,「我的 → 设置与备份」里有「导出进度」——复制那段文字存到备忘录里,以后可以用「导入进度」还原。一般用不上,属于双保险。",
     ],
   },
   {
@@ -2396,9 +2396,9 @@ function AppInner() {
     return `情景对话练习\n场景: ${scene.background}\n学生演: ${scene.userRole} / AI演: ${scene.aiRole}\n目标: ${scene.goal}\n对话记录:\n${historyText}\n先生的总评: ${review.summary}\n可以改进的地方: ${review.issues}${review.suggestions ? `\n更地道的说法: ${review.suggestions}` : ""}`;
   };
   const [weeklyFormal, setWeeklyFormal] = useState(false);
-  // 首页"设置与备份""学习报告"这两个折叠区块,手风琴式(同一时间最多展开一个),
-  // 默认都收起——都是调整频率低/优先级不高的内容,收起能让首页别一打开就一长串
-  const [homeOpenSection, setHomeOpenSection] = useState(null); // null | "settings" | "report"
+  // 首页"学习报告"折叠区块,默认收起——不是每天都要看的内容,收起能让首页别一打开就一长串。
+  // (原来还管着"设置与备份",那块已经挪到「我的」页面,归 acctOpenSection 管了)
+  const [homeOpenSection, setHomeOpenSection] = useState(null); // null | "report"
   const [showExport, setShowExport] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
@@ -4986,71 +4986,8 @@ function AppInner() {
             <div className="mini-stats">累计答题 {db.stats.total} · 正确率 {Math.round((db.stats.ok / db.stats.total) * 100)}%</div>
           )}
 
-          <section className="cf-section">
-            <button className="cf-section-head" onClick={() => setHomeOpenSection((s) => (s === "settings" ? null : "settings"))}>
-              <span className="cf-section-title">设置与备份</span>
-              <span className="cf-section-meta">每天新学 {db.settings.newPerDay} · 复习上限 {db.settings.reviewCap || REVIEW_CAP_DEFAULT}</span>
-              <span className="cf-section-arrow">{homeOpenSection === "settings" ? "−" : "+"}</span>
-            </button>
-            {homeOpenSection === "settings" && (
-              <div className="cf-section-body">
-                {/* 注意这里必须展开 ...d.settings:以前写成 settings:{newPerDay:...} 会把整个
-                    settings 换掉,顺手把已选的听力语音(voiceURI)清空 */}
-                <section className="settings-row">
-                  <span>每天新学句型</span>
-                  <div className="stepper">
-                    <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, newPerDay: Math.max(0, d.settings.newPerDay - 1) } }))}>−</button>
-                    <b>{db.settings.newPerDay}</b>
-                    <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, newPerDay: Math.min(20, d.settings.newPerDay + 1) } }))}>＋</button>
-                  </div>
-                </section>
-
-                <section className="settings-row">
-                  <span>每天复习上限</span>
-                  <div className="stepper">
-                    <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, reviewCap: Math.max(10, (d.settings.reviewCap || REVIEW_CAP_DEFAULT) - 5) } }))}>−</button>
-                    <b>{db.settings.reviewCap || REVIEW_CAP_DEFAULT}</b>
-                    <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, reviewCap: Math.min(200, (d.settings.reviewCap || REVIEW_CAP_DEFAULT) + 5) } }))}>＋</button>
-                  </div>
-                </section>
-                <div className="settings-note">
-                  超出上限的到期句型会顺延到之后,不会消失。进入 N3/N2 之后句子变长、单题更费时,
-                  可以把这个数字调低。
-                </div>
-
-                <section className="backup-section">
-                  <div className="backup-head">数据备份(跨设备手动搬运,以防云端存储连不上)</div>
-                  <div className="btn-row">
-                    <button className="btn-mini" onClick={() => { setShowExport(true); setShowImport(false); }}>导出进度</button>
-                    <button className="btn-mini ghost" onClick={() => { setShowImport(true); setShowExport(false); }}>导入进度</button>
-                  </div>
-                  {showExport && (
-                    <div className="backup-card">
-                      <div className="backup-title">复制下面这段文字,保存到备忘录/微信"文件传输助手"里,换设备时粘贴进"导入进度"即可</div>
-                      <textarea className="backup-box" readOnly value={JSON.stringify(db)} onFocus={(e) => e.target.select()} />
-                      <div className="btn-row">
-                        <button className="btn-mini" onClick={copyExport}>复制</button>
-                        <button className="btn-mini ghost" onClick={() => setShowExport(false)}>关闭</button>
-                      </div>
-                      {copyMsg && <div className="copy-msg">{copyMsg}</div>}
-                    </div>
-                  )}
-                  {showImport && (
-                    <div className="backup-card">
-                      <div className="backup-title">粘贴之前导出的文字,会覆盖当前设备上的记录</div>
-                      <textarea className="backup-box" value={importText} onChange={(e) => setImportText(e.target.value)} placeholder="粘贴导出的内容…" />
-                      <div className="btn-row">
-                        <button className="btn-mini" onClick={doImport}>确认导入(覆盖当前记录)</button>
-                        <button className="btn-mini ghost" onClick={() => { setShowImport(false); setImportText(""); setImportMsg(""); }}>取消</button>
-                      </div>
-                      {importMsg && <div className="copy-msg">{importMsg}</div>}
-                    </div>
-                  )}
-                </section>
-                {/* 退出登录挪到了「我的」页面(账户相关的东西都收在那边),这里不再重复放一个 */}
-              </div>
-            )}
-          </section>
+          {/* 设置与备份、退出登录都挪到「我的」页面了(设置/账户相关的东西集中在那一处),
+              首页这里只留和"今天学什么"直接相关的内容 */}
 
           {db.stats.total > 0 && (
             <section className="cf-section">
@@ -6189,6 +6126,72 @@ function AppInner() {
                     )}
                   </div>
                 ))}
+              </div>
+            )}
+          </section>
+
+          {/* 学习设置与备份(从首页挪过来的) */}
+          <section className="cf-section">
+            <button className="cf-section-head" onClick={() => setAcctOpenSection((s) => (s === "settings" ? null : "settings"))}>
+              <span className="cf-section-title">设置与备份</span>
+              <span className="cf-section-meta">每天新学 {db.settings.newPerDay} · 复习上限 {db.settings.reviewCap || REVIEW_CAP_DEFAULT}</span>
+              <span className="cf-section-arrow">{acctOpenSection === "settings" ? "−" : "+"}</span>
+            </button>
+            {acctOpenSection === "settings" && (
+              <div className="cf-section-body">
+                {/* 注意这里必须展开 ...d.settings:以前写成 settings:{newPerDay:...} 会把整个
+                    settings 换掉,顺手把已选的听力语音(voiceURI)清空 */}
+                <section className="settings-row">
+                  <span>每天新学句型</span>
+                  <div className="stepper">
+                    <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, newPerDay: Math.max(0, d.settings.newPerDay - 1) } }))}>−</button>
+                    <b>{db.settings.newPerDay}</b>
+                    <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, newPerDay: Math.min(20, d.settings.newPerDay + 1) } }))}>＋</button>
+                  </div>
+                </section>
+
+                <section className="settings-row">
+                  <span>每天复习上限</span>
+                  <div className="stepper">
+                    <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, reviewCap: Math.max(10, (d.settings.reviewCap || REVIEW_CAP_DEFAULT) - 5) } }))}>−</button>
+                    <b>{db.settings.reviewCap || REVIEW_CAP_DEFAULT}</b>
+                    <button onClick={() => setDb((d) => ({ ...d, settings: { ...d.settings, reviewCap: Math.min(200, (d.settings.reviewCap || REVIEW_CAP_DEFAULT) + 5) } }))}>＋</button>
+                  </div>
+                </section>
+                <div className="settings-note">
+                  超出上限的到期句型会顺延到之后,不会消失。进入 N3/N2 之后句子变长、单题更费时,
+                  可以把这个数字调低。
+                </div>
+
+                <section className="backup-section">
+                  <div className="backup-head">数据备份(跨设备手动搬运,以防云端存储连不上)</div>
+                  <div className="btn-row">
+                    <button className="btn-mini" onClick={() => { setShowExport(true); setShowImport(false); }}>导出进度</button>
+                    <button className="btn-mini ghost" onClick={() => { setShowImport(true); setShowExport(false); }}>导入进度</button>
+                  </div>
+                  {showExport && (
+                    <div className="backup-card">
+                      <div className="backup-title">复制下面这段文字,保存到备忘录/微信「文件传输助手」里,换设备时粘贴进「导入进度」即可</div>
+                      <textarea className="backup-box" readOnly value={JSON.stringify(db)} onFocus={(e) => e.target.select()} />
+                      <div className="btn-row">
+                        <button className="btn-mini" onClick={copyExport}>复制</button>
+                        <button className="btn-mini ghost" onClick={() => setShowExport(false)}>关闭</button>
+                      </div>
+                      {copyMsg && <div className="copy-msg">{copyMsg}</div>}
+                    </div>
+                  )}
+                  {showImport && (
+                    <div className="backup-card">
+                      <div className="backup-title">粘贴之前导出的文字,会覆盖当前设备上的记录</div>
+                      <textarea className="backup-box" value={importText} onChange={(e) => setImportText(e.target.value)} placeholder="粘贴导出的内容…" />
+                      <div className="btn-row">
+                        <button className="btn-mini" onClick={doImport}>确认导入(覆盖当前记录)</button>
+                        <button className="btn-mini ghost" onClick={() => { setShowImport(false); setImportText(""); setImportMsg(""); }}>取消</button>
+                      </div>
+                      {importMsg && <div className="copy-msg">{importMsg}</div>}
+                    </div>
+                  )}
+                </section>
               </div>
             )}
           </section>

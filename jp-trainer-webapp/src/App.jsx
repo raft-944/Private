@@ -2397,8 +2397,15 @@ function AppInner() {
   const cfEmailRecentRef = useRef({}); // topicId -> 上一次生成的情境摘要,避免下次雷同,不持久化
 
   /* ================= 我的(账户信息:邮箱、免费额度、改密码/邮箱) =================
-     跟 SRS/練習帳都没关系,只在进这个 view 时才去查,不预取。 */
-  const [accountInfo, setAccountInfo] = useState(null); // null=还没读 | {email, spentRmb, unlimited} | "error"
+     跟 SRS/練習帳都没关系,只在进这个 view 时才去查,不预取。
+     邮箱(acctEmail)和额度(acctQuota)拆成两个独立 state 分别请求、分别处理失败——
+     两者互不依赖:改密码/改邮箱这两个表单只需要 supabase.auth 就能用,跟 get_my_usage
+     这个 RPC 能不能查到完全无关。早先写成一个 accountInfo 状态、任何一头查询失败就整页
+     显示"加载失败",会把改密码/改邮箱这两个跟额度毫不相干的功能也一起挡住——比如
+     Supabase 那边 usage_quota 相关的 SQL 还没跑、或者只是这一次网络抖动,用户应该
+     还能正常改密码,不该被额度查询的失败连累。 */
+  const [acctEmail, setAcctEmail] = useState(null); // null=还没读 | "" (读取失败) | 邮箱字符串
+  const [acctQuota, setAcctQuota] = useState(null); // null=还没读 | "error" | {spentRmb, unlimited}
   const [newPw, setNewPw] = useState("");
   const [newPw2, setNewPw2] = useState("");
   const [pwBusy, setPwBusy] = useState(false);
@@ -2409,22 +2416,34 @@ function AppInner() {
   const [emailErr, setEmailErr] = useState("");
   const [emailMsg, setEmailMsg] = useState("");
 
-  const loadAccountInfo = async () => {
-    try {
-      const [{ data: userData }, { data: usageRows, error: usageErr }] = await Promise.all([
-        supabase.auth.getUser(),
-        supabase.rpc("get_my_usage"),
-      ]);
-      if (usageErr) throw usageErr;
-      const row = Array.isArray(usageRows) ? usageRows[0] : usageRows;
-      setAccountInfo({
-        email: (userData && userData.user && userData.user.email) || "",
-        spentRmb: Number(row && row.spent_rmb) || 0,
-        unlimited: !!(row && row.unlimited),
-      });
-    } catch {
-      setAccountInfo("error");
-    }
+  /* Supabase 报错原文是英文,这里翻译成中文,和 main.jsx 的 translateErr 是同样的目的
+     (那边没法直接复用——main.jsx 是入口文件、import App.jsx,反过来在这里 import
+     main.jsx 会成环)。只覆盖改密码/改邮箱实际会遇到的几种,兜底原样返回英文,
+     总比没翻译强,不算漏翻。 */
+  function translateAcctErr(m) {
+    const s = String(m || "");
+    if (/New password should be different/i.test(s)) return "新密码不能和旧密码一样。";
+    if (/should be at least|at least 6/i.test(s)) return "密码太短,至少要 6 位。";
+    if (/rate limit|too many/i.test(s)) return "操作太频繁,被暂时限流了,等一会儿再试。";
+    if (/Unable to validate email address|invalid format/i.test(s)) return "邮箱格式不对,检查一下。";
+    if (/already been registered|already registered/i.test(s)) return "这个邮箱已经被别的账号注册了,换一个试试。";
+    if (/Failed to fetch|network/i.test(s)) return "网络请求失败,检查一下网络后重试。";
+    return s;
+  }
+
+  const loadAccountInfo = () => {
+    setAcctEmail(null);
+    setAcctQuota(null);
+    supabase.auth.getUser()
+      .then(({ data }) => setAcctEmail((data && data.user && data.user.email) || ""))
+      .catch(() => setAcctEmail(""));
+    supabase.rpc("get_my_usage")
+      .then(({ data, error }) => {
+        if (error) throw error;
+        const row = Array.isArray(data) ? data[0] : data;
+        setAcctQuota({ spentRmb: Number(row && row.spent_rmb) || 0, unlimited: !!(row && row.unlimited) });
+      })
+      .catch(() => setAcctQuota("error"));
   };
 
   const submitChangePassword = async () => {
@@ -2434,7 +2453,7 @@ function AppInner() {
     setPwBusy(true);
     const { error } = await supabase.auth.updateUser({ password: newPw });
     setPwBusy(false);
-    if (error) { setPwErr(error.message); return; }
+    if (error) { setPwErr(translateAcctErr(error.message)); return; }
     setNewPw(""); setNewPw2("");
     setPwMsg("密码已修改。");
   };
@@ -2445,16 +2464,16 @@ function AppInner() {
     setEmailBusy(true);
     const { error } = await supabase.auth.updateUser({ email: newEmail.trim() });
     setEmailBusy(false);
-    if (error) { setEmailErr(error.message); return; }
+    if (error) { setEmailErr(translateAcctErr(error.message)); return; }
     setNewEmail("");
     // Supabase 默认"安全邮箱变更":新旧两个邮箱都会收到确认邮件,两边都点了确认才会真正生效,
-    // 在那之前 accountInfo 里显示的邮箱不会变,所以这里不直接改 accountInfo、只提示去查收邮件
+    // 在那之前 acctEmail 里显示的邮箱不会变,所以这里不直接改 acctEmail、只提示去查收邮件
     setEmailMsg("确认邮件已发送到新邮箱(可能也会发到旧邮箱确认),点开链接后邮箱才会真正生效。");
   };
 
   useEffect(() => {
     if (view === "confusion" && confusionTopics === null) loadConfusionTopics();
-    if (view === "account" && accountInfo === null) loadAccountInfo();
+    if (view === "account" && acctQuota === null && acctEmail === null) loadAccountInfo();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
 
@@ -6017,76 +6036,75 @@ function AppInner() {
       {/* ---------- 我的 ---------- */}
       {view === "account" && (
         <main className="page">
-          {accountInfo === "error" ? (
-            <section className="card">
-              <div className="err-text">账户信息加载失败,检查一下网络后重试。</div>
-              <button className="btn-outline" onClick={loadAccountInfo}>重试</button>
-            </section>
-          ) : (
-            <>
-              <section className="card">
-                <div className="acct-section-title">账户</div>
-                <div className="acct-row">
-                  <span className="acct-label">登录邮箱</span>
-                  <span className="acct-value">{accountInfo === null ? "…" : accountInfo.email}</span>
-                </div>
-                <div className="acct-row">
-                  <span className="acct-label">免费额度</span>
-                  <span className="acct-value">
-                    {accountInfo === null
-                      ? "…"
-                      : accountInfo.unlimited
-                      ? "无限额度"
-                      : `已用 ¥${accountInfo.spentRmb.toFixed(2)} / 共 ¥${FREE_QUOTA_RMB.toFixed(2)}`}
-                  </span>
-                </div>
-              </section>
+          <section className="card">
+            <div className="acct-section-title">账户</div>
+            <div className="acct-row">
+              <span className="acct-label">登录邮箱</span>
+              <span className="acct-value">
+                {acctEmail === null ? "…" : acctEmail || "读取失败"}
+              </span>
+            </div>
+            <div className="acct-row">
+              <span className="acct-label">免费额度</span>
+              <span className="acct-value">
+                {acctQuota === null ? (
+                  "…"
+                ) : acctQuota === "error" ? (
+                  <>
+                    读取失败 <button className="btn-mini" onClick={loadAccountInfo}>重试</button>
+                  </>
+                ) : acctQuota.unlimited ? (
+                  "无限额度"
+                ) : (
+                  `已用 ¥${acctQuota.spentRmb.toFixed(2)} / 共 ¥${FREE_QUOTA_RMB.toFixed(2)}`
+                )}
+              </span>
+            </div>
+          </section>
 
-              <section className="card">
-                <div className="acct-section-title">修改密码</div>
-                <input
-                  className="acct-input"
-                  type="password"
-                  placeholder="新密码(至少 6 位)"
-                  autoComplete="new-password"
-                  value={newPw}
-                  onChange={(e) => setNewPw(e.target.value)}
-                />
-                <input
-                  className="acct-input"
-                  type="password"
-                  placeholder="再输一次新密码"
-                  autoComplete="new-password"
-                  value={newPw2}
-                  onChange={(e) => setNewPw2(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && submitChangePassword()}
-                />
-                <button className="btn-outline" onClick={submitChangePassword} disabled={pwBusy}>
-                  {pwBusy ? "保存中…" : "保存新密码"}
-                </button>
-                {pwErr && <div className="err-text">{pwErr}</div>}
-                {pwMsg && <div className="copy-msg">{pwMsg}</div>}
-              </section>
+          <section className="card">
+            <div className="acct-section-title">修改密码</div>
+            <input
+              className="acct-input"
+              type="password"
+              placeholder="新密码(至少 6 位)"
+              autoComplete="new-password"
+              value={newPw}
+              onChange={(e) => setNewPw(e.target.value)}
+            />
+            <input
+              className="acct-input"
+              type="password"
+              placeholder="再输一次新密码"
+              autoComplete="new-password"
+              value={newPw2}
+              onChange={(e) => setNewPw2(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submitChangePassword()}
+            />
+            <button className="btn-outline" onClick={submitChangePassword} disabled={pwBusy}>
+              {pwBusy ? "保存中…" : "保存新密码"}
+            </button>
+            {pwErr && <div className="err-text">{pwErr}</div>}
+            {pwMsg && <div className="copy-msg">{pwMsg}</div>}
+          </section>
 
-              <section className="card">
-                <div className="acct-section-title">修改邮箱</div>
-                <input
-                  className="acct-input"
-                  type="email"
-                  placeholder="新邮箱"
-                  autoComplete="email"
-                  value={newEmail}
-                  onChange={(e) => setNewEmail(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && submitChangeEmail()}
-                />
-                <button className="btn-outline" onClick={submitChangeEmail} disabled={emailBusy}>
-                  {emailBusy ? "提交中…" : "修改邮箱"}
-                </button>
-                {emailErr && <div className="err-text">{emailErr}</div>}
-                {emailMsg && <div className="copy-msg">{emailMsg}</div>}
-              </section>
-            </>
-          )}
+          <section className="card">
+            <div className="acct-section-title">修改邮箱</div>
+            <input
+              className="acct-input"
+              type="email"
+              placeholder="新邮箱"
+              autoComplete="email"
+              value={newEmail}
+              onChange={(e) => setNewEmail(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && submitChangeEmail()}
+            />
+            <button className="btn-outline" onClick={submitChangeEmail} disabled={emailBusy}>
+              {emailBusy ? "提交中…" : "修改邮箱"}
+            </button>
+            {emailErr && <div className="err-text">{emailErr}</div>}
+            {emailMsg && <div className="copy-msg">{emailMsg}</div>}
+          </section>
         </main>
       )}
 

@@ -572,6 +572,20 @@ async function callAIRaw(system, user, maxTokens, background, model) {
   }
 }
 
+/* 取当前登录态的 access token,带给 /api/generate 做身份校验(服务端见 checkAuth)。
+   getSession() 由 supabase-js 负责在过期前自动续期,所以每次调用前现取一次最稳。
+   取不到就返回空字符串、不带这个头——服务端在"没配鉴权环境变量"时本来就放行,
+   e2e-harness 这种绕过登录的环境也不会因为这里抛错就卡住。 */
+async function authHeader() {
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data && data.session && data.session.access_token;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
 async function callAIRawInner(system, user, maxTokens, model) {
   let lastErr;
   const MAX_ATTEMPTS = 4;
@@ -580,7 +594,7 @@ async function callAIRawInner(system, user, maxTokens, model) {
       await spaceOutDispatch();
       const res = await fetch("/api/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(await authHeader()) },
         body: JSON.stringify({ max_tokens: maxTokens || 1200, system, user, ...(model ? { model } : {}) }),
       });
       const data = await res.json();
@@ -2464,24 +2478,35 @@ function AppInner() {
     })();
   }, []);
 
-  /* --- 存档 --- */
+  /* --- 存档 ---
+     写入串成一条链,同一时刻只有一次写在飞。以前是每次 db 变化各自起一个异步循环,
+     虽然靠 cancelled 标记不再重试,但已经发出去的那次请求收不回来——如果它比后一次
+     慢,就会后落库、把新数据盖成旧的(答完题立刻又答一题时最容易撞上)。
+     链式 + 只写"当前最新的 db"(pendingDbRef)还顺带合并了连续多次变化:
+     中间那些过渡状态不用each写一遍,最后落库的一定是最新的那份。 */
+  const saveChainRef = useRef(Promise.resolve());
+  const pendingDbRef = useRef(null);
   useEffect(() => {
     if (!db || !loaded.current) return;
-    let cancelled = false;
-    (async () => {
+    pendingDbRef.current = db;
+    saveChainRef.current = saveChainRef.current.then(async () => {
+      const snapshot = pendingDbRef.current;
+      if (!snapshot) return; // 已经被前一个排队任务带着一起写掉了
+      pendingDbRef.current = null;
       const MAX_ATTEMPTS = 5;
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        // 期间又有了更新的数据:这次就别写了,交给后面那个排队任务写最新的,省一次往返
+        if (pendingDbRef.current) return;
         try {
           if (window.storage && typeof window.storage.set === "function") {
-            const w = await window.storage.set(STORE_KEY, JSON.stringify(db));
-            if (w) { if (!cancelled) setStorageOk(true); return; }
+            const w = await window.storage.set(STORE_KEY, JSON.stringify(snapshot));
+            if (w) { setStorageOk(true); return; }
           }
         } catch { /* 重试 */ }
         await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
       }
-      if (!cancelled) setStorageOk(false);
-    })();
-    return () => { cancelled = true; };
+      setStorageOk(false);
+    });
   }, [db]);
 
   /* --- 出过的题记进 db(qHist),下次出题时当"别再出这些"的清单 ---

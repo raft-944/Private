@@ -9,9 +9,41 @@ const MODEL = "deepseek-v4-flash";
 // 忽略、退回默认的 flash,不能让前端随便指定任意字符串当模型名传给上游。
 const ALLOWED_MODELS = ["deepseek-v4-flash", "deepseek-v4-pro"];
 
+/* 只放行已登录的用户调用,免得别人知道地址就能拿你的 DeepSeek 额度刷题。
+   设计原则是"宁可漏放,也绝不能把主人挡在门外"——这个接口一旦误拒,整个 App 就出不了题
+   也判不了卷,代价比被蹭几次大得多。所以只有在"能明确判定这个 token 是无效的"时才拒绝:
+   ①环境变量没配(拿不到校验所需的 Supabase 地址/密钥)→ 放行,行为和加这段之前完全一样;
+   ②Supabase 明确回 401/403(token 假的或过期了)→ 拒绝;
+   ③Supabase 自己抽风(超时、5xx、网络不通)→ 放行,不能因为鉴权服务挂了就让人没法学习。 */
+async function checkAuth(req) {
+  const url = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
+  const anonKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
+  if (!url || !anonKey) return { ok: true }; // 没配就不启用校验
+
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  if (!token) return { ok: false, message: "请先登录后再使用" };
+
+  try {
+    const r = await fetch(`${url.replace(/\/$/, "")}/auth/v1/user`, {
+      headers: { Authorization: `Bearer ${token}`, apikey: anonKey },
+    });
+    if (r.status === 401 || r.status === 403) return { ok: false, message: "登录状态已失效,请重新登录" };
+    return { ok: true }; // 其余情况(含鉴权服务自己出错)一律放行
+  } catch {
+    return { ok: true };
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.status(405).json({ error: { message: "Method not allowed" } });
+    return;
+  }
+
+  const auth = await checkAuth(req);
+  if (!auth.ok) {
+    res.status(401).json({ error: { message: auth.message } });
     return;
   }
 

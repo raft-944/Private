@@ -5,6 +5,7 @@ import { SCENES, resolveScenePatterns } from "./data/scenes.js";
 import { CONFUSION_SCENES } from "./data/confusionScenes.js";
 import { CONFUSION_EMAIL_TOPICS } from "./data/confusionEmails.js";
 import { FURIGANA } from "./data/furigana.js";
+import { FREE_QUOTA_RMB } from "../shared/quotaConfig.js";
 
 /* 到期队列的排序:按"最容易遗忘"排——①间隔档位(lv)低的优先,它们记得最不牢;
    ②同档位里逾期越久的优先。复习上限截断时,留下的就一定是最该先复习的那些。
@@ -2176,7 +2177,7 @@ function AppInner() {
      db.session 原样保留,想继续时点主按钮就能接着上次的进度做下去。
      (必须和其它 hooks 一样声明在 `if (!db) return` 之前——hooks 数量不能变) */
   const [resumeHidden, setResumeHidden] = useState(false);
-  const [view, setView] = useState("home"); // home | session | library | mistakes | confusion(練習帳) | jlpt(JLPT模拟,練習帳的子视图)
+  const [view, setView] = useState("home"); // home | session | library | mistakes | confusion(練習帳) | jlpt(JLPT模拟,練習帳的子视图) | account(我的)
   const loaded = useRef(false);
 
   /* --- 学习会话状态 --- */
@@ -2394,8 +2395,65 @@ function AppInner() {
   const [cfEmailRetryId, setCfEmailRetryId] = useState(null); // 从错题本发起重练时,记着在重练哪条
   const cfEmailRecentRef = useRef({}); // topicId -> 上一次生成的情境摘要,避免下次雷同,不持久化
 
+  /* ================= 我的(账户信息:邮箱、免费额度、改密码/邮箱) =================
+     跟 SRS/練習帳都没关系,只在进这个 view 时才去查,不预取。 */
+  const [accountInfo, setAccountInfo] = useState(null); // null=还没读 | {email, spentRmb, unlimited} | "error"
+  const [newPw, setNewPw] = useState("");
+  const [newPw2, setNewPw2] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwErr, setPwErr] = useState("");
+  const [pwMsg, setPwMsg] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [emailBusy, setEmailBusy] = useState(false);
+  const [emailErr, setEmailErr] = useState("");
+  const [emailMsg, setEmailMsg] = useState("");
+
+  const loadAccountInfo = async () => {
+    try {
+      const [{ data: userData }, { data: usageRows, error: usageErr }] = await Promise.all([
+        supabase.auth.getUser(),
+        supabase.rpc("get_my_usage"),
+      ]);
+      if (usageErr) throw usageErr;
+      const row = Array.isArray(usageRows) ? usageRows[0] : usageRows;
+      setAccountInfo({
+        email: (userData && userData.user && userData.user.email) || "",
+        spentRmb: Number(row && row.spent_rmb) || 0,
+        unlimited: !!(row && row.unlimited),
+      });
+    } catch {
+      setAccountInfo("error");
+    }
+  };
+
+  const submitChangePassword = async () => {
+    setPwErr(""); setPwMsg("");
+    if (newPw.length < 6) { setPwErr("密码至少 6 位"); return; }
+    if (newPw !== newPw2) { setPwErr("两次输入的密码不一致"); return; }
+    setPwBusy(true);
+    const { error } = await supabase.auth.updateUser({ password: newPw });
+    setPwBusy(false);
+    if (error) { setPwErr(error.message); return; }
+    setNewPw(""); setNewPw2("");
+    setPwMsg("密码已修改。");
+  };
+
+  const submitChangeEmail = async () => {
+    setEmailErr(""); setEmailMsg("");
+    if (!newEmail.trim()) { setEmailErr("请填写新邮箱"); return; }
+    setEmailBusy(true);
+    const { error } = await supabase.auth.updateUser({ email: newEmail.trim() });
+    setEmailBusy(false);
+    if (error) { setEmailErr(error.message); return; }
+    setNewEmail("");
+    // Supabase 默认"安全邮箱变更":新旧两个邮箱都会收到确认邮件,两边都点了确认才会真正生效,
+    // 在那之前 accountInfo 里显示的邮箱不会变,所以这里不直接改 accountInfo、只提示去查收邮件
+    setEmailMsg("确认邮件已发送到新邮箱(可能也会发到旧邮箱确认),点开链接后邮箱才会真正生效。");
+  };
+
   useEffect(() => {
     if (view === "confusion" && confusionTopics === null) loadConfusionTopics();
+    if (view === "account" && accountInfo === null) loadAccountInfo();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
 
@@ -2414,7 +2472,7 @@ function AppInner() {
         return;
       }
       if (view === "jlpt") { exitJlptQuiz(); return; }
-      if (view === "library" || view === "mistakes" || view === "session") { setView("home"); return; }
+      if (view === "library" || view === "mistakes" || view === "session" || view === "account") { setView("home"); return; }
     };
   });
 
@@ -5934,11 +5992,87 @@ function AppInner() {
         </main>
       )}
 
+      {/* ---------- 我的 ---------- */}
+      {view === "account" && (
+        <main className="page">
+          {accountInfo === "error" ? (
+            <section className="card">
+              <div className="err-text">账户信息加载失败,检查一下网络后重试。</div>
+              <button className="btn-outline" onClick={loadAccountInfo}>重试</button>
+            </section>
+          ) : (
+            <>
+              <section className="card">
+                <div className="acct-section-title">账户</div>
+                <div className="acct-row">
+                  <span className="acct-label">登录邮箱</span>
+                  <span className="acct-value">{accountInfo === null ? "…" : accountInfo.email}</span>
+                </div>
+                <div className="acct-row">
+                  <span className="acct-label">免费额度</span>
+                  <span className="acct-value">
+                    {accountInfo === null
+                      ? "…"
+                      : accountInfo.unlimited
+                      ? "无限额度"
+                      : `已用 ¥${accountInfo.spentRmb.toFixed(2)} / 共 ¥${FREE_QUOTA_RMB.toFixed(2)}`}
+                  </span>
+                </div>
+              </section>
+
+              <section className="card">
+                <div className="acct-section-title">修改密码</div>
+                <input
+                  className="acct-input"
+                  type="password"
+                  placeholder="新密码(至少 6 位)"
+                  autoComplete="new-password"
+                  value={newPw}
+                  onChange={(e) => setNewPw(e.target.value)}
+                />
+                <input
+                  className="acct-input"
+                  type="password"
+                  placeholder="再输一次新密码"
+                  autoComplete="new-password"
+                  value={newPw2}
+                  onChange={(e) => setNewPw2(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && submitChangePassword()}
+                />
+                <button className="btn-outline" onClick={submitChangePassword} disabled={pwBusy}>
+                  {pwBusy ? "保存中…" : "保存新密码"}
+                </button>
+                {pwErr && <div className="err-text">{pwErr}</div>}
+                {pwMsg && <div className="copy-msg">{pwMsg}</div>}
+              </section>
+
+              <section className="card">
+                <div className="acct-section-title">修改邮箱</div>
+                <input
+                  className="acct-input"
+                  type="email"
+                  placeholder="新邮箱"
+                  autoComplete="email"
+                  value={newEmail}
+                  onChange={(e) => setNewEmail(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && submitChangeEmail()}
+                />
+                <button className="btn-outline" onClick={submitChangeEmail} disabled={emailBusy}>
+                  {emailBusy ? "提交中…" : "修改邮箱"}
+                </button>
+                {emailErr && <div className="err-text">{emailErr}</div>}
+                {emailMsg && <div className="copy-msg">{emailMsg}</div>}
+              </section>
+            </>
+          )}
+        </main>
+      )}
+
       </div>
 
       {/* ---------- 底部导航 ---------- */}
       <nav className="nav">
-        {[["home", "今日"], ["library", "句型库"], ["confusion", "練習帳"], ["mistakes", "錯題本"]].map(([v, label]) => (
+        {[["home", "今日"], ["library", "句型库"], ["confusion", "練習帳"], ["mistakes", "錯題本"], ["account", "我的"]].map(([v, label]) => (
           <button key={v} className={view === v ? "nav-btn on" : "nav-btn"} onClick={() => setView(v)}>{label}</button>
         ))}
       </nav>
@@ -6144,6 +6278,15 @@ html,body{overflow-x:hidden}
 .backup-box{width:100%;height:90px;font-size:16px;padding:8px;border:1px solid var(--line);border-radius:8px;
   background:var(--tint-input-bg);color:var(--ink);resize:vertical;word-break:break-all}
 .copy-msg{margin-top:8px;font-size:12px;color:var(--ai)}
+
+/* ---------- 我的(账户) ---------- */
+.acct-section-title{font-size:15px;font-weight:700;color:var(--ai-deep);letter-spacing:1px;margin-bottom:12px}
+.acct-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px dashed var(--line)}
+.acct-row:last-child{border-bottom:none}
+.acct-label{font-size:13px;color:var(--ink-soft)}
+.acct-value{font-size:13px;color:var(--ink);font-weight:600}
+.acct-input{width:100%;padding:11px 12px;font-size:16px;border:1px solid var(--line);border-radius:8px;
+  background:var(--tint-input-bg);color:var(--ink);margin-bottom:10px;box-sizing:border-box}
 
 .progress-row{display:flex;align-items:center;gap:10px;margin-bottom:14px}
 .progress-bar{flex:1;height:6px;background:var(--line);border-radius:3px;overflow:hidden}

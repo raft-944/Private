@@ -173,17 +173,49 @@ function mergeFullTokenResult(items) {
   return out;
 }
 
+/* kuromoji(IPADIC)在个别极常见词上的统计消歧会系统性选错读音,这里手工订正。
+   目前已知的一例:"一"和"人"没有粘成"一人暮らし"这类更长复合词、单独相邻出现时
+   (比如"一人で""一人に"),IPADIC 几乎总是切成两个独立词元、各自给"いち"+"にん"
+   (数数意义上的"一名"),但日常例句里几乎всегда该读"ひとり"(独自一人)——
+   抽查过语料库里全部14处这种写法,无一例外都该是"ひとり"。不是用候选词典硬猜,
+   是从真实输出里观察到的确定性错误,按词元表层文字直接订正,比在
+   decomposeFullToken 的回溯候选池里加一个新读音更不容易误伤其它场景。
+   以后如果又发现类似的系统性错读,按同样的模式往这个表里加就行。
+   "二"+"人"同理:数人数一般规律是"三人さんにん、四人よにん…",但"一人ひとり"
+   "二人ふたり"这两个是训读的不规则例外,IPADIC 同样会切成两个独立词元、
+   各自给"に"+"にん"(=ににん),语料库抽查到的2处也都该是"ふたり"。 */
+const READING_OVERRIDES = [
+  { match: ["一", "人"], reading: "ひとり" },
+  { match: ["二", "人"], reading: "ふたり" },
+];
+function applyReadingOverrides(tokens) {
+  const out = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const hit = READING_OVERRIDES.find((o) =>
+      o.match.every((surface, j) => tokens[i + j] && tokens[i + j].surface_form === surface)
+    );
+    if (hit) {
+      out.push({ surface_form: hit.match.join(""), reading: null, overrideReading: hit.reading });
+      i += hit.match.length - 1;
+    } else {
+      out.push(tokens[i]);
+    }
+  }
+  return out;
+}
+
 /* 把一句话切成 [表层文字, 读音?] 的分段数组;没有汉字的分段(纯假名/标点/数字/英文)
    不带读音(前端渲染时原样显示,不套 <ruby>),有汉字的分段才带上对应假名读音。
    相邻的"没有汉字的分段"合并成一段,减少数组项数、也让标点紧跟在词后面不会被单独包一层。 */
-function toSegments(tokens) {
+function toSegments(rawTokens) {
+  const tokens = applyReadingOverrides(rawTokens);
   const segs = [];
   let plainBuf = "";
   const flushPlain = () => { if (plainBuf) { segs.push(plainBuf); plainBuf = ""; } };
   for (const t of tokens) {
     const surface = t.surface_form;
     if (HAS_KANJI.test(surface)) {
-      const reading = t.reading ? kataToHira(t.reading) : "";
+      const reading = t.overrideReading || (t.reading ? kataToHira(t.reading) : "");
       if (!reading) { flushPlain(); segs.push(surface); continue; }
       const full = decomposeFullToken(surface, reading);
       flushPlain();

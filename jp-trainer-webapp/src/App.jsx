@@ -2315,6 +2315,7 @@ function AppInner() {
   const [expandedGrades, setExpandedGrades] = useState(() => new Set());
   const [errMsg, setErrMsg] = useState("");
   const [openLesson, setOpenLesson] = useState(null);
+  const [openLevel, setOpenLevel] = useState(null); // 句型库按 JLPT 等级分组的外层折叠,内层还是原来按課的折叠(openLesson)
   const actionsRef = useRef({});
   const preGenRef = useRef({}); // 批量出题的结果缓存,key是题目在当前队列里的下标
   const sessionGenRef = useRef(0); // 每次开始新的一组题就递增,防止上一轮延迟返回的批量结果写错地方
@@ -5398,33 +5399,54 @@ function AppInner() {
         <main className="page">
           <h2 className="page-title serif">句型库</h2>
           {lessons.length === 0 && <div className="center-msg">还没有录入句型内容</div>}
-          {lessons.map((l) => {
-            const ps = PATTERNS.filter((p) => p.lesson === l);
-            const learned = ps.filter((p) => db.prog[p.id]).length;
+          {JLPT_LEVEL_ORDER.map((lv) => {
+            const levelPatterns = PATTERNS.filter((p) => p.level === lv);
+            if (levelPatterns.length === 0) return null;
+            const levelLearned = levelPatterns.filter((p) => db.prog[p.id]).length;
+            // 同一等级内部还是按 lesson(句型库内部顺序分组,不是教材课号)分组,
+            // 只是现在只在这个等级展开时才显示,不会把 100 多課全部堆在一屏
+            const levelLessons = [...new Set(levelPatterns.map((p) => p.lesson))];
             return (
-              <div key={l} className="lesson-block">
-                <button className="lesson-head" onClick={() => setOpenLesson(openLesson === l ? null : l)}>
-                  <span>第{l}課</span>
-                  <span className="lesson-count">{learned}/{ps.length} 已学</span>
+              <section key={lv} className="cf-section">
+                <button className="cf-section-head" onClick={() => setOpenLevel(openLevel === lv ? null : lv)}>
+                  <span className="cf-section-title">{lv}</span>
+                  <span className="cf-section-meta">{levelLearned}/{levelPatterns.length} 已学</span>
+                  <span className="cf-section-arrow">{openLevel === lv ? "−" : "+"}</span>
                 </button>
-                {openLesson === l && ps.map((p) => {
-                  const pr = db.prog[p.id];
-                  return (
-                    <div key={p.id} className="pattern-row">
-                      <div className="pr-top">
-                        <span className="serif pr-name">{p.pattern}</span>
-                        {p.ext && <span className="badge badge-ext">補充</span>}
-                        {pr ? <span className="badge badge-on">Lv{pr.lv} · {pr.due <= t ? "今日到期" : pr.due + " 复习"}</span> : <span className="badge">未学</span>}
-                      </div>
-                      <div className="pr-meaning">{p.meaning} 〔{p.conn}〕</div>
-                      <div className="pr-ex serif"><KanjiText text={p.exJP} /><ExAudioBtn text={p.exJP} /></div>
-                      <div className="pr-ex-cn">{p.exCN}</div>
-                      <PatternLecture p={p} />
-                      <button className="btn-mini" onClick={() => startFree(p)}>练一题(不影响排期)</button>
-                    </div>
-                  );
-                })}
-              </div>
+                {openLevel === lv && (
+                  <div className="cf-section-body">
+                    {levelLessons.map((l) => {
+                      const ps = PATTERNS.filter((p) => p.lesson === l);
+                      const learned = ps.filter((p) => db.prog[p.id]).length;
+                      return (
+                        <div key={l} className="lesson-block">
+                          <button className="lesson-head" onClick={() => setOpenLesson(openLesson === l ? null : l)}>
+                            <span>第{l}課</span>
+                            <span className="lesson-count">{learned}/{ps.length} 已学</span>
+                          </button>
+                          {openLesson === l && ps.map((p) => {
+                            const pr = db.prog[p.id];
+                            return (
+                              <div key={p.id} className="pattern-row">
+                                <div className="pr-top">
+                                  <span className="serif pr-name">{p.pattern}</span>
+                                  {p.ext && <span className="badge badge-ext">補充</span>}
+                                  {pr ? <span className="badge badge-on">Lv{pr.lv} · {pr.due <= t ? "今日到期" : pr.due + " 复习"}</span> : <span className="badge">未学</span>}
+                                </div>
+                                <div className="pr-meaning">{p.meaning} 〔{p.conn}〕</div>
+                                <div className="pr-ex serif"><KanjiText text={p.exJP} /><ExAudioBtn text={p.exJP} /></div>
+                                <div className="pr-ex-cn">{p.exCN}</div>
+                                <PatternLecture p={p} />
+                                <button className="btn-mini" onClick={() => startFree(p)}>练一题(不影响排期)</button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
             );
           })}
         </main>

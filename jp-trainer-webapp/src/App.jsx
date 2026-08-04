@@ -3323,6 +3323,20 @@ function AppInner() {
     beginGroup({ p, isStubborn: true, reps: STUBBORN_REPS });
   };
 
+  /* 讲评列表里对着一道已经判完的错题标"顽固"——和 markStubbornNow 不一样,这里是在
+     回看讲评(可能是分段讲评页,也可能是这场最后的结果页),不是正在答的当前题,
+     不能像 markStubbornNow 那样打断当前作答、原地跳进特训组。只是把标记写进
+     db.prog,今天晚些时候(或者下次开场)自然会被首页的"🔥 有顽固句型该练了"
+     捡起来,和 missTotal 自然攒够触发是同一套机制,只是提前手动点了个头。
+     已经标过的(prog.stubborn 已存在)不重复写,按钮直接显示"已标记"状态。 */
+  const markResultStubborn = (p) => {
+    setDb((d) => {
+      const prog = d.prog[p.id] || { lv: 0, ok: 0, ng: 0, learnedDate: t };
+      if (prog.stubborn) return d;
+      return { ...d, prog: { ...d.prog, [p.id]: { ...prog, stubborn: { phase: "A", clean: 0, due: t } } } };
+    });
+  };
+
   /* 组里某一道题单独重新出题:批量结果缺这一位、或者单独补题也失败了,都会走到这个按钮 */
   const retryGroupQuestion = (i) => {
     const g = groupState;
@@ -4549,9 +4563,22 @@ function AppInner() {
       <div key={gi} className={"result-item ri-" + r.verdict + (full ? "" : " ri-collapsed")}>
         <div className="result-item-head">
           第 {gi + 1} 题
-          <span className={"result-item-verdict rv-" + r.verdict}>
-            {r.verdict === "correct" ? "◎ 正解" : r.verdict === "partial" ? "△ 接近" : "✗ 再来"}
-          </span>
+          {/* 答错的题(且能定位到单个句型——combo 题挂着两个句型,标"顽固"该标哪个不明确,
+             那种情况下退回原来的"✗ 再来"标签):把原来纯展示的"✗ 再来"换成一个可点的
+             标记按钮,不用再回首页找到这个句型、也不用等 missTotal 自然攒够次数才能标顽固。 */}
+          {r.verdict === "wrong" && c.item && c.item.p ? (
+            db.prog[c.item.p.id] && db.prog[c.item.p.id].stubborn ? (
+              <span className="result-item-verdict rv-wrong">🔥 已标记顽固</span>
+            ) : (
+              <button className="result-item-verdict rv-wrong btn-mark-result-stubborn" onClick={() => markResultStubborn(c.item.p)}>
+                🔥 标记顽固
+              </button>
+            )
+          ) : (
+            <span className={"result-item-verdict rv-" + r.verdict}>
+              {r.verdict === "correct" ? "◎ 正解" : r.verdict === "partial" ? "△ 接近" : "✗ 再来"}
+            </span>
+          )}
         </div>
         <div className="result-item-q serif">{c.isListening ? "🎧 " + (c.q.jp || "") : c.q.task}</div>
         {r.verdict === "correct" && r.selfCheck === false && (
@@ -6348,6 +6375,10 @@ html,body{overflow-x:hidden}
 .rv-correct{color:var(--tint-green-fg)}
 .rv-partial{color:var(--stat-partial)}
 .rv-wrong{color:var(--shu)}
+/* 错题讲评上的"标记顽固"按钮:复用 result-item-verdict/rv-wrong 的徽章外观(圆角药丸、
+   描边跟着文字颜色走),只加个手型光标和按下变色,不用另起一套视觉语言 */
+.btn-mark-result-stubborn{cursor:pointer;white-space:nowrap}
+.btn-mark-result-stubborn:hover{background:var(--tint-red-bg)}
 .result-item-q{font-size:15px;color:var(--ink);line-height:1.7;margin-bottom:4px}
 .done-extra-note{font-size:12px;color:var(--tint-green-fg);background:var(--tint-green-bg);border-radius:10px;padding:8px 12px;margin-bottom:12px}
 .done-note{font-size:13px;color:var(--ink-soft);margin-bottom:8px}

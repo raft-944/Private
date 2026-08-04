@@ -41,12 +41,6 @@ export default async function handler(req, res) {
     return;
   }
 
-  const auth = await checkAuth(req);
-  if (!auth.ok) {
-    res.status(401).json({ error: { message: auth.message } });
-    return;
-  }
-
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
     res.status(500).json({ error: { message: "服务端没有配置 DEEPSEEK_API_KEY,请检查 Vercel 项目的环境变量设置" } });
@@ -75,26 +69,42 @@ export default async function handler(req, res) {
   // pro 场景(読解生成、文法选择题自我核验)本来就是要用它的思考链,保留默认的开启。
   const thinking = useModel === "deepseek-v4-flash" ? { type: "disabled" } : { type: "enabled" };
 
+  const messages = [];
+  if (system) messages.push({ role: "system", content: system });
+  messages.push({ role: "user", content: user });
+
+  /* 鉴权检查(checkAuth)本身也是一次到 Supabase 的网络请求——如果先 await 它、
+     再发 DeepSeek,等于给每次调用都多套一层串行网络延迟,判卷这类本来就要等
+     AI 推理的操作会被拖得更明显(这正是加了鉴权之后判卷变慢的根因)。
+     改成两个请求同时发出去,谁先回来不重要,只要在真正回复结果之前确认过鉴权
+     通过就行——鉴权通常比 AI 推理快得多,基本不会增加任何用户能感知到的等待。
+     万一鉴权没通过,DeepSeek 那个请求就放着不管(不 await 它的结果),提前加一个
+     空 catch 防止它以后才 reject 时被 Node 当成未处理的 promise rejection 报出来。 */
+  const authPromise = checkAuth(req);
+  const deepseekPromise = fetch("https://api.deepseek.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: useModel,
+      messages,
+      max_tokens: outputTokens,
+      temperature: 0.9,
+      thinking,
+    }),
+  });
+  deepseekPromise.catch(() => {});
+
+  const auth = await authPromise;
+  if (!auth.ok) {
+    res.status(401).json({ error: { message: auth.message } });
+    return;
+  }
+
   try {
-    const messages = [];
-    if (system) messages.push({ role: "system", content: system });
-    messages.push({ role: "user", content: user });
-
-    const deepseekRes = await fetch("https://api.deepseek.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: useModel,
-        messages,
-        max_tokens: outputTokens,
-        temperature: 0.9,
-        thinking,
-      }),
-    });
-
+    const deepseekRes = await deepseekPromise;
     const data = await deepseekRes.json();
 
     if (!deepseekRes.ok) {

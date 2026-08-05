@@ -27,7 +27,18 @@ const API_KEY = process.env.DEEPSEEK_API_KEY;
 const REPEAT = Math.max(1, parseInt(process.argv[process.argv.indexOf("--repeat") + 1], 10) || 1);
 
 if (!API_KEY) {
-  console.error("需要 DEEPSEEK_API_KEY 环境变量。用法: DEEPSEEK_API_KEY=sk-xxx node scripts/grade-regression.mjs");
+  console.error(`
+没有拿到 DeepSeek 密钥,跑不了。
+
+  Mac / Linux:  DEEPSEEK_API_KEY=sk-你的密钥 npm run test:grading
+  Windows(PowerShell):
+                $env:DEEPSEEK_API_KEY="sk-你的密钥"
+                npm run test:grading
+
+密钥在 https://platform.deepseek.com 的 API keys 页面创建。
+注意 DeepSeek 和 Vercel 一样,密钥只在创建那一刻显示一次,之后查不到原文——
+找不到就新建一个,不影响线上(线上用的是 Vercel 里配的那个,和这里互不干扰)。
+`);
   process.exit(1);
 }
 
@@ -122,7 +133,10 @@ function normalize(s) {
 /* ============ 起 vite ============ */
 function startVite() {
   return new Promise((resolve, reject) => {
-    const p = spawn("npx", ["vite", "--port", String(PORT)], { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
+    // Windows 上 npx 是 .cmd 批处理,不走 shell 直接 spawn 会 ENOENT,所以统一开 shell
+    const p = spawn("npx", ["vite", "--port", String(PORT)], {
+      cwd: ROOT, stdio: ["ignore", "pipe", "pipe"], shell: process.platform === "win32",
+    });
     const timer = setTimeout(() => reject(new Error("vite 启动超时")), 60000);
     p.stdout.on("data", (d) => {
       if (String(d).includes("ready in")) { clearTimeout(timer); setTimeout(() => resolve(p), 800); }
@@ -140,13 +154,22 @@ function ensureEnv() {
   return () => fs.unlinkSync(envPath);
 }
 
+/* 浏览器可执行文件的位置:正常情况下 `npx playwright install chromium` 装完,
+   playwright 自己就知道去哪儿找,不用指定路径。只有在某些预装了浏览器的容器/CI 环境里
+   才需要靠 PLAYWRIGHT_CHROMIUM_PATH 指过去。所以这里默认什么都不传。 */
+function launchOptions() {
+  const p = process.env.PLAYWRIGHT_CHROMIUM_PATH;
+  return p && fs.existsSync(p) ? { executablePath: p } : {};
+}
+
 async function main() {
   const cleanupEnv = ensureEnv();
   const vite = await startVite();
-  const browser = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium" });
+  const browser = await chromium.launch(launchOptions());
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
   let calls = 0;
+  const upstreamErrors = new Set(); // 去重:同一个原因(密钥错/欠费)会把每个用例都打挂,只报一次
 
   /* 把 /api/generate 转发到真的 DeepSeek。这里刻意照抄 api/generate.js 的转换逻辑
      (Anthropic 形状 ↔ DeepSeek 形状、flash 关思考/pro 开思考),让测试链路和线上一致。 */
@@ -157,6 +180,10 @@ async function main() {
     if (body.system) messages.push({ role: "system", content: body.system });
     messages.push({ role: "user", content: body.user });
     calls++;
+    /* 上游出问题时(密钥不对、余额不足、连不上)要给出人能看懂的话。
+       注意不能直接 `await r.json()`:这类失败上游经常回的是纯文本(网关的 403 页面、
+       "Host not in allowlist" 之类),硬解析只会抛一个 "Unexpected token 'H'" 的
+       JSON 语法错误,把真正的原因盖掉。所以先取 text 再尝试解析。 */
     try {
       const r = await fetch("https://api.deepseek.com/v1/chat/completions", {
         method: "POST",
@@ -168,16 +195,21 @@ async function main() {
           thinking: model === "deepseek-v4-flash" ? { type: "disabled" } : { type: "enabled" },
         }),
       });
-      const data = await r.json();
-      if (!r.ok) {
-        return route.fulfill({ status: r.status, contentType: "application/json",
-          body: JSON.stringify({ error: { message: data?.error?.message || "HTTP " + r.status } }) });
+      const raw = await r.text();
+      let data = null;
+      try { data = JSON.parse(raw); } catch { /* 上游没回 JSON,下面按原文报出去 */ }
+      if (!r.ok || !data) {
+        const msg = data?.error?.message || `HTTP ${r.status}: ${raw.slice(0, 200)}`;
+        upstreamErrors.add(msg);
+        return route.fulfill({ status: 200, contentType: "application/json",
+          body: JSON.stringify({ error: { message: msg } }) });
       }
       const text = data.choices?.[0]?.message?.content || "";
       return route.fulfill({ status: 200, contentType: "application/json",
         body: JSON.stringify({ content: [{ type: "text", text }] }) });
     } catch (e) {
-      return route.fulfill({ status: 500, contentType: "application/json",
+      upstreamErrors.add(String(e));
+      return route.fulfill({ status: 200, contentType: "application/json",
         body: JSON.stringify({ error: { message: String(e) } }) });
     }
   });
@@ -191,6 +223,8 @@ async function main() {
     for (let run = 1; run <= REPEAT; run++) {
       let g, err = null;
       try {
+        // 只把纯数据传进页面:整个 c 里还挂着 expect 函数,函数没法跨进浏览器上下文,
+        // 直接传会报 "Attempting to serialize unexpected value"
         g = await page.evaluate(async ({ pattern, task, answer }) => {
           const [{ PATTERNS }, App] = await Promise.all([
             import("/src/patternsData.js"),
@@ -199,7 +233,7 @@ async function main() {
           const p = PATTERNS.find((x) => x.pattern === pattern);
           if (!p) throw new Error("句型库里找不到: " + pattern);
           return await App.gradeAnswer(p, { type: "translation", task }, answer);
-        }, c);
+        }, { pattern: c.pattern, task: c.task, answer: c.answer });
       } catch (e) {
         err = String(e).slice(0, 200);
       }
@@ -221,7 +255,14 @@ async function main() {
 
   const failed = results.filter((r) => r.fail);
   console.log(`\n===== ${results.length - failed.length}/${results.length} 通过,共调用 AI ${calls} 次(约 ¥${(calls * 0.003).toFixed(2)}) =====`);
-  if (failed.length) {
+
+  /* 上游整个连不上时,每个用例都会失败,但那不是判卷judgment的问题——单独拎出来说清楚,
+     免得看到满屏 FAIL 以为是判卷退化了。 */
+  if (upstreamErrors.size) {
+    console.log("\n⚠️  没能连上 DeepSeek,所以上面的失败不代表判卷有问题。上游报的错:");
+    for (const e of upstreamErrors) console.log(`   ${e}`);
+    console.log("   常见原因:密钥填错/已吊销、账号余额不足、本机网络连不上 api.deepseek.com。");
+  } else if (failed.length) {
     console.log("失败的用例:");
     for (const f of failed) console.log(`  - ${f.name}${REPEAT > 1 ? ` (第${f.run}次)` : ""}: ${f.fail}`);
   }

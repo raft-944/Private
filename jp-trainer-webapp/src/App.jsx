@@ -1031,7 +1031,10 @@ function sameJaText(a, b) {
   return norm(a) === norm(b);
 }
 
-const WORD_TR_CACHE_KEY = "jp_word_tr_cache_v1";
+/* v1 → v2:v1 时期缓存下来的点词结果里混着"把目标句型/邻近内容一起翻出来"的泄题条目
+   (见下面 translateTaskWord 的说明),那些结果直接从缓存读出来是绕过新兜底的。
+   换个 key 让旧缓存整体作废、重新查一遍,比写迁移逻辑去逐条甄别划算得多。 */
+const WORD_TR_CACHE_KEY = "jp_word_tr_cache_v2";
 function wordTrCacheKey(sentence, word) { return sentence + "" + word; }
 function getCachedWordTr(sentence, word) {
   try {
@@ -1048,27 +1051,72 @@ function setCachedWordTr(sentence, word, tr) {
     localStorage.setItem(WORD_TR_CACHE_KEY, JSON.stringify(store));
   } catch { /* 缓存失败不影响功能,忽略即可 */ }
 }
+/* 从句型的 pattern 字段里抠出"这个句型真正的语法形态"片段,用来判断点词提示有没有
+   把答案泄出来。pattern 写法五花八门(`〜ちゃった(口語)`、`Vてください`、
+   `きっと／たぶん／もしかしたら`、`NはNです`),所以要按顺序剥掉:
+   ①括号里的分类标签(口語/推測/条件…) ②N/V/A/N1 这类占位符(纯 ASCII 字母数字)
+   ③〜/~ 波浪号和分隔符。剩下的就是 ちゃった、てください 这样的实际形态。
+   长度小于2的片段丢掉(单个「と」「で」这种助词到处都是,拿去匹配全是误判);
+   です/ます 这两个也排除——它们出现在大量 N5 句型里,但本身只是敬体词尾,
+   不构成"泄露答案",按它们来拦会把正常的查词结果也拦掉。 */
+const PATTERN_FRAGMENT_SKIP = new Set(["です", "ます"]);
+function patternGrammarFragments(patternStr) {
+  if (!patternStr) return [];
+  return String(patternStr)
+    .replace(/[（(][^）)]*[）)]/g, "・")     // 括号里的分类标签整段换成分隔符
+    // 占位符(N/V/A/N1…)和波浪号都换成分隔符,不能直接删:直接删会把它两边本来
+    // 不相邻的部分粘成一个假片段(`NはNです` 会变成 `はです`),那种片段永远匹配不上,
+    // 等于这条句型白防了
+    .replace(/[A-Za-z0-9]+/g, "・")
+    .replace(/[〜~ー―]+/g, "・")
+    .split(/[／\/、,・\s＋+]+/)               // 按"或者/并列"的分隔符拆成候选
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 2 && !PATTERN_FRAGMENT_SKIP.has(s));
+}
+
 /* 点词查读音/释义:只要「要查的词/短语」本身对应的日语说法,不是把整句话重新翻译一遍。
    这条规则是补出来的——AI 有时会把「要查的词/短语」当成"这道题该怎么答"来处理,
    连语气词、开场白都加上,给出一整句自然对话式的翻译。这种情况下 jp/yomi 会比原词
    长好几倍,而 ChineseTaskText 是把结果塞进这个词自己的 <ruby><rt> 里显示的——
    annotation 比 base 长很多时,视觉上就是一个词的读音提示膨胀成盖住半句话,
-   看起来像是点一个词却把整句答案标了出来。 */
-async function translateTaskWord(sentence, word, targetDesc) {
+   看起来像是点一个词却把整句答案标了出来。
+
+   2026-08 又修了一次更严重的版本:翻译题「早上出门太急,忘了锁门了」(考 〜ちゃった),
+   点「锁门」两个字,返回的是「鍵をかけ忘れちゃった」——把隔壁那段的「忘了」也拽了进来,
+   还直接把要考的 ちゃった 给用上了,等于把整道题的答案白送。根因有两个,都在这里修:
+   ①提示词里把目标句型作为"语境"告诉了 AI,却从没说"不许在译文里用这个句型",AI 自然
+     会顺手把它用上——现在改成明确禁止,并要求给辞書形而不是句中的活用形;
+   ②长度兜底 `>14字 且 >原词3倍` 对短词形同虚设:原词「锁门」2个字,泄露出来的 10 个字
+     根本够不到 14 这条线。现在改成 max(6, 原词×3),短词也拦得住。
+   在此之上再加一道语义检查:结果里只要出现目标句型的语法形态就判定为泄露,直接拒绝。 */
+async function translateTaskWord(sentence, word, targetDesc, targetPattern) {
   const sys = `あなたは日本語教師です。请给出中文短语在给定语境下最贴切的日语说法和假名读音。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `完整句子: ${sentence}
 要查的词/短语: ${word}
-这道题涉及的语法点(仅供理解语境,不代表要考这个词): ${targetDesc || "(无)"}
-重要:只需要给出"要查的词/短语"这一小段本身对应的日语说法,不是整句话的日语翻译,也不是这道题的参考答案。即使这个词/短语看起来接近一整句话,也只翻译这一段文字本身,不要额外补充原文里没有的开场白、语气词、寒暄语,不要把它扩写成一句完整的自然对话。
-输出JSON: {"jp":"这个词/短语在这句话语境下最贴切的日语说法(汉字/假名写法都可以,用最自然的那种,长度应该和原词大致相当,不要整句重写)","yomi":"这个说法对应的假名读音;如果jp本来就是纯假名,yomi和jp写一样的就行"}`;
+这道题正在考的语法点: ${targetDesc || "(无)"}
+
+这是一道翻译练习,学习者要自己把整句话译成日语,你只是在帮他查其中一个词的意思。请严格遵守:
+1. 只翻译"要查的词/短语"这一小段文字本身,不要把句子里相邻的其它部分(前后的动词、状语、句尾)也翻进来。
+2. 绝对不能在译文里使用上面"正在考的语法点"那个句型——那正是学习者要自己想出来的部分,提前给出来这道题就废了。给这个词本身的说法就行。
+3. 动词/形容词一律给辞書形(基本形),不要给て形、た形、ます形等句子里实际会用到的活用形——怎么变形是学习者要练的。
+4. 不要补充原文里没有的开场白、语气词、寒暄语,不要扩写成一句完整的自然对话。
+输出JSON: {"jp":"这个词/短语本身最贴切的日语说法(汉字/假名都可以,长度应与原词大致相当)","yomi":"这个说法对应的假名读音;如果jp本来就是纯假名,yomi和jp写一样的就行"}`;
   const r = await callAI(sys, user, 400);
   if (!r.jp) throw new Error("bad word translation");
-  // 兜底:提示词说了也不能保证每次都听话,返回结果明显比原词长很多(经验值:超过原词3倍
-  // 且超过一个安全长度)大概率是把整句话搭进去了,这种情况宁可显示"?"也不要把超长文本
-  // 糊到界面上——ruby 的 rt 没有固定宽度限制,长到离谱的内容会视觉溢出、盖住旁边的字。
-  const tooLong = (s) => s && s.length > 14 && s.length > word.length * 3;
-  if (tooLong(r.jp) || tooLong(r.yomi || "")) throw new Error("word translation too long, likely echoed the whole sentence");
-  return { jp: r.jp, yomi: r.yomi || r.jp };
+  const yomi = r.yomi || r.jp;
+
+  // 兜底一:长度。提示词说了也不保证每次都听话,结果明显长过原词就大概率是把邻近内容
+  // 或整句答案搭了进来。这种情况宁可不给提示,也不能把答案糊到界面上
+  // (rt 没有宽度限制,超长内容还会视觉溢出盖住旁边的字)。
+  const lenCap = Math.max(6, word.length * 3);
+  if (r.jp.length > lenCap || yomi.length > lenCap) {
+    throw new Error("word translation too long, likely echoed neighbouring text");
+  }
+  // 兜底二:语义。结果里出现了正在考的句型形态,说明答案被提前泄出来了,一律拒绝。
+  const leaked = patternGrammarFragments(targetPattern).some((f) => r.jp.includes(f) || yomi.includes(f));
+  if (leaked) throw new Error("word translation leaked the target grammar pattern");
+
+  return { jp: r.jp, yomi };
 }
 
 /* 生词点选提示:课本例句是静态数据,不是每次都跟着出题一起生成的,
@@ -1923,7 +1971,7 @@ function WordHintText({ text, words, onHintWord, className }) {
    光给汉字对学习者没有新信息,真正有用的是"这个词读作什么"。只有读音和写法不同
    (说明这个词用了别的汉字/假名)时,才把写法也带上,格式"よみ(漢字)"。
    segments 为空(还没到位)时原样显示纯文本。 */
-function ChineseTaskText({ text, segments, sentence, targetDesc, onReveal, className }) {
+function ChineseTaskText({ text, segments, sentence, targetDesc, targetPattern, onReveal, className }) {
   const [entries, setEntries] = useState({}); // i -> {status:"loading"|"shown"|"hidden", jp, yomi}
   /* 兜底:题面是照着 segments 渲染的,所以 segments 拼起来必须和原题面一字不差,
      否则显示出来的题目就不是真正的题目了(漏字/漏标点都会让人按错的题意作答,
@@ -1949,7 +1997,7 @@ function ChineseTaskText({ text, segments, sentence, targetDesc, onReveal, class
       return;
     }
     setEntries((s) => ({ ...s, [i]: { status: "loading" } }));
-    translateTaskWord(sentence, surface, targetDesc)
+    translateTaskWord(sentence, surface, targetDesc, targetPattern)
       .then((tr) => {
         setCachedWordTr(sentence, surface, tr);
         setEntries((s) => ({ ...s, [i]: { status: "shown", ...tr } }));
@@ -1965,6 +2013,9 @@ function ChineseTaskText({ text, segments, sentence, targetDesc, onReveal, class
         const e = entries[i];
         const loading = e && e.status === "loading";
         const shown = e && e.status === "shown";
+        // 查词失败(网络问题,或者结果被"泄露答案/过长"的兜底拦下来了)要给个看得见的反馈,
+        // 否则点一下什么都不出来,看起来像按钮坏了。再点一次会重新查。
+        const failed = e && e.status === "failed";
         const display = shown ? (e.jp && e.jp !== e.yomi ? `${e.yomi}(${e.jp})` : e.yomi) : "";
         return (
           <ruby
@@ -1975,6 +2026,7 @@ function ChineseTaskText({ text, segments, sentence, targetDesc, onReveal, class
             {surface}
             {loading && <rt>…</rt>}
             {shown && <rt>{display}</rt>}
+            {failed && <rt title="没查到合适的提示,再点一次可重试">?</rt>}
           </ruby>
         );
       })}
@@ -2367,6 +2419,11 @@ function AppInner() {
   };
   const taskTargetDescFor = (item) => item && item.p ? `${item.p.pattern}(${item.p.conn} / ${item.p.meaning})`
     : item && item.p1 ? `${item.p1.pattern}(${item.p1.meaning}) + ${item.p2.pattern}(${item.p2.meaning})`
+    : "";
+  /* 点词提示的"不许泄露"检查要用的原始 pattern 字段(不带 conn/meaning 那些说明文字,
+     那些是中文,拿去和日语结果做包含匹配没有意义)。複合作文一次考两个句型,两个都要防。 */
+  const taskTargetPatternFor = (item) => item && item.p ? item.p.pattern
+    : item && item.p1 ? `${item.p1.pattern}／${item.p2.pattern}`
     : "";
   const [freeMode, setFreeMode] = useState(false);
   const [homeworkMode, setHomeworkMode] = useState(false);
@@ -5149,7 +5206,7 @@ function AppInner() {
                       ) : (
                         <>
                           <div className={"q-task serif" + (gq.jpTask ? " q-task-instr" : "")}>
-                            <ChineseTaskText key={i + ":" + gq.task} text={gq.task} segments={taskSegmentsFor(gq)} sentence={gq.task} targetDesc={taskTargetDescFor({ p: groupState.p })} onReveal={markHinted} />
+                            <ChineseTaskText key={i + ":" + gq.task} text={gq.task} segments={taskSegmentsFor(gq)} sentence={gq.task} targetDesc={taskTargetDescFor({ p: groupState.p })} targetPattern={taskTargetPatternFor({ p: groupState.p })} onReveal={markHinted} />
                           </div>
                           <textarea
                             className="answer-box serif"
@@ -5285,7 +5342,7 @@ function AppInner() {
                      哪怕两题词数不同也一样(表现就是上一题的提示还留在界面上没消失)。
                      用 idx+task 而不是只用 idx:同一题号上"重试"重新出的题,内容也变了,
                      同样需要清空。 */}
-                  <ChineseTaskText key={idx + ":" + q.task} text={q.task} segments={taskSegmentsFor(q)} sentence={q.task} targetDesc={taskTargetDescFor(cur)} onReveal={markHinted} />
+                  <ChineseTaskText key={idx + ":" + q.task} text={q.task} segments={taskSegmentsFor(q)} sentence={q.task} targetDesc={taskTargetDescFor(cur)} targetPattern={taskTargetPatternFor(cur)} onReveal={markHinted} />
                 </div>
               )}
 
@@ -5700,6 +5757,9 @@ function AppInner() {
                   segments={segmentsForTask(cfQuiz.questions[cfQuizIdx].task, cfQuiz.questions[cfQuizIdx].taskSegments)}
                   sentence={cfQuiz.questions[cfQuizIdx].task}
                   targetDesc={`${cfQuiz.items[cfQuizIdx].head}(${cfQuiz.items[cfQuizIdx].sub}): ${cfQuiz.items[cfQuizIdx].note}`}
+                  // 練習帳的知识辨析没有句型库那种 pattern 字段,考点写在 head/sub 里
+                  // (比如「〜たら / 〜ば」),同样拿去防泄露
+                  targetPattern={`${cfQuiz.items[cfQuizIdx].head}／${cfQuiz.items[cfQuizIdx].sub}`}
                 />
               </div>
 

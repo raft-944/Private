@@ -943,6 +943,32 @@ function normalizeErrorScope(scope, verdict) {
   return scope === "outside" || scope === "both" || scope === "pattern" ? scope : "pattern";
 }
 
+/* 判卷时统一插入的"参考答案必须真的是改过的句子"规则。
+   起因是一个很伤信任度的真实case:学生写「夏休みは海へ旅行に行こう」,AI 判了 partial、
+   讲评说「旅行に行こう」啰嗦、建议改成「海へ旅行しよう」,但 reference 字段填的却是
+   学生原句一字不差。学生看到的就是"参考答案和我写的一模一样,凭什么说我只是接近"——
+   这种自相矛盾比判严判松都更让人没法接受,因为它根本讲不通。 */
+const REFERENCE_MUST_DIFFER_RULE = `参考答案(reference)的硬性要求:
+- 如果 verdict 不是 "correct",reference 必须是你**修改之后**的句子,要能看出和学生的答案哪里不一样。绝对不能把学生的原句原封不动抄进 reference——那等于告诉学生"标准答案就是你写的这句",却又判他没全对,自相矛盾。
+- 如果你在讲解里建议了更自然的说法,reference 就应该写那个更自然的说法,而不是学生的原句。
+- 反过来说:如果你根本写不出比学生这句更好的句子(只是想提一句"还可以这样说"这种锦上添花的建议),那就说明学生这句本来就没问题,verdict 应该判 "correct",在讲解里补充那个替代说法即可,不要为了"显得严格"而降级。`;
+
+/* 判卷结果的自洽性兜底:AI 判了 partial/wrong,但给出的参考答案和学生答案其实是同一句话。
+   这在逻辑上讲不通——参考答案就是"标准答案",标准答案等于学生的答案,那学生就是对的。
+   提示词里已经明令禁止(见 REFERENCE_MUST_DIFFER_RULE),这里是它没听话时的兜底。
+
+   处理方式是"升级成 correct,但标记成需要复核"而不是简单信任任一方:
+   - 升级 verdict:不能让一个答对的句子去缩短这个句型的复习间隔,那是实打实的损失;
+   - 同时把 selfCheck 置为 false(复用已有的"判定和讲解打架"通道):这道题照样留在错题本里
+     标着"⚠️ 建议复核",讲评也照常显示 AI 那段建议,你自己扫一眼就能确认到底谁对。
+   只有在 reference 确实存在时才做这个判断——听力题(gradeListening)没有 reference 字段,
+   不会走到这里。 */
+function reconcileGradeReference(g, answer) {
+  if (!g || g.verdict === "correct" || !g.reference || !answer) return g;
+  if (!sameJaText(g.reference, answer)) return g;
+  return { ...g, verdict: "correct", errorScope: "none", selfCheck: false };
+}
+
 /* 课本例句的逐词标注结果缓存在 localStorage(和判卷/进度数据分开存,不用同步到云端),
    同一句例句所有人反复练到时不用重复调 AI。 */
 const WORD_CACHE_KEY = "jp_word_cache_v1";
@@ -1156,6 +1182,8 @@ async function gradeCombo(p1, p2, q, answer) {
 
 ${STYLE_CONSISTENCY_RULE}
 
+${REFERENCE_MUST_DIFFER_RULE}
+
 给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
 
 如果 verdict 不是 "correct"(即 partial 或 wrong),额外给出结构化语法讲解 breakdown,拆解正确答案(reference)的语法构造,帮助学习者理解错在哪、该怎么搭句子(两个句型都要提到):
@@ -1166,10 +1194,11 @@ ${STYLE_CONSISTENCY_RULE}
 verdict 是 "correct" 时,breakdown 设为 null。
 
 注意:explanation 字段必须全部用中文写,绝对不可以用日语写讲解,引用日语词汇/例句除外。
-输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语,需同时包含两个句型)","explanation":"分别点评两个句型各自的使用情况,指出哪里好、哪里需要改,用中文,150字以内","breakdown":{"skeleton":"...","verbForm":"...","particleReason":"...","modifier":"..."}或null}`;
-  const g = await callAI(sys, user);
+输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"reference":"一个自然的参考答案(日语,需同时包含两个句型);verdict 不是 correct 时必须是改过之后的句子,不能和学生答案一模一样","explanation":"分别点评两个句型各自的使用情况,指出哪里好、哪里需要改,用中文,150字以内","breakdown":{"skeleton":"...","verbForm":"...","particleReason":"...","modifier":"..."}或null}`;
+  let g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
   if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
+  g = reconcileGradeReference(g, answer);
   if (!g.breakdown || typeof g.breakdown !== "object") g.breakdown = null;
   return g;
 }
@@ -1573,6 +1602,8 @@ ${STYLE_CONSISTENCY_RULE}
 
 ${ERROR_SCOPE_RULE}
 
+${REFERENCE_MUST_DIFFER_RULE}
+
 给出 verdict 之后,请重新审视一遍你刚写的 explanation 做自我核验:如果 explanation 里提到了任何语法瑕疵、用词不够地道、或其他值得注意的问题,但 verdict 判的却是 "correct"(判定和讲解自相矛盾),就把 selfCheck 设为 false(代表这条需要人工复核);讲解与判定一致时,selfCheck 设为 true。这个审视过程只在你内部完成,不要把思考过程写出来,直接根据结果给出最终JSON。
 
 如果 verdict 不是 "correct"(即 partial 或 wrong),额外给出结构化语法讲解 breakdown,拆解正确答案(reference)的语法构造,帮助学习者理解错在哪、该怎么搭句子(翻译题和造句题都要给):
@@ -1583,10 +1614,13 @@ ${ERROR_SCOPE_RULE}
 verdict 是 "correct" 时,breakdown 设为 null。
 
 注意:explanation 字段必须全部用中文写,绝对不可以用日语写讲解,引用日语词汇/例句除外。
-输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"errorScope":"none|pattern|outside|both","reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,用中文,120字以内","breakdown":{"skeleton":"...","verbForm":"...","particleReason":"...","modifier":"..."}或null}`;
-  const g = await callAI(sys, user);
+输出JSON(直接输出,不要有任何前缀说明或思考文字): {"verdict":"correct|partial|wrong","selfCheck":true|false,"errorScope":"none|pattern|outside|both","reference":"一个自然的参考答案(日语);verdict 不是 correct 时必须是改过之后的句子,不能和学生答案一模一样","explanation":"针对学生答案的具体讲解,指出好在哪/错在哪及如何改,用中文,120字以内","breakdown":{"skeleton":"...","verbForm":"...","particleReason":"...","modifier":"..."}或null}`;
+  let g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad grade");
   if (typeof g.selfCheck !== "boolean") g.selfCheck = true;
+  // 先兜"参考答案==学生答案却没判对"这种自相矛盾(可能把 verdict 改成 correct),
+  // 再归一化 errorScope——顺序不能反,否则改完 verdict 后 errorScope 还停在旧值上
+  g = reconcileGradeReference(g, answer);
   g.errorScope = normalizeErrorScope(g.errorScope, g.verdict);
   if (!g.breakdown || typeof g.breakdown !== "object") g.breakdown = null;
   return g;
@@ -1740,8 +1774,10 @@ async function gradeConfusionAnswer(topicName, item, question, answer, stageBenc
 - 允许多个合理答案(比如敬体/简体皆可,只要变形逻辑正确都算对),存在更优选择时说明为什么优选它
 - explanation 里必须先明确点出"变形对不对"这个核心结论,再谈其他方面
 
+${REFERENCE_MUST_DIFFER_RULE}
+
 注意:explanation 字段必须全部用中文写,绝对不可以用日语写讲解,引用日语词汇/例句除外。
-输出JSON: {"verdict":"correct|partial|wrong","formCorrect":true|false,"reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,先说变形对不对,再说其他,用中文,120字以内"}` : head + `
+输出JSON: {"verdict":"correct|partial|wrong","formCorrect":true|false,"reference":"一个自然的参考答案(日语);verdict 不是 correct 时必须是改过之后的句子,不能和学生答案一模一样","explanation":"针对学生答案的具体讲解,先说变形对不对,再说其他,用中文,120字以内"}` : head + `
 判定标准:
 - 这类题目经常存在不止一个语法上都说得通的答案,不要因为学生的答案和你脑海里的"标准答案"字面不同就直接判错;只要语法正确、能自然表达题目要求的意思就判 correct
 - 如果学生的答案和你认为更优的答案都合理,请在讲解里说明你更推荐哪一个、为什么(比如更自然、更符合当前语境),但仍判 correct,不要因为"不是最优选"而降级
@@ -1752,10 +1788,13 @@ async function gradeConfusionAnswer(topicName, item, question, answer, stageBenc
 
 ${STYLE_CONSISTENCY_RULE}
 
+${REFERENCE_MUST_DIFFER_RULE}
+
 注意:explanation 字段必须全部用中文写,绝对不可以用日语写讲解,引用日语词汇/例句除外。
-输出JSON: {"verdict":"correct|partial|wrong","reference":"一个自然的参考答案(日语)","explanation":"针对学生答案的具体讲解,用中文,120字以内,若存在更优答案请说明为什么优选它"}`;
-  const g = await callAI(sys, user);
+输出JSON: {"verdict":"correct|partial|wrong","reference":"一个自然的参考答案(日语);verdict 不是 correct 时必须是改过之后的句子,不能和学生答案一模一样","explanation":"针对学生答案的具体讲解,用中文,120字以内,若存在更优答案请说明为什么优选它"}`;
+  let g = await callAI(sys, user);
   if (!g.verdict) throw new Error("bad confusion grade");
+  g = reconcileGradeReference(g, answer);
   return g;
 }
 

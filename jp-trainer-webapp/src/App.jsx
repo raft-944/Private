@@ -2293,6 +2293,161 @@ function FollowUpAsk({ contextSummary }) {
   );
 }
 
+/* ================= 句型库搜索 =================
+   句型库现在有 582 条,按 JLPT 等级 → 課 两层折叠翻找一条具体句型太慢(尤其是
+   只记得"好像有个跟〜ですか有关的句型"、想不起它在哪一级哪一課的时候)。这里做的是
+   浏览器地址栏那种边打边出候选、选中就跳过去的搜索,中日文都能搜。
+
+   匹配前先把文本归一化,这样输入不需要跟句型库里写的一模一样:
+   ①NFKC(全角英数→半角、半角カナ→全角カナ);②转小写;③片假名→平假名
+   (搜「コーヒー」也能命中写成「こーひー」的地方,反之亦然);④去掉句型写法里的
+   占位/装饰符号(〜、空格、中点、各种标点)——句型库里写的是「〜んですか」,
+   用户输入的是「んですか」甚至「ですか」,不去掉波浪号就永远匹配不上。
+
+   normChar 一个字符一个字符地做(而不是整串 replace),是为了顺带记下"归一化后的
+   第 i 个字符来自原文的第几个字符"(map),这样在候选框里才能把命中的那一段
+   高亮出来——原文和归一化文本的下标是对不上的(去掉了字符)。 */
+const LIB_SEARCH_DROP = /[〜~～\s・、。,,.．「」『』（）()【】\[\]{}:：;;!!??"'`+*/\\|=_-]/;
+function normChar(ch) {
+  let c = ch.normalize("NFKC").toLowerCase();
+  if (c.length === 1) {
+    const code = c.charCodeAt(0);
+    // 片假名 ァ〜ヶ → 平假名(相差 0x60)
+    if (code >= 0x30a1 && code <= 0x30f6) c = String.fromCharCode(code - 0x60);
+  }
+  if (c.length === 1 && LIB_SEARCH_DROP.test(c)) return "";
+  return c;
+}
+function normWithMap(s) {
+  let n = "";
+  const map = [];
+  const src = String(s || "");
+  for (let i = 0; i < src.length; i++) {
+    const c = normChar(src[i]);
+    for (let k = 0; k < c.length; k++) map.push(i);
+    n += c;
+  }
+  return { n, map };
+}
+function normSearch(s) {
+  return normWithMap(s).n;
+}
+
+/* 在原文里定位关键词,返回原文的 [start, end)。给候选框做高亮用,匹配本身不依赖它。 */
+function findHitRange(text, rawQuery) {
+  const q = normSearch(rawQuery);
+  if (!q) return null;
+  const { n, map } = normWithMap(text);
+  const i = n.indexOf(q);
+  if (i < 0) return null;
+  return { start: map[i], end: map[i + q.length - 1] + 1 };
+}
+
+/* 命中的那一段套 <mark>。没命中就原样返回,调用方不需要先判断。 */
+function HiliteText({ text, q }) {
+  const s = String(text || "");
+  const hit = q ? findHitRange(s, q) : null;
+  if (!hit) return <>{s}</>;
+  return (
+    <>
+      {s.slice(0, hit.start)}
+      <mark className="lib-hl">{s.slice(hit.start, hit.end)}</mark>
+      {s.slice(hit.end)}
+    </>
+  );
+}
+
+/* 搜索索引在模块加载时建一次(PATTERNS 是静态的,运行期不会变)。
+   分字段存而不是拼成一大坨,是为了能按"命中在哪个字段"排序——
+   命中句型本身的显然比命中某条讲解正文里的更该排在前面。 */
+const LIB_SEARCH_INDEX = PATTERNS.map((p) => {
+  const st = p.study;
+  const studyText = st
+    ? [
+        st.form || "",
+        ...(st.usages || []).map((u) => u.use + " " + (u.ex || []).map((e) => e.join(" ")).join(" ")),
+        ...(st.notes || []),
+      ].join(" ")
+    : "";
+  return {
+    p,
+    pattern: normSearch(p.pattern),
+    meaning: normSearch(p.meaning),
+    conn: normSearch(p.conn),
+    ex: normSearch((p.exJP || "") + " " + (p.exCN || "")),
+    rest: normSearch(
+      [
+        p.explain || "",
+        (p.contrasts || []).map((c) => c.join(" ")).join(" "),
+        (p.extras || []).map((e) => e.join(" ")).join(" "),
+        studyText,
+      ].join(" ")
+    ),
+  };
+});
+
+const LIB_FIELD_LABEL = { pattern: "句型", meaning: "释义", conn: "接続", ex: "例句", rest: "讲解" };
+
+/* 返回全部命中(不截断),截断留给渲染处——这样能显示"另有 N 条"而不是假装只有这些。 */
+function searchPatterns(raw) {
+  const q = normSearch(raw);
+  if (!q) return [];
+  const out = [];
+  for (const it of LIB_SEARCH_INDEX) {
+    let score = -1;
+    let field = "";
+    if (it.pattern.startsWith(q)) { score = 0; field = "pattern"; }
+    else if (it.pattern.includes(q)) { score = 1; field = "pattern"; }
+    else if (it.meaning.startsWith(q)) { score = 2; field = "meaning"; }
+    else if (it.meaning.includes(q)) { score = 3; field = "meaning"; }
+    else if (it.conn.includes(q)) { score = 4; field = "conn"; }
+    else if (it.ex.includes(q)) { score = 5; field = "ex"; }
+    else if (it.rest.includes(q)) { score = 6; field = "rest"; }
+    if (score >= 0) out.push({ p: it.p, score, field });
+  }
+  // 同一档次内按句型库顺序(id)排,等价于按等级从易到难 —— 先学的排前面
+  out.sort((a, b) => a.score - b.score || a.p.id - b.p.id);
+  return out;
+}
+
+/* 候选框最多显示这么多条:再多就滑不完了,也说明该把关键词打长一点。 */
+const LIB_SUGGEST_MAX = 30;
+
+/* 命中在例句/讲解正文里时,光显示句型名看不出"为什么它算命中",
+   这里从长文本里抠出关键词前后各一小段做预览。 */
+function hitSnippet(p, field, q) {
+  let text = "";
+  if (field === "ex") {
+    text = findHitRange(p.exJP || "", q) ? p.exJP : p.exCN || "";
+  } else if (field === "rest") {
+    const cands = [
+      p.explain || "",
+      ...(p.contrasts || []).map((c) => c.join(" — ")),
+      ...(p.extras || []).map((e) => e[0] + " " + e[1]),
+    ];
+    if (p.study) {
+      const st = p.study;
+      if (st.form) cands.push(st.form);
+      (st.usages || []).forEach((u) => {
+        cands.push(u.use);
+        (u.ex || []).forEach((e) => cands.push(e[0] + " " + e[1]));
+      });
+      (st.notes || []).forEach((n) => cands.push(n));
+    }
+    text = cands.find((c) => findHitRange(c, q)) || "";
+  } else if (field === "conn") {
+    text = p.conn || "";
+  } else {
+    return null;
+  }
+  if (!text) return null;
+  const hit = findHitRange(text, q);
+  if (!hit) return text.slice(0, 40);
+  const from = Math.max(0, hit.start - 12);
+  const to = Math.min(text.length, hit.end + 18);
+  return (from > 0 ? "…" : "") + text.slice(from, to) + (to < text.length ? "…" : "");
+}
+
 /* ================= 句型讲解(句型库 / 新句型介绍页 两处共用) =================
    这些内容(教材解释 explain、易混淆辨析 contrasts、补充句型的详细讲解 study)以前
    全都只发给 AI 出题判卷,界面上一个字都不显示——学新句型时只能看到接续、意思和一个例句。
@@ -2662,6 +2817,16 @@ function AppInner() {
   const [errMsg, setErrMsg] = useState("");
   const [openLesson, setOpenLesson] = useState(null);
   const [openLevel, setOpenLevel] = useState(null); // 句型库按 JLPT 等级分组的外层折叠,内层还是原来按課的折叠(openLesson)
+  /* --- 句型库搜索 ---
+     libQ 是输入框里的关键词,libSugOpen 控制候选框展不展开,libActive 是键盘上下键
+     选中的候选序号(手机上用不到,但桌面浏览器里没有它就只能用鼠标点)。
+     libJump 存"要滚过去并闪一下高亮的句型",带一个 seq 是因为连着选同一条时
+     id 不变、effect 不会重跑,高亮就不闪第二次了。 */
+  const [libQ, setLibQ] = useState("");
+  const [libSugOpen, setLibSugOpen] = useState(false);
+  const [libActive, setLibActive] = useState(0);
+  const [libJump, setLibJump] = useState(null); // null | {id, seq}
+  const libSearchRef = useRef(null); // 粘顶的搜索框,滚动定位时要按它的实际高度让位
   const actionsRef = useRef({});
   const preGenRef = useRef({}); // 批量出题的结果缓存,key是题目在当前队列里的下标
   const sessionGenRef = useRef(0); // 每次开始新的一组题就递增,防止上一轮延迟返回的批量结果写错地方
@@ -3090,6 +3255,28 @@ function AppInner() {
   useEffect(() => {
     if (cfDialoguePhase === "reviewed") scrollTop();
   }, [cfDialoguePhase]);
+
+  /* --- 句型库搜索:选中候选之后滚过去 ---
+     选中时同时展开了对应的等级和課(见 jumpToPattern),那一行要等这次渲染完才存在,
+     所以滚动放在 effect 里。滚的是 .app-scroll 这个容器,不是 window——
+     跟上面几个 scrollTop 同理,body 本身是不滚动的。这里也不用 el.scrollIntoView():
+     它会把目标行顶到容器最上沿、正好压在粘在顶部的搜索框底下,所以自己按容器
+     相对坐标算,多留出搜索框那点高度。搜索框的高度必须实测(libSearchRef)而不是写死:
+     关键词下面那行"共 N 条结果 · 重新展开"在/不在,高度差着二十多像素,写死就会
+     不多不少正好把目标行的第一行字压在搜索框底下(headless 里量出来是 72 vs 92)。
+     1.6 秒后把 libJump 清掉,高亮只是"闪一下告诉你在这儿",不长期占着颜色。
+     (和其它 effect 一样必须写在 `if (!db) return` 之前——hooks 数量不能变) */
+  useEffect(() => {
+    if (!libJump) return;
+    const el = document.getElementById("pat-" + libJump.id);
+    const c = scrollRef.current;
+    if (el && c) {
+      const headH = libSearchRef.current ? libSearchRef.current.getBoundingClientRect().height : 56;
+      c.scrollTop += el.getBoundingClientRect().top - c.getBoundingClientRect().top - headH - 10;
+    }
+    const timer = setTimeout(() => setLibJump(null), 1600);
+    return () => clearTimeout(timer);
+  }, [libJump]);
 
   const confirmFirstUse = () => {
     setDb({ ...DEFAULT_DB });
@@ -5131,6 +5318,39 @@ function AppInner() {
   actionsRef.current = { cur, idx, next, retry, loadQuestion };
   const lessons = [...new Set(PATTERNS.map((p) => p.lesson))];
 
+  /* --- 句型库搜索:每次渲染重算即可 ---
+     582 条 × 几个字段的 indexOf,一次几毫秒,不值得为它上 useMemo(而且这个组件
+     里的 hooks 数量已经很敏感了,能不加就不加)。 */
+  const libResults = searchPatterns(libQ);
+  const libShown = libResults.slice(0, LIB_SUGGEST_MAX);
+  /* 选中候选:展开它所在的等级和課(不然那一行根本没渲染出来),收起候选框,
+     交给上面那个 effect 去滚动 + 闪高亮。关键词特意不清空——想再挑一条时
+     点回输入框就能把候选框重新展开,不用重打一遍。 */
+  const jumpToPattern = (p) => {
+    setOpenLevel(p.level);
+    setOpenLesson(p.lesson);
+    setLibSugOpen(false);
+    setLibJump({ id: p.id, seq: (libJump ? libJump.seq : 0) + 1 });
+  };
+  const onLibKeyDown = (e) => {
+    if (!libShown.length) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setLibSugOpen(true);
+      setLibActive((i) => (i + 1) % libShown.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setLibSugOpen(true);
+      setLibActive((i) => (i - 1 + libShown.length) % libShown.length);
+    } else if (e.key === "Enter") {
+      // 手机输入法上的"完了/搜索"键也走这里:没用上下键选过就跳第一条
+      e.preventDefault();
+      jumpToPattern((libShown[libActive] || libShown[0]).p);
+    } else if (e.key === "Escape") {
+      setLibSugOpen(false);
+    }
+  };
+
   return (
     <div className="app">
       <Style />
@@ -5754,6 +5974,74 @@ function AppInner() {
       {view === "library" && (
         <main className="page">
           <h2 className="page-title serif">句型库</h2>
+
+          {/* 搜索框:中日文都能搜,边打边出候选,选中就展开对应等级/課并滚过去。
+              粘在页面顶部,翻到第 80 課想再搜一条时不用先滚回去。
+              候选框不做失焦自动收起:手机上滑动候选列表、输入法收起都会触发失焦,
+              自动收起会让人刚要点就没了;改成只有选中/按 Esc/清空关键词才收。 */}
+          <div className="lib-search" ref={libSearchRef}>
+            <div className="lib-search-box">
+              <span className="lib-search-icon">🔍</span>
+              <input
+                className="lib-search-input"
+                type="search"
+                enterKeyHint="search"
+                placeholder="搜索句型 / 释义 / 例句(中日文均可)"
+                value={libQ}
+                onChange={(e) => { setLibQ(e.target.value); setLibActive(0); setLibSugOpen(true); }}
+                onFocus={() => { if (libQ) setLibSugOpen(true); }}
+                onKeyDown={onLibKeyDown}
+              />
+              {libQ && (
+                <button
+                  className="lib-search-clear"
+                  aria-label="清空"
+                  onClick={() => { setLibQ(""); setLibSugOpen(false); setLibActive(0); }}
+                >×</button>
+              )}
+            </div>
+
+            {libQ && !libSugOpen && (
+              <button className="lib-search-reopen" onClick={() => setLibSugOpen(true)}>
+                {libResults.length ? `“${libQ}” 共 ${libResults.length} 条结果 · 重新展开` : `“${libQ}” 没有找到相关句型`}
+              </button>
+            )}
+
+            {libQ && libSugOpen && (
+              <div className="lib-sug">
+                {libShown.length === 0 && <div className="lib-sug-empty">没有找到相关句型</div>}
+                {libShown.map((r, i) => {
+                  const p = r.p;
+                  const snip = hitSnippet(p, r.field, libQ);
+                  return (
+                    <button
+                      key={p.id}
+                      className={"lib-sug-item" + (i === libActive ? " on" : "")}
+                      /* 阻止 mousedown 的默认行为,输入框才不会先失焦——
+                         失焦会让候选框在 click 事件到达之前就被重排/收起。 */
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => jumpToPattern(p)}
+                    >
+                      <div className="lib-sug-top">
+                        <span className="serif lib-sug-name"><HiliteText text={p.pattern} q={r.field === "pattern" ? libQ : ""} /></span>
+                        <span className="lib-sug-tags">
+                          <span className="badge">{p.level}</span>
+                          {db.prog[p.id] ? <span className="badge badge-on">已学</span> : null}
+                          {r.field !== "pattern" && <span className="badge badge-ext">{LIB_FIELD_LABEL[r.field]}</span>}
+                        </span>
+                      </div>
+                      <div className="lib-sug-meaning"><HiliteText text={p.meaning} q={r.field === "meaning" ? libQ : ""} /></div>
+                      {snip && <div className="lib-sug-snip serif"><HiliteText text={snip} q={libQ} /></div>}
+                    </button>
+                  );
+                })}
+                {libResults.length > libShown.length && (
+                  <div className="lib-sug-more">另有 {libResults.length - libShown.length} 条结果,关键词再打长一点</div>
+                )}
+              </div>
+            )}
+          </div>
+
           {lessons.length === 0 && <div className="center-msg">还没有录入句型内容</div>}
           {JLPT_LEVEL_ORDER.map((lv) => {
             const levelPatterns = PATTERNS.filter((p) => p.level === lv);
@@ -5783,7 +6071,13 @@ function AppInner() {
                           {openLesson === l && ps.map((p) => {
                             const pr = db.prog[p.id];
                             return (
-                              <div key={p.id} className="pattern-row">
+                              /* id 是给搜索跳转定位用的(见 libJump 那个 effect);
+                                 .jumped 只是跳过去之后闪一下高亮,1.6 秒后自动去掉 */
+                              <div
+                                key={p.id}
+                                id={"pat-" + p.id}
+                                className={"pattern-row" + (libJump && libJump.id === p.id ? " jumped" : "")}
+                              >
                                 <div className="pr-top">
                                   <span className="serif pr-name">{p.pattern}</span>
                                   {p.ext && <span className="badge badge-ext">補充</span>}
@@ -7122,11 +7416,51 @@ html,body{overflow-x:hidden}
 .done-note{font-size:13px;color:var(--ink-soft);margin-bottom:8px}
 .done-more-new{font-size:13px;color:var(--ai-deep);background:var(--tint-blue-bg);border-radius:10px;padding:12px;margin-bottom:14px;display:flex;flex-direction:column;gap:10px;align-items:center}
 
+/* 句型库搜索框 + 候选框。
+   搜索框 position:sticky 粘在滚动容器顶部;因为 .page 有左右内边距,这里用负外边距
+   把背景铺满整幅宽度,不然滚上来的内容会从两侧的缝里透出来。
+   候选框不用 position:absolute 浮层:粘顶的搜索框自己就带背景和阴影,浮层反而会在
+   手机上被输入法顶来顶去;直接往下推内容更稳,反正候选框自带滚动、不会顶掉整页。 */
+.lib-search{position:sticky;top:0;z-index:20;background:var(--paper);
+  margin:0 -20px 12px;padding:0 20px 10px}
+.lib-search-box{display:flex;align-items:center;gap:8px;padding:0 10px;
+  background:var(--tint-input-bg);border:1px solid var(--line);border-radius:12px}
+.lib-search-icon{font-size:13px;opacity:.55;flex:0 0 auto}
+/* font-size 必须 ≥16px,否则 iOS Safari 聚焦时会自动放大整个页面 */
+.lib-search-input{flex:1 1 auto;min-width:0;padding:11px 0;font-size:16px;font-family:inherit;
+  border:none;outline:none;background:transparent;color:var(--ink)}
+.lib-search-input::-webkit-search-cancel-button{display:none}
+.lib-search-clear{flex:0 0 auto;width:26px;height:26px;border:none;border-radius:50%;
+  background:var(--tint-neutral-bg);color:var(--ink-soft);font-size:15px;line-height:1;cursor:pointer}
+.lib-search-reopen{width:100%;margin-top:8px;padding:8px 10px;text-align:left;font-size:12px;
+  color:var(--ink-soft);background:var(--tint-panel);border:1px solid var(--line);
+  border-radius:10px;cursor:pointer;font-family:inherit}
+.lib-sug{margin-top:8px;max-height:50vh;overflow-y:auto;overscroll-behavior:contain;
+  background:var(--card);border:1px solid var(--line);border-radius:12px;
+  box-shadow:0 6px 20px rgba(0,0,0,.10)}
+.lib-sug-empty,.lib-sug-more{padding:12px 14px;font-size:12px;color:var(--ink-soft);text-align:center}
+.lib-sug-item{display:block;width:100%;text-align:left;padding:10px 13px;background:none;
+  border:none;border-bottom:1px solid var(--line);cursor:pointer;font-family:inherit}
+.lib-sug-item:last-child{border-bottom:none}
+.lib-sug-item.on{background:var(--tint-blue-bg)}
+.lib-sug-top{display:flex;align-items:center;gap:8px;justify-content:space-between}
+.lib-sug-name{font-size:15px;font-weight:700;color:var(--ai-deep);word-break:break-all}
+.lib-sug-tags{display:flex;gap:4px;flex:0 0 auto}
+.lib-sug-meaning{font-size:12px;color:var(--ink-soft);margin-top:3px;line-height:1.5}
+.lib-sug-snip{font-size:12px;color:var(--ink-soft);margin-top:3px;line-height:1.6;opacity:.85}
+.lib-hl{background:var(--tint-amber-bg);color:var(--tint-amber-fg);border-radius:3px;padding:0 1px}
+
 .lesson-block{margin-bottom:8px}
 .lesson-head{width:100%;display:flex;justify-content:space-between;padding:12px 16px;background:var(--card);
   border:1px solid var(--line);border-radius:12px;font-size:15px;cursor:pointer;color:var(--ink)}
 .lesson-count{font-size:12px;color:var(--ink-soft)}
 .pattern-row{margin:8px 0 8px 10px;padding:12px 14px;background:var(--card);border-left:3px solid var(--ai);border-radius:0 12px 12px 0}
+/* 搜索跳转过来的那一行闪一下,不然滚到位了也不知道是哪条 */
+.pattern-row.jumped{animation:pat-flash 1.6s ease-out}
+@keyframes pat-flash{
+  0%,55%{background:var(--tint-amber-bg);border-left-color:var(--stat-partial)}
+  100%{background:var(--card);border-left-color:var(--ai)}
+}
 .pr-top{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
 .pr-name{font-size:16px;font-weight:700;color:var(--ai-deep)}
 .badge{font-size:11px;padding:2px 8px;border-radius:6px;background:var(--tint-neutral-bg);color:var(--ink-soft)}

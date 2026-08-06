@@ -42,6 +42,62 @@ const warmInFlight = new Set();
 /* ================= 遗忘曲线参数 ================= */
 const INTERVALS = [1, 2, 4, 7, 15, 30, 60]; // 天
 
+/* ================= 题库(question_bank) =================
+   出过的题不再现出现丢,攒进 question_bank 表,隔够久之后可以直接复现、不用再调 AI。
+   数据层在 src/questionBank.js(window.qbank),表结构和"为什么单开一张表"见 supabase/schema.sql。
+
+   一道题隔这么多天之后才允许再出。取值必须明显大于 SRS 的最长间隔(INTERVALS 末项 60 天)
+   ——这样复现的题一定跨过了至少一整个复习周期,那时候还能想起来的只可能是句型本身,
+   不会是上次自己写的那句日语(否则练习就退化成背答案了)。
+   这个取值派生出的行为正好是想要的,不需要额外再写规则:**lv 低的句型(1~4 天间隔)题库里
+   几乎不会有够冷却的题,永远出新题;lv 高的句型(30/60 天)才开始吃老本**——
+   记不牢的句型自动拿到新鲜题,记牢的句型才复用。 */
+const QBANK_COOLDOWN_DAYS = 90;
+
+/* 只有这两种题型进题库。combo(两个句型)、listening(自带参考答案、另一套生成器)、
+   每日作業里 jpTask 那种固定文案(本来就不花 AI)、練習帳/JLPT(不挂句型、本地判卷)
+   都不在 v1 范围内。 */
+const QBANK_TYPES = ["translation", "composition"];
+
+/* 把刚生成的题存进题库,fire-and-forget——绝不能 await 在出题主流程上。
+   入库时机是"生成成功",不是"展示给用户":首页预热生成了、那天却没做到的题,以前随
+   WARM_CACHE 当天硬过期一起丢掉,现在留在题库里 last_served 为空,下次直接当存货用。
+   (注意不能顺手也去写 qHist——qHist 刻意只在题目真正展示时才写,见那个 effect 的注释。) */
+function bankQuestions(entries) {
+  const list = (entries || []).filter((e) => e && e.task && QBANK_TYPES.includes(e.qtype));
+  if (!list.length || !(typeof window !== "undefined" && window.qbank)) return;
+  try {
+    Promise.resolve(window.qbank.add(list)).catch(() => {});
+  } catch { /* 题库坏了只该退化成照常出题,不能挡住做题 */ }
+}
+
+/* 从题库捞出的行里挑一条最该复现的,返回下标,没有合适的返回 -1。纯函数,便于验证。
+   rows 是 window.qbank.pick() 的结果(已经按冷却线过滤过)。
+   seenTasks 传这个句型的 qHist 避重清单:冷却期算错、或者同一天里同一句型出现两次时的
+   第二道保险,免得刚做过的题又推到眼前。 */
+function pickFromBankIndex(rows, pid, type, seenTasks) {
+  const seen = seenTasks || [];
+  const hasRef = (r) => !!r.reference;
+  const servedKey = (r) => r.last_served || ""; // 空串 = 还没展示过的存货,排最前
+  let best = -1;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (r.pattern_id !== pid || r.qtype !== type || !r.task) continue;
+    if (seen.includes(r.task)) continue;
+    if (best < 0) { best = i; continue; }
+    const b = rows[best];
+    // 有参考答案的优先:那是判卷回填过的完整条目,也是以后"零 token 自查模式"的原料
+    if (hasRef(r) !== hasRef(b)) { if (hasRef(r)) best = i; continue; }
+    if (servedKey(r) < servedKey(b)) best = i;
+  }
+  return best;
+}
+
+/* 题库里的一行 → 出题流程认识的题目对象。字段名对齐 genQuestion 的返回值。 */
+function bankRowToQuestion(row) {
+  return { type: row.qtype, task: row.task, taskSegments: row.task_segments || undefined };
+}
+
 /* 根据一次判卷结果算出某个句型下一次的 lv/due。抽成纯函数是因为现在有两处要用:
    普通到期复习的单次判卷,以及新句型5道题综合表现后的"结一次账"——
    两处必须是同一套间隔计算,写两份迟早会算出不一样的结果。
@@ -1450,6 +1506,9 @@ ${TASK_SEGMENTS_RULE}
 输出JSON格式: {"type":"${type}","task":"题目内容(中文)",${TASK_SEGMENTS_FIELD}}`;
   const q = await callAI(sys, user, 3500);
   if (!q.task) throw new Error("bad question");
+  // 入库放在生成函数里(而不是各个调用方),这样每一条出题路径都自动攒进题库,
+  // 包括首页预热和新句型组——不会因为将来新加一处调用就漏掉
+  bankQuestions([{ pattern_id: p.id, qtype: q.type || type, task: q.task, task_segments: q.taskSegments || null }]);
   return q;
 }
 
@@ -1495,10 +1554,12 @@ ${list}
 
 按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"n":题号(就是上面的第几题,整数),"task":"题目内容(中文)",${TASK_SEGMENTS_FIELD}}`;
   const arr = await callAIArray(sys, user, items.length, true);
-  return alignBatch(arr, items.length, (q, pos) => ({
+  const out = alignBatch(arr, items.length, (q, pos) => ({
     type: items[pos].type, task: q.task,
     taskSegments: Array.isArray(q.taskSegments) && q.taskSegments.length ? q.taskSegments : null,
   }));
+  bankQuestions(out.map((q, i) => q && { pattern_id: items[i].p.id, qtype: q.type, task: q.task, task_segments: q.taskSegments }));
+  return out;
 }
 
 /* 批量版(纯翻译题):专门给"每日作业"里那些必须是翻译题的题位用,
@@ -1516,10 +1577,12 @@ ${TASK_SEGMENTS_RULE}
 
 按顺序输出一个JSON数组,长度必须正好是 ${items.length},每个元素格式: {"n":题号(就是上面的第几题,整数),"task":"题目内容(中文)",${TASK_SEGMENTS_FIELD}}`;
   const arr = await callAIArray(sys, user, patterns.length, true);
-  return alignBatch(arr, patterns.length, (q) => ({
+  const out = alignBatch(arr, patterns.length, (q) => ({
     type: "translation", task: q.task,
     taskSegments: Array.isArray(q.taskSegments) && q.taskSegments.length ? q.taskSegments : null,
   }));
+  bankQuestions(out.map((q, i) => q && { pattern_id: patterns[i].id, qtype: q.type, task: q.task, task_segments: q.taskSegments }));
+  return out;
 }
 
 /* ================= JLPT模拟 · 文法选择题 =================
@@ -2951,6 +3014,11 @@ function AppInner() {
   const sessionGenRef = useRef(0); // 每次开始新的一组题就递增,防止上一轮延迟返回的批量结果写错地方
   const prefetchingRef = useRef(new Set()); // 正在预取中的题位下标,避免补取和开场预取重复请求同一题
   const prefetchFailRef = useRef(0); // 本场有几批预取彻底失败——结果页上提示一下,不然只能靠猜
+  /* 题库缓存:rows 是从 question_bank 捞出来的、当前可以复现的题;loaded 记已经查过哪些句型,
+     免得同一个句型反复查库。一道题被取用后立刻从 rows 里删掉,保证一场里不会重复出现。
+     刻意用 ref 而不是 state:它的变化不需要触发重渲染,而且出题路径是异步的,
+     state 的批处理会让"刚取走的那条"在下一次挑题时还看得见。 */
+  const bankRef = useRef({ rows: [], loaded: new Set() });
   /* 标记"内存里这一场可续做的会话还活着":存下开场时的 sessionGenRef 和 kind。
      所有 start*(自由练习/一键练习/每日作业…)都会递增 sessionGenRef,所以只要 gen 还相等,
      就说明内存里的 queue/idx/当前题面/判卷状态都还是这一场的,没被别的场次顶掉——
@@ -3036,6 +3104,8 @@ function AppInner() {
      还能正常改密码,不该被额度查询的失败连累。 */
   const [acctEmail, setAcctEmail] = useState(null); // null=还没读 | "" (读取失败) | 邮箱字符串
   const [acctQuota, setAcctQuota] = useState(null); // null=还没读 | "error" | {spentRmb, unlimited}
+  // 题库统计,和上面两个一样是独立 state:查不到就那一行不显示,不能连累旁边的设置项
+  const [qbankStats, setQbankStats] = useState(null); // null=还没读 | "none" | {total, patterns, withRef}
   const [acctOpenSection, setAcctOpenSection] = useState(null); // 手册/账户设置的折叠,同时只展开一个
   const [openManual, setOpenManual] = useState(null); // 使用手册里展开的是哪一节
   const [newPw, setNewPw] = useState("");
@@ -3106,6 +3176,10 @@ function AppInner() {
   useEffect(() => {
     if (view === "confusion" && confusionTopics === null) loadConfusionTopics();
     if (view === "account" && acctQuota === null && acctEmail === null) loadAccountInfo();
+    if (view === "account" && qbankStats === null) {
+      if (!window.qbank) setQbankStats("none");
+      else Promise.resolve(window.qbank.stats()).then((r) => setQbankStats(r || "none")).catch(() => setQbankStats("none"));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view]);
 
@@ -3230,6 +3304,8 @@ function AppInner() {
     const key = qHistKeyOf(item, q);
     const text = q.type === "listening" ? q.jp : q.task;
     if (!key || !text) return;
+    // 题库的 last_served 和 qHist 是同一个时机("真的展示给你了"),所以挂在一起
+    markBankServed(item && item.p, q);
     setDb((d) => {
       const prev = (d.qHist && d.qHist[key]) || { tasks: [], lastType: null };
       const tasks = prev.tasks || [];
@@ -3291,17 +3367,31 @@ function AppInner() {
     const head = sortedDueList(db, t2).slice(0, cap).slice(0, WARM_COUNT).filter((p) => !warmCache.has(p.id));
     if (!head.length) { warmedRef.current = true; return; }
     warmedRef.current = true;
-    const items = head.map((p) => ({ p, type: pickQType(db, p.id), avoid: seenTasksOf(db, p.id) }));
-    head.forEach((p) => warmInFlight.add(p.id));
-    genQuestionBatch(items)
-      .then((qs) => {
-        qs.forEach((q, i) => { if (q && q.task) warmCache.set(head[i].id, q); });
+    (async () => {
+      // 预热也先问题库:命中的直接填进 warmCache,这几题一分钱都不用花
+      await ensureBank(head.map((p) => p.id));
+      const items = [], toGen = [];
+      let hits = 0;
+      for (const p of head) {
+        const type = pickQType(db, p.id);
+        const banked = takeFromBank(p, type);
+        if (banked) { warmCache.set(p.id, banked); hits++; continue; }
+        items.push({ p, type, avoid: seenTasksOf(db, p.id) });
+        toGen.push(p);
+      }
+      if (hits) saveWarmCache();
+      if (!items.length) return; // 全命中,这次连 AI 都不用调
+      toGen.forEach((p) => warmInFlight.add(p.id));
+      try {
+        const qs = await genQuestionBatch(items);
+        qs.forEach((q, i) => { if (q && q.task) warmCache.set(toGen[i].id, q); });
         saveWarmCache();
-      })
-      .catch(() => { /* 预热失败无所谓,做题时会照常现场出题 */ })
-      // 不管成没成都要放开"在飞"标记:失败的话这几题得让后面的滚动补取(topUpAhead)接手,
-      // 一直标着在飞就再也没人管它们了
-      .finally(() => head.forEach((p) => warmInFlight.delete(p.id)));
+      } catch { /* 预热失败无所谓,做题时会照常现场出题 */ } finally {
+        // 不管成没成都要放开"在飞"标记:失败的话这几题得让后面的滚动补取(topUpAhead)接手,
+        // 一直标着在飞就再也没人管它们了
+        toGen.forEach((p) => warmInFlight.delete(p.id));
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [db, view]);
 
@@ -3590,6 +3680,36 @@ function AppInner() {
       .map(([pid, count]) => ({ p: PATTERNS[pid], count }));
   })();
 
+  /* --- 题库(见模块顶部 QBANK_COOLDOWN_DAYS 那一段) --- */
+  /* 按需把这批句型的可复现题捞进内存,同一个句型只查一次库。
+     查失败也把句型标记成"查过了",不然每道题都会重试一遍、把失败放大成一串请求。 */
+  const ensureBank = async (pids) => {
+    if (!window.qbank) return;
+    const need = [...new Set(pids)].filter((id) => id != null && !bankRef.current.loaded.has(id));
+    if (!need.length) return;
+    need.forEach((id) => bankRef.current.loaded.add(id));
+    try {
+      const rows = await window.qbank.pick(need, addDays(t, -QBANK_COOLDOWN_DAYS));
+      if (rows && rows.length) bankRef.current.rows = [...bankRef.current.rows, ...rows];
+    } catch { /* 查不到就当题库是空的,照常调 AI */ }
+  };
+  /* 从内存里的题库取一条,取到就从 rows 里删掉(一场里同一条不会出现两次)。
+     取不到返回 null,调用方照常去调 AI。 */
+  const takeFromBank = (p, type) => {
+    if (!p || !QBANK_TYPES.includes(type)) return null;
+    const rows = bankRef.current.rows;
+    const i = pickFromBankIndex(rows, p.id, type, seenTasksOf(db, String(p.id)));
+    if (i < 0) return null;
+    bankRef.current.rows = rows.filter((_, k) => k !== i);
+    return bankRowToQuestion(rows[i]);
+  };
+  /* 题目真正展示了才记 last_served(冷却期从展示那一刻算),和 qHist 同一个时机。
+     fire-and-forget:这是纯记账,失败了下次顶多早一点复现,不值得让用户等。 */
+  const markBankServed = (p, q) => {
+    if (!window.qbank || !p || !q || !q.task || q.jpTask || !QBANK_TYPES.includes(q.type)) return;
+    try { Promise.resolve(window.qbank.markServed(p.id, q.task, t)).catch(() => {}); } catch { /* 不影响做题 */ }
+  };
+
   /* --- 会话流程 --- */
   /* 批量预取:把一组"待出题的坑位"分成每5个一批,后台异步逐批请求,
      结果存进 preGenRef,后面轮到对应题目时优先直接用,减少现场一题一次调用的次数。
@@ -3606,6 +3726,24 @@ function AppInner() {
       !preGenRef.current[it.idx] && !prefetchingRef.current.has(it.idx)
       && !(it.p && (warmCache.has(it.p.id) || warmInFlight.has(it.p.id))));
     todo.forEach((it) => prefetchingRef.current.add(it.idx));
+    /* 先问题库,题库里有的就地填掉、根本不进 AI 调用;剩下的才分批去生成。
+       runPrefetch 是所有批量预取的唯一入口(会话开场、临阵补取、作业、追加题都走它),
+       所以题库只要接在这里,那几条路径就一起接上了,不用各改一遍。
+       没有 type 的调用方(每日作業那几处)出的都是翻译题,按 translation 匹配。 */
+    (async () => {
+      await ensureBank(todo.map((it) => it.p && it.p.id));
+      const rest = [];
+      for (const it of todo) {
+        const hit = takeFromBank(it.p, it.type || "translation");
+        if (hit) { preGenRef.current[it.idx] = hit; prefetchingRef.current.delete(it.idx); }
+        else rest.push(it);
+      }
+      runPrefetchGenerate(rest, generator, myGen, CHUNK_SIZE);
+    })();
+  };
+  /* runPrefetch 里"真的去调 AI"的那一半。拆出来只是因为上面加了一段 await,
+     不拆的话整个函数要变成 async,而它的几个调用方都是同步的即发即忘。 */
+  const runPrefetchGenerate = (todo, generator, myGen, CHUNK_SIZE) => {
     for (let i = 0; i < todo.length; i += CHUNK_SIZE) {
       const chunk = todo.slice(i, i + CHUNK_SIZE);
       if (chunk.length === 0) continue;
@@ -4021,11 +4159,17 @@ function AppInner() {
       const qs = await genQuestionBatch(types.map((type) => ({ p: item.p, type, avoid })));
       if (groupGenRef.current !== myGen) return; // 已经切到别的组/别的会话,这份结果作废
       setGroupState((g) => (g ? { ...g, qs, statuses: qs.map((q) => (q && q.task ? "idle" : "missing")) } : g));
+      /* 组页面整页一次性展示,不走上面那个按 q 触发的 qHist effect(组模式下 q 一直是 null),
+         所以题库的 last_served 要在这里自己记一次。不记的话这几道题会以"还没展示过的存货"
+         身份留在库里,下次一开会话就被当成免费题重新推到眼前。
+         组页面只写库、不读库:新句型本来就没有历史可复现,顽固特训要的是新鲜的检验题。 */
+      qs.forEach((sq) => markBankServed(item.p, sq));
       qs.forEach((q, i) => {
         if (q && q.task) return;
         genQuestion(item.p, avoid, types[i])
           .then((solo) => {
             if (groupGenRef.current !== myGen) return;
+            markBankServed(item.p, solo); // 补出的这一位同样是马上就展示,理由同上
             setGroupState((g) => (g ? { ...g, qs: g.qs.map((x, j) => (j === i ? solo : x)), statuses: g.statuses.map((s, j) => (j === i ? "idle" : s)) } : g));
           })
           .catch(() => {
@@ -4435,7 +4579,13 @@ function AppInner() {
     try {
       // 避重清单和题型轮换都从 db 取(见 seenTasksOf/pickQType),和批量出题走同一套,
       // 不再用只存内存、刷新就丢的 recentTasks
-      const question = await genQuestion(p, seenTasksOf(db, p.id), forceType || pickQType(db, p.id));
+      const type = forceType || pickQType(db, p.id);
+      // 现场出题这条路也先问一遍题库:预取扑空(整批失败/AI 少给一条)时会走到这里,
+      // 而那正是最该省一次调用、也最该少让人等一会儿的时候
+      await ensureBank([p.id]);
+      const banked = takeFromBank(p, type);
+      if (banked) { setQ(banked); setPhase("question"); return; }
+      const question = await genQuestion(p, seenTasksOf(db, p.id), type);
       setQ(question); setPhase("question");
     } catch (e) {
       setErrMsg("出题失败:" + (e && e.message ? e.message : String(e))); setPhase("error");
@@ -4525,6 +4675,12 @@ function AppInner() {
     const bkey = "backlog" + key[0].toUpperCase() + key.slice(1);
     setSessionStats((s) => ({ ...s, [key]: s[key] + 1, ...(cHw && item.fromBacklog ? { [bkey]: (s[bkey] || 0) + 1 } : {}) }));
     const needsReview = g.verdict === "correct" && g.selfCheck === false;
+    /* 把判卷给的参考答案抄回题库。出题那一步 AI 只给题面、不给答案,参考答案是判卷才
+       产生的——所以这是零额外成本地把题库里的条目补完整,也是以后"额度用完只对答案自查"
+       那种模式的原料。只在库里原来为空时写(见 questionBank.js 的 setReference)。 */
+    if (window.qbank && item && item.p && cq && cq.task && !cq.jpTask && QBANK_TYPES.includes(cq.type) && g.reference) {
+      try { Promise.resolve(window.qbank.setReference(item.p.id, cq.task, g.reference)).catch(() => {}); } catch { /* 不影响判卷 */ }
+    }
     // 注意:新句型组/顽固特训组不会走到这里——它们的判卷是 submitGroupAnswer,
     // 结账是 finishGroup/finalizeNewPatternGroup/finalizeStubbornGroup,不经过 applyResult
     setDb((d) => {
@@ -6944,6 +7100,23 @@ function AppInner() {
                   超出上限的到期句型会顺延到之后,不会消失。进入 N3/N2 之后句子变长、单题更费时,
                   可以把这个数字调低。
                 </div>
+
+                {/* 题库:能肉眼确认它真的在攒东西。只读,不给清空按钮——
+                    攒了几个月的东西不该有一个一点就没的按钮杵在这儿。 */}
+                {qbankStats && qbankStats !== "none" && (
+                  <section className="backup-section">
+                    <div className="backup-head">题库(出过的题攒下来,隔 {QBANK_COOLDOWN_DAYS} 天以上可以直接复现,不用再花额度出题)</div>
+                    <div className="settings-note">
+                      已积累 <b>{qbankStats.total}</b> 道题,覆盖 <b>{qbankStats.patterns}</b> 个句型,
+                      其中 <b>{qbankStats.withRef}</b> 道已经有参考答案。
+                      {qbankStats.total === 0 && "(刚开始用,做几天题就会攒起来)"}
+                    </div>
+                    <div className="settings-note">
+                      注意:题库存在云端,换设备登录还在,但「导出进度」里<b>不包含</b>题库——
+                      那段文字只备份学习进度。
+                    </div>
+                  </section>
+                )}
 
                 <section className="backup-section">
                   <div className="backup-head">数据备份(跨设备手动搬运,以防云端存储连不上)</div>

@@ -2,6 +2,7 @@ import { createRoot } from "react-dom/client";
 import { useState, useEffect } from "react";
 import { supabase } from "./supabaseClient";
 import { installStoragePolyfill } from "./storagePolyfill";
+import { installQuestionBank } from "./questionBank";
 import App from "./App.jsx";
 
 /* ============ 登录 / 注册 / 找回密码 ============ */
@@ -241,6 +242,9 @@ function Root() {
   if (!session) return <><AuthStyle /><AuthScreen /></>;
 
   installStoragePolyfill(session.user.id);
+  // 题库(question_bank 表)的访问层,和上面那个 polyfill 一样挂在 window 上,
+  // 这样 App.jsx 里不需要认识 Supabase。装不上/查不到只会退化成照常调 AI 出题。
+  installQuestionBank(session.user.id);
   return <App />;
 }
 

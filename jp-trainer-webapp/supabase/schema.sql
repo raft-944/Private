@@ -1,5 +1,10 @@
 -- 句型道場 · 存储表结构
 -- 使用方法:打开你的 Supabase 项目 → 左侧菜单 SQL Editor → 新建查询 → 粘贴整段 → 点 Run
+--
+-- ⚠️ 这份文件改过之后,已经在跑的部署要把整段**重新粘贴执行一遍**(没有自动迁移工具)。
+--    整段都是 create table if not exists / create or replace / drop policy if exists 的写法,
+--    重复执行是安全的,不会动到已有数据。
+--    最近一次新增:question_bank(题库,见文件末尾)。
 
 create table if not exists kv_store (
   user_id uuid references auth.users(id) on delete cascade not null,
@@ -148,3 +153,50 @@ on conflict (user_id) do update set unlimited = true;
 --   select u.email, q.spent_rmb, q.unlimited, q.updated_at
 --   from usage_quota q join auth.users u on u.id = q.user_id
 --   order by q.spent_rmb desc;
+
+-- ============ 题库:把出过的题攒下来,隔久了再复现 ============
+-- 出题是要花 AI 额度的,而且每道题现在都是现出现丢。这张表把生成过的题面攒下来,
+-- 隔够 QBANK_COOLDOWN_DAYS(见 src/App.jsx)之后可以直接复现,不用再调一次 AI。
+--
+-- 为什么单开一张表、不塞进 kv_store 那一行 JSON:整个 db 是一个 blob,每答一题都会
+-- 把它整份重新上传一次(见 src/App.jsx 的存档 effect)。题库是要长期积累的,几千条
+-- 塞进去就是每答一题上传几 MB。这张表按行增量插入,只查今天用得上的那几条。
+--
+-- reference(参考答案)是第一次判卷之后回填的:出题那一步 AI 只给题面、不给答案,
+-- 参考答案是判卷时才产生的,所以从判卷结果里抄一份过来,不额外花钱。
+-- last_served 为 null = 生成了但还没展示过的"存货"(比如首页预热生成、那天没做到的题),
+-- 这类可以立即使用,不受冷却期限制。
+create table if not exists question_bank (
+  id            bigserial primary key,
+  user_id       uuid references auth.users(id) on delete cascade not null,
+  pattern_id    int  not null,   -- PATTERNS 的数组下标,和 db.prog 的 key 是同一套
+  qtype         text not null,   -- translation | composition
+  task          text not null,   -- 中文题面
+  task_segments jsonb,           -- 题面分词(点词查释义用),原样存
+  reference     text,            -- 参考答案,第一次判卷后回填
+  last_served   date,            -- null = 还没展示过
+  serve_count   int  not null default 0,
+  created_at    timestamptz default now()
+);
+
+-- 同一个句型下题面相同就算同一道题:重复生成/重复入库都靠这个唯一索引挡掉
+create unique index if not exists question_bank_uniq on question_bank (user_id, pattern_id, task);
+-- 挑题时的查询形状:where user_id=? and pattern_id in (?) and (last_served is null or last_served<=?)
+create index if not exists question_bank_pick on question_bank (user_id, pattern_id, last_served);
+
+-- RLS 照 kv_store 那四条写就行。这里不需要 invite_codes/usage_quota 那种
+-- SECURITY DEFINER 包装——那两张表要防用户篡改自己的额度,而题库是用户自己的
+-- 学习数据,信任级别和 kv_store 一样,自己改自己的没有任何好处。
+alter table question_bank enable row level security;
+
+drop policy if exists "题库:只能查自己的" on question_bank;
+create policy "题库:只能查自己的" on question_bank for select using (auth.uid() = user_id);
+
+drop policy if exists "题库:只能加自己的" on question_bank;
+create policy "题库:只能加自己的" on question_bank for insert with check (auth.uid() = user_id);
+
+drop policy if exists "题库:只能改自己的" on question_bank;
+create policy "题库:只能改自己的" on question_bank for update using (auth.uid() = user_id);
+
+drop policy if exists "题库:只能删自己的" on question_bank;
+create policy "题库:只能删自己的" on question_bank for delete using (auth.uid() = user_id);

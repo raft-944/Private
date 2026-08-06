@@ -20,6 +20,47 @@
           return { key, value };
         },
       };
+      /* 题库(question_bank)的 localStorage 版,接口和 src/questionBank.js 完全一致。
+         正式环境那份走 Supabase 的行级读写,这里用一个数组模拟,headless 验证才跑得起来。
+         整库存在 e2e:qbank 这一个 key 里(测试数据量小,不用管性能)。 */
+      const QB = "e2e:qbank";
+      const load = () => { try { return JSON.parse(localStorage.getItem(QB) || "[]"); } catch { return []; } };
+      const save = (rows) => localStorage.setItem(QB, JSON.stringify(rows));
+      window.qbank = {
+        async pick(patternIds, cutoff) {
+          return load()
+            .filter((r) => patternIds.includes(r.pattern_id) && (!r.last_served || r.last_served <= cutoff))
+            .sort((a, b) => (a.last_served || "").localeCompare(b.last_served || ""));
+        },
+        async add(entries) {
+          const rows = load();
+          for (const e of entries) {
+            if (rows.some((r) => r.pattern_id === e.pattern_id && r.task === e.task)) continue; // 唯一索引
+            rows.push({ id: rows.length + 1, pattern_id: e.pattern_id, qtype: e.qtype, task: e.task,
+              task_segments: e.task_segments || null, reference: null, last_served: null, serve_count: 0 });
+          }
+          save(rows);
+        },
+        async markServed(patternId, task, date) {
+          const rows = load();
+          const r = rows.find((x) => x.pattern_id === patternId && x.task === task);
+          if (!r) return;
+          r.last_served = date; r.serve_count = (r.serve_count || 0) + 1;
+          save(rows);
+        },
+        async setReference(patternId, task, reference) {
+          const rows = load();
+          const r = rows.find((x) => x.pattern_id === patternId && x.task === task);
+          if (!r || r.reference) return; // 不覆盖已有的
+          r.reference = reference;
+          save(rows);
+        },
+        async stats() {
+          const rows = load();
+          return { total: rows.length, patterns: new Set(rows.map((r) => r.pattern_id)).size,
+            withRef: rows.filter((r) => r.reference).length };
+        },
+      };
       // 直接渲染 App,跳过 Supabase 登录
       const { createRoot } = await import("react-dom/client");
       const { default: App } = await import("/src/App.jsx");

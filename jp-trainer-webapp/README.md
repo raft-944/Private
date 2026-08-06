@@ -36,6 +36,9 @@
 2. 点 **"New Project"**，随便起个名字（比如 `jp-trainer`），数据库密码随便设一个记住就行，地区选离你近的（比如 Singapore）
 3. 等 1~2 分钟项目创建完成后，左侧菜单点 **"SQL Editor"** → **"New query"**
 4. 打开这个项目里的 `supabase/schema.sql` 文件，把里面的内容**整段复制粘贴**进去，点右下角 **"Run"**
+   - ⚠️ **已经部署过的人也要看这一步**：这个文件后来加过东西（免费额度、题库），没有自动迁移工具。
+     每次更新代码之后，回到 SQL Editor 把 `supabase/schema.sql` **整段重新粘贴执行一遍**就行——
+     里面全是 `create table if not exists` / `create or replace` 这类可以重复执行的写法，不会动到已有数据。
    - 看到 "Success. No rows returned" 就说明建表成功了
 5. 左侧菜单 **"Authentication"** → **"Providers"**，确认 **"Email"** 是打开状态（默认就是开的，一般不用改）
 6. 左侧菜单 **"Authentication"** → **"URL Configuration"**，在 **"Redirect URLs"** 里先留空，等第四步部署到 Vercel 拿到网址后再回来填（下面会提醒你）

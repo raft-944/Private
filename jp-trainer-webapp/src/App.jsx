@@ -55,12 +55,34 @@ function computeProgUpdate(existedProg, verdict, outsideOnly, t) {
   if (verdict === "correct" || outsideOnly) { due = addDays(t, INTERVALS[Math.min(lv, INTERVALS.length - 1)]); lv = Math.min(lv + 1, INTERVALS.length); cur.ok++; }
   else if (verdict === "partial") { due = addDays(t, Math.max(1, Math.round(INTERVALS[Math.min(lv, INTERVALS.length - 1)] / 2))); cur.ok++; }
   else { lv = Math.max(0, lv - 2); due = addDays(t, 1); cur.ng++; }
-  if (verdict !== "correct" && !outsideOnly) {
-    cur.missTotal = (cur.missTotal || 0) + 1;
-    // 已经在顽固状态里就不重复判定进入——它的排期已经交给 finalizeStubbornRound 管了
-    if (!cur.stubborn && cur.missTotal > STUBBORN_TRIGGER) cur.stubborn = { phase: "A", clean: 0, due: t };
-  }
+  if (verdict !== "correct" && !outsideOnly) applyMissCount(cur, t);
   return { ...cur, lv, due };
+}
+
+/* 累加 missTotal 并判定要不要进顽固句型特训。「今日学习」(computeProgUpdate)和
+   每日作業/週間チャレンジ(bumpMissOnly)两条路径共用这一份,不在两处各写一遍阈值。 */
+function applyMissCount(cur, t) {
+  cur.missTotal = (cur.missTotal || 0) + 1;
+  // 已经在顽固状态里就不重复判定进入——它的排期已经交给 finalizeStubbornRound 管了
+  if (!cur.stubborn && cur.missTotal > STUBBORN_TRIGGER) cur.stubborn = { phase: "A", clean: 0, due: t };
+}
+
+/* 每日作業/週間チャレンジ 里答错:只累加 missTotal(推动顽固句型特训),不碰 lv/due/ok/ng。
+
+   这两种练习原本整个走 freeMode——prog 一个字段都不更新,于是作业里反复错的句型
+   永远攒不够 STUBBORN_TRIGGER、进不了顽固特训。真实数据里最典型的是「〜し」:
+   错题本里 6 条(全库最多),missTotal 却只有 2、ng 只有 1,所以没进特训;而真正进了
+   特训的那几个,是靠「今日学习」里的错误攒够的。作业占的做题量不小,漏掉这一块
+   等于顽固特训少了一半线索。
+   复习间隔(lv/due)仍然不动:作业是额外练习,不该把 SRS 的排期搞乱——这一条是原来就
+   有意为之的,这次只补上"计数",没有改"排期"。
+   错题本一键练习(drillMode)不走这里:那是在重练已经记下来的错题,再计一次等于同一个
+   弱点被数两遍。 */
+export function bumpMissOnly(existedProg, t) {
+  if (!existedProg) return existedProg; // 还没学过的句型不该凭空造出一条排期记录
+  const cur = { ...existedProg };
+  applyMissCount(cur, t);
+  return cur;
 }
 
 /* 顽固句型特训:一轮 STUBBORN_REPS 题判完后结账。规则比普通错题严格得多——
@@ -349,6 +371,101 @@ function aggregateNewPatternVerdict(results) {
    数才真正移除。所有错题清除逻辑(SRS的重练、練習帳的重练)都共用这一个阈值。 */
 const MISTAKE_CLEAR_STREAK = 3;
 
+/* ---- 错题本的容量与淘汰(2026-08 按真实数据重做) ----
+   起因:用户的错题本长期卡在上限 100 条,而且 100 条里 99 条的 streak 都是 0。
+   把导出的进度拉出来一算,问题不在"装不下",在"进得来、出不去、还悄悄漏":
+   ①入口约 14 条/天(近 6 天 243 题、161 正解),出口是每日作業每天最多 9 个错题题位、
+     而且每条要连续答对 MISTAKE_CLEAR_STREAK 次才移除;
+   ②每日作業是从数组头部顺序取的,而每天 14 条新错题会把头部整个刷新——排到第 10 位
+     以后的错题再也不会被选中,也就永远攒不到 streak(这就是 99% streak=0 的直接原因);
+   ③满了之后从尾部砍,而尾部恰恰是"活得最久 = 一直没被解决"的那批。累计 955 题里
+     338 条非正解,错题本只剩 100 条、其中只有 1 条在往"掌握"走,也就是说约 230 条
+     是被静默删掉的,不是被练会的。
+   所以这三个常量配套下面的 pruneMistakes/sortMistakesForDrill 一起改,单独调大上限
+   解决不了问题(只会让它晚几周再爆,还把存档撑大)。 */
+/* 同一个句型最多留几条错题。真实数据里 10 个句型占了 100 条中的 44 条(〜し 一个就 6 条),
+   而这些反复错的句型多半已经进了顽固句型特训、有人专门管了,错题本再留一堆是纯冗余。 */
+const MISTAKE_PER_PATTERN_MAX = 2;
+/* 错题本总条数上限。比原来的 100 放宽了一些,但真正的容量是靠上面的按句型去重腾出来的。 */
+const MISTAKE_MAX = 150;
+/* 只有最新的这么多条保留 breakdown(那 4 段语法拆解)。整个 db 是一个 JSON blob、
+   每答一题就整份重新上传一次,而 breakdown 是单条错题里最占体积的部分——
+   旧错题你不会回头去读那 4 段,留着只是拖慢每次存盘。去掉之后条数放宽 50% 反而更小。 */
+const MISTAKE_BREAKDOWN_KEEP = 30;
+
+/* 同一个句型的错题归到一组。練習帳(source==="confusion")和読解来的错题没有 pid,
+   不挂钩具体句型,返回 null 表示"不参与按句型去重"。複合作文有两个句型,合起来当一组。 */
+function mistakeGroupKey(m) {
+  if (!m || m.pid === undefined) return null;
+  return m.pid2 === undefined ? String(m.pid) : m.pid + "_" + m.pid2;
+}
+
+/* 错题本写入后统一收口:按句型去重 → 超总量时按"谁最没价值"淘汰 → 旧条目丢掉 breakdown。
+   所有往 db.mistakes 里加东西的地方都必须走这一个函数,不要再各自 slice 一遍
+   (以前六处各写一份 slice(0, 100),改淘汰规则要改六个地方)。 */
+/* 下面三个纯函数 export 出来只为 scripts/mistake-book.mjs 那个验证脚本能调到线上真正在跑的这一份
+   (同 gradeAnswer 的做法),运行时没有任何地方 import 它们,不影响打包体积。 */
+export function pruneMistakes(mistakes, prog) {
+  // ① 按句型去重。同一句型只留最近 MISTAKE_PER_PATTERN_MAX 条,但 streak>0 的优先保住:
+  //    那是马上就能连续答对清掉的,扔了等于前功尽弃。
+  const groups = new Map();
+  const keep = new Set();
+  mistakes.forEach((m, i) => {
+    const key = mistakeGroupKey(m);
+    if (key === null) { keep.add(i); return; }
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(i);
+  });
+  for (const idxs of groups.values()) {
+    // mistakes 本身是新的在前,所以 idxs 已经按从新到旧排好;只把 streak>0 的提到前面
+    const ordered = [...idxs].sort((a, b) => (mistakes[b].streak || 0) - (mistakes[a].streak || 0) || a - b);
+    ordered.slice(0, MISTAKE_PER_PATTERN_MAX).forEach((i) => keep.add(i));
+  }
+  let out = mistakes.filter((_, i) => keep.has(i));
+
+  // ② 还超总量就再砍。先砍"所在句型已经进了顽固特训"的——顽固特训在专门练那个句型,
+  //    错题本里再压一份是重复劳动;这一类砍完还超,才退回按最旧的砍(以前是无条件按最旧砍,
+  //    而最旧的恰恰是活得最久、一直没解决的那批,等于专挑最该留的下手)。
+  if (out.length > MISTAKE_MAX) {
+    const inStubborn = (m) => m.pid !== undefined && prog && prog[m.pid] && prog[m.pid].stubborn;
+    const drop = new Set(
+      out
+        .map((m, i) => ({ m, i }))
+        .sort((a, b) => {
+          const sa = inStubborn(a.m) ? 0 : 1, sb = inStubborn(b.m) ? 0 : 1;
+          if (sa !== sb) return sa - sb; // 顽固特训中的排前面 = 先被砍
+          return b.i - a.i;              // 其次下标大的(最旧的)先被砍
+        })
+        .slice(0, out.length - MISTAKE_MAX)
+        .map((r) => r.i)
+    );
+    out = out.filter((_, i) => !drop.has(i));
+  }
+
+  // ③ 旧错题不再留 breakdown,理由见 MISTAKE_BREAKDOWN_KEEP
+  return out.map((m, i) => (i >= MISTAKE_BREAKDOWN_KEEP && m.breakdown ? { ...m, breakdown: null } : m));
+}
+
+/* 挑错题进每日作業/一键练习时的顺序:最久没被重练过的排最前面。
+
+   以前是直接按数组顺序取前几条,而数组是"最新的在前"、每天又新增十几条错题,
+   头部每天被整个刷新一遍——排到第 10 位以后的错题就再也不会被选中。而 streak 只有
+   在被当作重练选中时才会 +1(见 applyResult 里 item.mistakeId 那个分支),所以那些
+   条目永远攒不到 streak、永远清不掉,最后只能被新错题挤出去。用户导出的进度里
+   100 条错题有 99 条 streak=0,就是这么来的。
+
+   lastPracticed 缺失 = 从来没被重练过,排在所有练过的前面。 */
+export function sortMistakesForDrill(mistakes) {
+  return [...mistakes].sort((a, b) => {
+    const la = a.lastPracticed || "", lb = b.lastPracticed || "";
+    if (la !== lb) return la < lb ? -1 : 1;
+    // 同样久没练的,先练更早记下来的那条——它已经等得最久了
+    const da = a.date || "", dbb = b.date || "";
+    if (da !== dbb) return da < dbb ? -1 : 1;
+    return 0;
+  });
+}
+
 /* 首页学习报告里那条正确率热力图显示最近多少天。放在模块顶层(原来在组件内部)
    是因为下面的使用手册也要引用这个数字,手册不能把它手写死。 */
 const HEATMAP_DAYS = 28;
@@ -426,7 +543,9 @@ const MANUAL_SECTIONS = [
     paras: [
       "答错的题会自动进錯題本,可以随时回去重练。",
       "重练答对一次不会马上移除——要连续答对 " + MISTAKE_CLEAR_STREAK + " 次才算真的掌握、从本子里消失。中间错一次就重新计数。这是为了避免蒙对一次就当学会了。",
-      "錯題本最多保留最近 100 条,超出的旧记录会自动清掉。",
+      "毎日の宿題会自动带上錯題本里的题,挑的是「最久没重练过」的那几条,而不是最新的几条——这样排在后面的旧错题也轮得到,不会一直堆着。",
+      "同一个句型最多留 " + MISTAKE_PER_PATTERN_MAX + " 条错题:同一个句型反复错的话,该做的是顽固句型特训,而不是在本子里堆一长串大同小异的记录。",
+      "錯題本最多保留 " + MISTAKE_MAX + " 条。满了之后先清掉「已经在顽固特训里的句型」的记录(那边正专门练它),而不是无脑清最旧的——最旧的往往正是一直没解决的那些。",
     ],
   },
   {
@@ -3582,7 +3701,9 @@ function AppInner() {
      已经写好的"存在 item.mistakeId 就按错题处理"通用分支,不需要另写一套。 */
   const startMistakeDrill = () => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
-    const items = db.mistakes
+    // 顺序同样按"最久没被重练过的排前面"(见 sortMistakesForDrill):这一批全都会做到,
+    // 但中途退出时至少先做掉了最该练的那几条,而不是又从最新的开始
+    const items = sortMistakesForDrill(db.mistakes)
       .filter((m) => m.source !== "confusion" && PATTERNS[m.pid]) // 練習帳来的错题没有 pid,走它自己的重练入口
       .map((m) => m.pid2 !== undefined
         ? { sub: "combo", p1: PATTERNS[m.pid], p2: PATTERNS[m.pid2], mistakeId: m.id }
@@ -3700,10 +3821,13 @@ function AppInner() {
     const transQuota = hasBacklog ? 3 : 5;
     const slotBudget = compQuota + transQuota;
 
-    // 优先把当前错题混进今天的作业里,做对了会自动从錯題本移除,不用你另外再点一次"闯关"
+    /* 优先把当前错题混进今天的作业里,做对了会自动从錯題本移除,不用你另外再点一次"闯关"。
+       顺序走 sortMistakesForDrill(最久没被重练过的排前面),不能直接按 db.mistakes 的
+       数组顺序取——那是"最新的在前",而每天新增的错题就有十几条,头部每天被整个刷新,
+       排到 slotBudget 之后的错题永远轮不到、永远攒不到 streak、也就永远清不掉。 */
     let compCount = 0, transCount = 0;
     const mistakeItems = [];
-    for (const m of db.mistakes) {
+    for (const m of sortMistakesForDrill(db.mistakes)) {
       if (mistakeItems.length >= slotBudget) break;
       // 練習帳(source==="confusion")来的错题不挂钩具体句型,没有 pid,不能塞进作业题位——
       // 練習帳本来就是"不计入每日/每周任务"的自由练习,这里跳过正是这条规则的体现;
@@ -3764,7 +3888,7 @@ function AppInner() {
             // 这个句型已经在错题本里了就不重复加,保留原有内容
           }
         }
-        nd.mistakes = nd.mistakes.slice(0, 100);
+        nd.mistakes = pruneMistakes(nd.mistakes, nd.prog);
       }
       return nd;
     });
@@ -4301,7 +4425,7 @@ function AppInner() {
         if (pos !== -1) nd.mistakes[pos] = { ...nd.mistakes[pos], ...base };
         else nd.mistakes.unshift({ ...base, id: newId() });
       }
-      nd.mistakes = nd.mistakes.slice(0, 100);
+      nd.mistakes = pruneMistakes(nd.mistakes, nd.prog);
       return nd;
     });
   };
@@ -4331,6 +4455,7 @@ function AppInner() {
     isListening: !!(q && q.type === "listening"),
     freeMode,
     homeworkMode,
+    weeklyMode, // 作业/週間チャレンジ 答错要累加 missTotal(见 applyResult),所以这里也要带上
   });
 
   /* 判卷的实际调用,按题型分流。抽出来是因为 submit 和 giveUp 都要用。 */
@@ -4393,7 +4518,7 @@ function AppInner() {
      用户很可能已经翻到后面几题了,闭包里的 q/answer 早就变成别的题的内容,
      那样错题本会张冠李戴(记下 A 题的题目 + B 题的答案)。 */
   const applyResult = (ctx, g) => {
-    const { item, q: cq, answer: cAnswer, isCombo, isListening, freeMode: cFree, homeworkMode: cHw } = ctx;
+    const { item, q: cq, answer: cAnswer, isCombo, isListening, freeMode: cFree, homeworkMode: cHw, weeklyMode: cWeekly } = ctx;
     const key = g.verdict === "correct" ? "ok" : g.verdict;
     // 每日作业结果页要拆开显示"今日新增/昨日遗留"各自的正确数,不能合并成一个笼统的完成度——
     // item.fromBacklog 是 startHomework 并入积压题时标的,只有作业模式下有意义
@@ -4420,7 +4545,10 @@ function AppInner() {
       const outsideOnly = g.errorScope === "outside" && g.verdict !== "correct";
       if (g.verdict !== "correct" || needsReview) {
         // 答错/需要复核:连续答对计数清零,刷新这条错题的最新内容
-        const base = { task: cq.task, type: cq.type, ans: (cAnswer || "").trim() || "(未作答)", ref: g.reference, exp: g.explanation, breakdown: g.breakdown || null, date: t, needsReview, streak: 0, nonPattern: outsideOnly };
+        /* lastPracticed 记的是"这条错题最近一次被拿出来重练是哪天",给 sortMistakesForDrill
+           排序用。只有真的作为重练做过(item.mistakeId 存在)才更新;新记下来的错题留空,
+           代表"从没被重练过",在挑题时排最前面。 */
+        const base = { task: cq.task, type: cq.type, ans: (cAnswer || "").trim() || "(未作答)", ref: g.reference, exp: g.explanation, breakdown: g.breakdown || null, date: t, needsReview, streak: 0, nonPattern: outsideOnly, ...(item.mistakeId ? { lastPracticed: t } : {}) };
         const idPart = isCombo ? { pid: item.p1.id, pid2: item.p2.id } : { pid: item.p.id };
         if (item.mistakeId) {
           // 重练了还是不对/仍需复核:刷新原来那条记录,而不是再叠加一条新的
@@ -4430,7 +4558,7 @@ function AppInner() {
         } else {
           nd.mistakes.unshift({ ...base, ...idPart, id: newId() });
         }
-        nd.mistakes = nd.mistakes.slice(0, 100);
+        nd.mistakes = pruneMistakes(nd.mistakes, nd.prog);
       } else if (item.mistakeId) {
         // verdict correct 且 selfCheck 通过:累计连续答对次数,蒙对一次不算——
         // 攒够 MISTAKE_CLEAR_STREAK 次才真正判定掌握、从错题本移除
@@ -4438,13 +4566,19 @@ function AppInner() {
         if (pos !== -1) {
           const streak = (nd.mistakes[pos].streak || 0) + 1;
           if (streak >= MISTAKE_CLEAR_STREAK) nd.mistakes = nd.mistakes.filter((m) => m.id !== item.mistakeId);
-          else nd.mistakes[pos] = { ...nd.mistakes[pos], streak };
+          else nd.mistakes[pos] = { ...nd.mistakes[pos], streak, lastPracticed: t };
         }
       }
       // 注意:复合题(combo)的 item 只有 p1/p2、没有 p。目前所有 combo 路径都是 freeMode(不影响排期),
       // 所以走不到这里;但加一道 item.p 的保险,免得将来改动时漏设 freeMode 直接崩掉。
       if (!cFree && item.p) {
         nd.prog[item.p.id] = computeProgUpdate(nd.prog[item.p.id], outsideOnly ? "correct" : g.verdict, outsideOnly, t);
+      } else if (cFree && (cHw || cWeekly) && !item.mistakeId && item.p && g.verdict !== "correct" && !outsideOnly) {
+        /* 每日作業/週間チャレンジ 里新出的题答错:只累加 missTotal 推动顽固句型特训,
+           不动 lv/due(见 bumpMissOnly 的说明)。
+           排除 item.mistakeId 的那些:那是在重练已经记在错题本里的错题,再计一次
+           等于同一个弱点被数两遍;错题本自己的 streak 机制已经在管它们了。 */
+        nd.prog[item.p.id] = bumpMissOnly(nd.prog[item.p.id], t);
       }
       return nd;
     });
@@ -4465,7 +4599,7 @@ function AppInner() {
       if (verdict !== "correct" || anyNeedsReview) {
         const bad = [...results].reverse().find((r) => r.verdict !== "correct" || r.needsReview) || results[results.length - 1];
         nd.mistakes.unshift({ task: bad.q.task, type: bad.q.type, ans: bad.ans || "(未作答)", ref: bad.reference, exp: bad.explanation, breakdown: bad.breakdown, pid: p.id, date: t, needsReview: bad.needsReview, streak: 0 });
-        nd.mistakes = nd.mistakes.slice(0, 100);
+        nd.mistakes = pruneMistakes(nd.mistakes, nd.prog);
       }
       return nd;
     });
@@ -4485,7 +4619,7 @@ function AppInner() {
       if (!allCorrect) {
         const bad = [...results].reverse().find((r) => !repOk(r));
         nd.mistakes.unshift({ task: bad.q.task, type: bad.q.type, ans: bad.ans || "(未作答)", ref: bad.reference, exp: bad.explanation, breakdown: bad.breakdown, pid: p.id, date: t, needsReview: bad.needsReview, streak: 0 });
-        nd.mistakes = nd.mistakes.slice(0, 100);
+        nd.mistakes = pruneMistakes(nd.mistakes, nd.prog);
       }
       return nd;
     });
@@ -4647,7 +4781,7 @@ function AppInner() {
   const addConfusionMistake = (entry) => {
     setDb((d) => {
       const nd = { ...d, mistakes: [{ ...entry, source: "confusion", date: t, needsReview: false, streak: 0, id: newId() }, ...d.mistakes] };
-      nd.mistakes = nd.mistakes.slice(0, 100);
+      nd.mistakes = pruneMistakes(nd.mistakes, nd.prog);
       return nd;
     });
   };
@@ -4678,12 +4812,12 @@ function AppInner() {
       if (pos === -1) return d;
       const nd = { ...d, mistakes: [...d.mistakes] };
       if (!resolved) {
-        nd.mistakes[pos] = { ...nd.mistakes[pos], ...(refreshEntry || {}), streak: 0 };
+        nd.mistakes[pos] = { ...nd.mistakes[pos], ...(refreshEntry || {}), streak: 0, lastPracticed: t };
         return nd;
       }
       const streak = (nd.mistakes[pos].streak || 0) + 1;
       if (streak >= MISTAKE_CLEAR_STREAK) nd.mistakes = nd.mistakes.filter((m) => m.id !== mistakeId);
-      else nd.mistakes[pos] = { ...nd.mistakes[pos], streak };
+      else nd.mistakes[pos] = { ...nd.mistakes[pos], streak, lastPracticed: t };
       return nd;
     });
   };
@@ -4991,7 +5125,7 @@ function AppInner() {
     setDb((d) => ({
       ...d,
       [statsKey]: { total: d[statsKey].total + 1, ok: d[statsKey].ok + (correct ? 1 : 0) },
-      mistakes: correct ? d.mistakes : [{
+      mistakes: correct ? d.mistakes : pruneMistakes([{
         id: newId(),
         source: isGrammar ? "grammarChoice" : "reading",
         ...(isGrammar ? { pid: item.p.id } : { label: "読解" }),
@@ -5000,7 +5134,7 @@ function AppInner() {
         ref: item.options[item.answerIndex],
         exp: item.explanation,
         date: today(), needsReview: false, streak: 0,
-      }, ...d.mistakes].slice(0, 100),
+      }, ...d.mistakes], d.prog),
     }));
   };
 

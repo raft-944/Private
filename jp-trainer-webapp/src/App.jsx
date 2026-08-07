@@ -1843,7 +1843,7 @@ ${candList}
 }
 
 /* 导出只为 scripts/grade-regression.mjs 那个判卷回归测试用:测试脚本必须调到线上
-   真正在跑的这一份(连同下面的 reconcileGradeReference / secondOpinionOnWrong 一起),
+   真正在跑的这一份(连同下面的 reconcileGradeReference / secondOpinion 一起),
    而不是在脚本里另抄一份提示词——抄一份就会和这里各走各的,测过也不作数。
    运行时没有任何地方 import 它,加个 export 不影响打包体积。 */
 export async function gradeAnswer(p, q, answer, hintedWords) {
@@ -1891,29 +1891,49 @@ verdict 是 "correct" 时,breakdown 设为 null。
   // 先兜"参考答案==学生答案却没判对"这种自相矛盾(可能把 verdict 改成 correct),
   // 再归一化 errorScope——顺序不能反,否则改完 verdict 后 errorScope 还停在旧值上
   g = reconcileGradeReference(g, answer);
-  g = await secondOpinionOnWrong(p, q, answer, g);
+  g = await secondOpinion(p, q, answer, g);
   g.errorScope = normalizeErrorScope(g.errorScope, g.verdict);
   if (!g.breakdown || typeof g.breakdown !== "object") g.breakdown = null;
   return g;
 }
 
-/* 判了 "wrong" 时的二次核验。判 wrong 的代价比另外两档都大——复习间隔直接砍回最短、
-   计进 missTotal(攒够就进顽固特训)、还会挫伤积极性,所以只有这一档值得多花一次调用去核。
+/* 二次核验:两个方向各触发一次,都换 pro 模型独立重判。
+
+   ①**判太严**(verdict === "wrong"):判 wrong 的代价比另外两档都大——复习间隔直接砍回
+     最短、计进 missTotal(攒够就进顽固特训)、还会挫伤积极性。
+   ②**判太松**(verdict === "correct" 但 selfCheck === false):这是 2026-08 补上的另一半。
+     以前只核 wrong,等于防线只挡"判太严",完全不挡"判太松"——而实际遇到的两次问题
+     (「入るの放送」的多余「の」被讲评说成"名词化可以接受"、「どのかい」被判正解却在
+     讲评里当错处讲)恰恰都是判太松,pro 从头到尾没参与过。
+     selfCheck=false 本身已经是"判定和讲评/参考答案对不上"的信号(见 reconcileGradeReference),
+     只是它没有纠错能力、只能标记;现在让它顺带触发一次独立复核,这个方向第一次有了纠正手段。
+     不对所有 correct 都复核:那等于每题都翻倍花钱,而绝大多数 correct 是干净的。
 
    做法照搬文法选择题那套(verifyGrammarChoiceAnswers):**不告诉复核方第一次判了什么**,
    只给句型+题目+学生答案,让它从一个普通阅卷人的视角重新判一遍。告诉它"上一次判了wrong"
    会产生锚定,复核就变成了附和,起不到交叉检查的作用。用 pro 而不是 flash 也是同理:
    同一个模型很容易把第一次的偏差原样复现一遍。
 
-   两次判定不一致时,取**较宽松**的那个,并标记 selfCheck=false 留在错题本等人工复核。
-   取宽松侧是有意的:两个阅卷人有分歧,说明这道题至少存在"可以判对"的读法,这种情况下
-   按错的判会实打实地惩罚一个可能没错的答案(缩短间隔+计入顽固),而按宽松判的代价只是
-   少扣一次分、并且它照样留在错题本里等你复核——两边的代价不对等。
+   两次判定不一致时怎么取,两个方向的规则不一样,因为代价不对等:
+   - 判太严那侧取**较宽松**的:两个阅卷人有分歧说明至少存在"可以判对"的读法,按错的判会
+     实打实惩罚一个可能没错的答案,而按宽松判的代价只是少扣一次分、它照样留在错题本等复核。
+   - 判太松那侧取**较严**的,但**封顶到 partial**:第一位判了 correct、第二位判 wrong,
+     两者差两档,直接按 wrong 计分(间隔砍回最短+计 missTotal)对一个至少有一位阅卷人认为
+     正确的答案太重。partial 是"间隔减半+计 missTotal+留在错题本",惩罚强度和证据强度匹配。
+   两边都不会把 correct 直接判成 wrong,也不会把 wrong 直接判成 correct 而不留痕迹。
 
    核验本身失败(网络抖动/格式不对)一律沿用原判,不能因为这个附加环节掉链子就影响判卷。 */
 const VERDICT_RANK = { wrong: 0, partial: 1, correct: 2 };
-async function secondOpinionOnWrong(p, q, answer, g) {
-  if (!g || g.verdict !== "wrong" || !answer) return g;
+/* 这次判卷要不要复核,以及是哪个方向。返回 null 表示不用复核。 */
+function secondOpinionDirection(g) {
+  if (!g) return null;
+  if (g.verdict === "wrong") return "strict"; // 判太严
+  if (g.verdict === "correct" && g.selfCheck === false) return "loose"; // 判太松(自查已经起疑)
+  return null;
+}
+async function secondOpinion(p, q, answer, g) {
+  const dir = secondOpinionDirection(g);
+  if (!dir || !answer) return g;
   const sys = `你是一位日语老师,正在独立批改一道练习题。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名/单词/例句,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `请独立判断下面这道题学生答得怎么样。
 句型: ${p.pattern}(${p.conn} / ${p.meaning})
@@ -1936,12 +1956,30 @@ ${GRADING_FAIRNESS_RULE}
     return g; // 核验这一步自己失败,不牵连原判
   }
   const v = second && second.verdict;
-  if (!VERDICT_RANK.hasOwnProperty(v) || v === "wrong") return g; // 复核也认为 wrong,原判成立
+  if (!VERDICT_RANK.hasOwnProperty(v)) return g; // 复核没给出能用的判定,原判成立
+  const label = (x) => (x === "correct" ? "正解" : x === "partial" ? "接近" : "再来");
+  const note = (text) => `${g.explanation}\n\n【复核】${text}`;
+
+  if (dir === "strict") {
+    if (v === "wrong") return g; // 复核也认为 wrong,原判成立
+    return {
+      ...g,
+      verdict: v,
+      selfCheck: false, // 两位"阅卷人"有分歧 → 留在错题本标"建议复核"
+      explanation: note(`另一次独立判卷认为这道题应判「${label(v)}」:${second.reason || "(未说明理由)"}。两次判定不一致,已按较宽松的一次计分,并把这道题留在错题本里等你自己确认。`),
+    };
+  }
+  // dir === "loose":原判 correct 且自查起疑
+  if (v === "correct") {
+    // 独立复核也认为没问题。标记不撤(参考答案改字这类问题复核只看判定、看不到)——
+    // 但把这句写进讲评,你扫一眼就能放心地点"确认无误"
+    return { ...g, explanation: note(`另一次独立判卷也认为这句没问题(${second.reason || "未说明理由"})。判定本身应该是对的,上面的提示多半只是讲评措辞偏重。`) };
+  }
   return {
     ...g,
-    verdict: v,
-    selfCheck: false, // 两位"阅卷人"有分歧 → 留在错题本标"建议复核"
-    explanation: `${g.explanation}\n\n【复核】另一次独立判卷认为这道题应判「${v === "correct" ? "正解" : "接近"}」:${second.reason || "(未说明理由)"}。两次判定不一致,已按较宽松的一次计分,并把这道题留在错题本里等你自己确认。`,
+    verdict: "partial", // 封顶到 partial,不直接按复核的 wrong 计分
+    selfCheck: false,
+    explanation: note(`另一次独立判卷认为这道题应判「${label(v)}」:${second.reason || "(未说明理由)"}。第一次判的是「正解」,两次不一致,已按「接近」计分(取两者之间,不直接按较严的算),这道题留在错题本里等你自己确认。`),
   };
 }
 

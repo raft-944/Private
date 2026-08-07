@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test:grading": "node scripts/grade-regression.mjs",
     "test:mistakes": "node scripts/mistake-book.mjs",
-    "test:qbank": "node scripts/question-bank.mjs"
+    "test:qbank": "node scripts/question-bank.mjs",
+    "test:secondopinion": "node scripts/second-opinion.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

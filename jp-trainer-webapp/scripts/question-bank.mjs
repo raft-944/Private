@@ -26,7 +26,7 @@ for (let i = 0; i < 40; i++) {
   await new Promise((r) => setTimeout(r, 500));
 }
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || process.env.PLAYWRIGHT_CHROMIUM_PATH || undefined });
 
 /* 开一个页面:seed 是往 localStorage 里塞的初始数据,返回 page 和一个出题调用计数器。
    /api/generate 的请求体里带 system/user,出题和判卷靠 user 里的关键词区分。 */

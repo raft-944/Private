@@ -34,7 +34,7 @@ for (let i = 0; i < 40; i++) {
   await new Promise((r) => setTimeout(r, 500));
 }
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || process.env.PLAYWRIGHT_CHROMIUM_PATH || undefined });
 
 /* first  = 第一次判卷(flash)返回的 JSON 对象
    second = 二次复核(pro)返回的 {verdict, reason};传 null 表示复核调用直接失败

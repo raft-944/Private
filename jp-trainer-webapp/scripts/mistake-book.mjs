@@ -84,7 +84,7 @@ for (let i = 0; i < 40; i++) {
   await new Promise((r) => setTimeout(r, 500));
 }
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || process.env.PLAYWRIGHT_CHROMIUM_PATH || undefined });
 const page = await browser.newPage();
 page.on("pageerror", (e) => console.log("PAGEERROR:", e.message));
 await page.goto(`http://localhost:${PORT}/__mistake-book-harness.html`);

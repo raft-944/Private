@@ -205,7 +205,9 @@ function ensureEnv() {
    playwright 自己就知道去哪儿找,不用指定路径。只有在某些预装了浏览器的容器/CI 环境里
    才需要靠 PLAYWRIGHT_CHROMIUM_PATH 指过去。所以这里默认什么都不传。 */
 function launchOptions() {
-  const p = process.env.PLAYWRIGHT_CHROMIUM_PATH;
+  // 两个名字都认:早先只认 PLAYWRIGHT_CHROMIUM_PATH,后加的三个脚本用的是 CHROMIUM_PATH,
+  // 留两套名字迟早会有人按其中一个设了却不生效
+  const p = process.env.PLAYWRIGHT_CHROMIUM_PATH || process.env.CHROMIUM_PATH;
   return p && fs.existsSync(p) ? { executablePath: p } : {};
 }
 

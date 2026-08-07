@@ -5530,10 +5530,16 @@ function AppInner() {
       <div key={gi} className={"result-item ri-" + r.verdict + (full ? "" : " ri-collapsed")}>
         <div className="result-item-head">
           第 {gi + 1} 题
-          {/* 答错的题(且能定位到单个句型——combo 题挂着两个句型,标"顽固"该标哪个不明确,
-             那种情况下退回原来的"✗ 再来"标签):把原来纯展示的"✗ 再来"换成一个可点的
-             标记按钮,不用再回首页找到这个句型、也不用等 missTotal 自然攒够次数才能标顽固。 */}
-          {r.verdict === "wrong" && c.item && c.item.p ? (
+          {/* 判定徽章永远显示。以前"标记顽固"按钮是把"✗ 再来"顶掉的,于是判错的题反而看不到
+             自己的判定;现在两个并排,判定和操作各归各的。 */}
+          <span className={"result-item-verdict rv-" + r.verdict}>
+            {r.verdict === "correct" ? "◎ 正解" : r.verdict === "partial" ? "△ 接近" : "✗ 再来"}
+          </span>
+          {/* 只要没判正解就给"标记顽固"的入口,不再限定 wrong——partial 在
+             computeProgUpdate 里同样会累加 missTotal、同样会自然攒到 STUBBORN_TRIGGER
+             触发特训,那没道理只有它不能手动标。
+             combo 题挂着两个句型(只有 p1/p2、没有 p),标哪个不明确,所以不给按钮。 */}
+          {r.verdict !== "correct" && c.item && c.item.p && (
             db.prog[c.item.p.id] && db.prog[c.item.p.id].stubborn ? (
               <span className="result-item-verdict rv-wrong">🔥 已标记顽固</span>
             ) : (
@@ -5541,10 +5547,6 @@ function AppInner() {
                 🔥 标记顽固
               </button>
             )
-          ) : (
-            <span className={"result-item-verdict rv-" + r.verdict}>
-              {r.verdict === "correct" ? "◎ 正解" : r.verdict === "partial" ? "△ 接近" : "✗ 再来"}
-            </span>
           )}
         </div>
         <div className="result-item-q serif">{c.isListening ? "🎧 " + (c.q.jp || "") : c.q.task}</div>
@@ -7727,11 +7729,14 @@ html,body{overflow-x:hidden}
   background:none;border:1px dashed var(--line);border-radius:10px;color:var(--ink-soft);font-size:12px}
 .ri-diff{color:var(--stat-partial);font-weight:700}
 .result-item-head{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-soft);
-  margin:0 0 10px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  margin:0 0 10px;padding-bottom:8px;border-bottom:1px solid var(--line);flex-wrap:wrap;row-gap:6px}
 /* 判定改成右对齐的实心徽章,比原来紧跟题号的一行小字显眼得多。
    边框用 currentColor,配色跟着下面的 rv-* 走,浅色/深色模式都不用另写一套。 */
 .result-item-verdict{margin-left:auto;font-weight:700;font-size:12px;letter-spacing:1px;
   padding:3px 10px;border-radius:999px;background:var(--card);border:1px solid currentColor}
+/* 判定徽章后面还跟着"标记顽固"时,只让第一个吃掉左边的空白,两个徽章之间保持 gap 的
+   间距贴在一起;不写这条的话两个都带 margin-left:auto,空白会被平分、中间裂一道缝 */
+.result-item-verdict + .result-item-verdict{margin-left:0}
 .rv-correct{color:var(--tint-green-fg)}
 .rv-partial{color:var(--stat-partial)}
 .rv-wrong{color:var(--shu)}

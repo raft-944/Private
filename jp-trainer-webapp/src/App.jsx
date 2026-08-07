@@ -1282,15 +1282,49 @@ const TASK_SEGMENTS_FIELD = `"taskSegments":["中文题面按查词单位切分�
    更管用,AI 对"适度"的理解一次一个样。 */
 const TASK_SEGMENTS_RULE = `taskSegments 是必须给的字段,不能省略、不能给空数组:把 task 这句中文按适合点查的自然单位切分好——通常是一个词或一个固定搭配,不用切到单字,但每一段最多不超过约6个汉字,不能把大半句话、更不能把一整个分句当成一段(这会导致点开一个片段却弹出一整句话的翻译,界面会溢出、盖住旁边的文字)。切分片段按顺序拼接起来必须和 task 原文一字不差,不能有遗漏、增补或改动。`;
 
-/* 纯前端的粗糙中文分词,不调AI、瞬间出结果——只在AI漏给 taskSegments 时兜底用,
-   按标点断句,句内简单按两字一组切(不追求语言学意义上的准确,只求有得点)。 */
+const SEG_PUNCT_RE = /^[，。？！、,.!?()（）「」『』：;；…—\s]+$/;
+const SEG_SPLIT_RE = /([，。？！、,.!?()（）「」『』：;；…—\s]+)/;
+
+/* 把一段没有标点的长中文切开。以前是无脑每 2 个字一刀,「图书馆」会被切成「图书」+「馆」,
+   点哪一半都查不出这个词——这正是"某些分词分的不对"最扎眼的来源。
+   现在优先在虚词边界下刀:结构助词/时态助词(的了着过等)**后面**断开,
+   介词/副词/否定词(在把被从对给不没很就都还等)**前面**断开。
+   这不是语言学意义上的分词,但比 2 字硬切靠谱得多,而且完全不用调 AI、瞬间出结果。
+   切完仍然超长的才退回 2 字硬切保底,保证点一个片段绝不会查出大半句话。 */
+const TASK_SEGMENT_MAX_LEN = 6;
+const SEG_BREAK_AFTER = "的了着过吗呢吧";
+const SEG_BREAK_BEFORE = "在把被从对给向为比和跟同不没很太最就都还也又再更别请让使";
+function splitChineseChunk(text, maxLen) {
+  const pieces = [];
+  let buf = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+    // 虚词前面断:先把攒着的内容收掉,虚词本身留给下一段开头
+    if (buf && SEG_BREAK_BEFORE.includes(ch)) { pieces.push(buf); buf = ""; }
+    buf += ch;
+    // 虚词后面断:助词跟着前面的词走,断在它后头
+    if (SEG_BREAK_AFTER.includes(ch) && next) { pieces.push(buf); buf = ""; }
+  }
+  if (buf) pieces.push(buf);
+  // 还有超长的(整段没虚词,比如一串专有名词)才动 2 字硬切
+  const out = [];
+  for (const p of pieces) {
+    if (p.length <= maxLen) { out.push(p); continue; }
+    for (let i = 0; i < p.length; i += 2) out.push(p.slice(i, i + 2));
+  }
+  return out;
+}
+
+/* 纯前端的粗糙中文分词,不调AI、瞬间出结果——只在AI漏给 taskSegments 时兜底用。
+   按标点断句,句内交给 splitChineseChunk。不追求语言学意义上的准确,只求有得点。 */
 function naiveSegmentChinese(text) {
   if (!text) return [];
-  const parts = text.split(/([，。？！、,.!?()（）「」『』\s]+)/).filter(Boolean);
+  const parts = text.split(SEG_SPLIT_RE).filter(Boolean);
   const segments = [];
   for (const part of parts) {
-    if (/^[，。？！、,.!?()（）「」『』\s]+$/.test(part)) { segments.push(part); continue; }
-    for (let i = 0; i < part.length; i += 2) segments.push(part.slice(i, i + 2));
+    if (SEG_PUNCT_RE.test(part)) { segments.push(part); continue; }
+    segments.push(...splitChineseChunk(part, TASK_SEGMENT_MAX_LEN));
   }
   return segments;
 }
@@ -1298,28 +1332,53 @@ function naiveSegmentChinese(text) {
 /* AI 给的 taskSegments 有时不遵守"每段不超过约6个汉字"这条规则,把大半句甚至一整个
    分句都当成一段——表现出来就是点开一个"词"却弹出一整句话的翻译。光靠提示词说服
    不够可靠(这条规则已经在提示词里写了,AI 还是偶尔会违反),所以在真正拿去渲染前
-   再做一遍强制兜底:超过上限的段落按 naiveSegmentChinese 同样的 2 字一组粗切,
-   不管 AI 给没给、给的准不准,界面上点一个片段最多只会查到几个字,不会查出大半句。 */
-const TASK_SEGMENT_MAX_LEN = 6;
+   再做一遍强制兜底,保证界面上点一个片段最多只会查到几个字。 */
 function capSegmentLength(segments) {
-  const isPunct = (s) => /^[，。？！、,.!?()（）「」『』\s]+$/.test(s);
   const out = [];
   for (const seg of segments) {
-    if (isPunct(seg) || seg.length <= TASK_SEGMENT_MAX_LEN) { out.push(seg); continue; }
-    for (let i = 0; i < seg.length; i += 2) out.push(seg.slice(i, i + 2));
+    if (SEG_PUNCT_RE.test(seg) || seg.length <= TASK_SEGMENT_MAX_LEN) { out.push(seg); continue; }
+    out.push(...splitChineseChunk(seg, TASK_SEGMENT_MAX_LEN));
   }
   return out;
 }
 
-/* 题面要用的分词。题面是照着分词结果渲染的(见 ChineseTaskText),所以分词拼起来必须
-   和题面原文一字不差,否则显示出来的题目就不是真正的题目了——AI 实测会漏字漏标点
-   (把"怎么样?是什么样的店?"两个问号吃掉),用户就会按残缺的题意作答,判卷时才发现
-   题目还有后半句。拼不回去就退回本地分词(本地分词是从题面自己切出来的,必然拼得回去)。
-   主线做题和練習帳两条路径都必须走这个函数,不要各自再写一遍取 taskSegments 的逻辑。 */
-function segmentsForTask(task, aiSegments) {
+/* 把 AI 给的分词对齐回题面原文。
+   题面是照着分词结果渲染的(见 ChineseTaskText),所以分词拼起来必须和题面原文一字不差,
+   否则显示出来的题目就不是真正的题目了——AI 实测会漏字漏标点(把"怎么样?是什么样的店?"
+   两个问号吃掉),用户就会按残缺的题意作答,判卷时才发现题目还有后半句。
+
+   原来的做法是"拼不回去就整句丢弃、退回本地分词",但那是**全有全无**的:AI 只吃掉一个
+   问号,整句本来分得好好的词就被换成 2 字硬切,一整句都不能好好点了——用户看到的
+   "分词分的不对"多半是这么来的。现在改成对齐修补:拿游标沿原文走,AI 的片段对得上就用,
+   对不上就把中间那截漏掉的字单独成段补回去,末尾没走完的也补上。好分词全部保住,
+   只在真正出问题的地方打补丁。结果按构造必然拼得回原文,不需要再校验一次。
+   完全对不上的片段(AI 改写了原文)会被跳过,那部分自然并进补回来的段里。 */
+function reconcileSegments(task, aiSegments) {
+  const out = [];
+  let cur = 0;
+  for (const seg of aiSegments) {
+    if (!seg) continue;
+    if (task.startsWith(seg, cur)) { out.push(seg); cur += seg.length; continue; }
+    const at = task.indexOf(seg, cur);
+    if (at < 0) continue;                       // AI 改写过这段,跳过,让它并进下面补的那截
+    out.push(task.slice(cur, at));              // 补回被吃掉的字/标点
+    out.push(seg);
+    cur = at + seg.length;
+  }
+  if (cur < task.length) out.push(task.slice(cur));
+  return out.filter(Boolean);
+}
+
+/* 题面要用的分词。主线做题和練習帳两条路径都必须走这个函数,
+   不要各自再写一遍取 taskSegments 的逻辑。 */
+export function segmentsForTask(task, aiSegments) {
   if (!task) return null;
   const ai = Array.isArray(aiSegments) && aiSegments.length ? aiSegments : null;
-  return capSegmentLength(ai && ai.join("") === task ? ai : naiveSegmentChinese(task));
+  if (!ai) return capSegmentLength(naiveSegmentChinese(task));
+  const merged = reconcileSegments(task, ai);
+  // 对齐后仍然拼不回原文(理论上不会发生),再退回本地分词——它是从题面自己切出来的,必然拼得回去
+  if (merged.join("") !== task) return capSegmentLength(naiveSegmentChinese(task));
+  return capSegmentLength(merged);
 }
 
 /* 点开某个中文词/短语现查的日语说法,按(句子+词)缓存,同一句题面里查过的词不用重复调AI。
@@ -1338,8 +1397,10 @@ function sameJaText(a, b) {
 
 /* v1 → v2:v1 时期缓存下来的点词结果里混着"把目标句型/邻近内容一起翻出来"的泄题条目
    (见下面 translateTaskWord 的说明),那些结果直接从缓存读出来是绕过新兜底的。
-   换个 key 让旧缓存整体作废、重新查一遍,比写迁移逻辑去逐条甄别划算得多。 */
-const WORD_TR_CACHE_KEY = "jp_word_tr_cache_v2";
+   换个 key 让旧缓存整体作废、重新查一遍,比写迁移逻辑去逐条甄别划算得多。
+   v2 → v3:同样的道理。v2 的条目是"提示词里告诉了 AI 这道题考什么句型"那一版产生的,
+   而新版根本不把句型告诉它;旧条目留着就等于让最该被换掉的那批结果继续从缓存里出来。 */
+const WORD_TR_CACHE_KEY = "jp_word_tr_cache_v3";
 function wordTrCacheKey(sentence, word) { return sentence + "" + word; }
 function getCachedWordTr(sentence, word) {
   try {
@@ -1388,33 +1449,50 @@ function patternGrammarFragments(patternStr) {
 
    2026-08 又修了一次更严重的版本:翻译题「早上出门太急,忘了锁门了」(考 〜ちゃった),
    点「锁门」两个字,返回的是「鍵をかけ忘れちゃった」——把隔壁那段的「忘了」也拽了进来,
-   还直接把要考的 ちゃった 给用上了,等于把整道题的答案白送。根因有两个,都在这里修:
-   ①提示词里把目标句型作为"语境"告诉了 AI,却从没说"不许在译文里用这个句型",AI 自然
-     会顺手把它用上——现在改成明确禁止,并要求给辞書形而不是句中的活用形;
-   ②长度兜底 `>14字 且 >原词3倍` 对短词形同虚设:原词「锁门」2个字,泄露出来的 10 个字
-     根本够不到 14 这条线。现在改成 max(6, 原词×3),短词也拦得住。
-   在此之上再加一道语义检查:结果里只要出现目标句型的语法形态就判定为泄露,直接拒绝。 */
-async function translateTaskWord(sentence, word, targetDesc, targetPattern) {
+   还直接把要考的 ちゃった 给用上了,等于把整道题的答案白送。当时的修法是"把目标句型
+   作为语境告诉 AI,同时明令禁止它在译文里使用",外加长度和语法形态两道兜底。
+
+   2026-08 后续:用户反馈"经常点了以后只出一个问号"。`?` 就是这里抛异常的表现。
+   量过之后,两道兜底的责任完全不对等:
+   - 语法形态那道基本是无辜的。按 CLAUDE.md 的规矩做了全库体检(582 条句型 ×
+     句型库例句里切出来的 980 个实词 = 55 万对),只有 0.05% 会被判成泄题
+     (典型误伤:〜たら × 働く「はたらく」、〜から × 分かる「わかる」、〜こと × 言葉
+     「ことば」)。摊到每题几次点击根本不够"经常",**所以这道兜底原样不动**——
+     它拦住一次真泄题的价值,远大于万分之五的误伤。
+   - 真凶是长度那道,而且是它和提示词自己打架:cap = max(6, 中文词长×3),而中文词
+     被切成 2 字就是 6;提示词第 3 条又硬性要求给辞書形。于是「介绍」→「紹介する」,
+     jp 4 字过得去,yomi「しょうかいする」7 字直接超标。同一个 cap 同时卡 jp 和 yomi,
+     可 yomi 是全假名、天然比汉字长一倍。实测两字汉语词译成「〜する」形时
+     **64.1% 会超 cap=6**——而中文两字动词几乎都落在这个形状上。
+     现在 jp 和 yomi 各用各的上限,假名那条按假名的实际长度给
+     (体检里 980 个实词的假名读音 99.7% 在 6 字以内、最长 8 字,所以 10 字起步足够宽)。
+
+   还有一处根上的改动:**提示词里不再告诉 AI 这道题在考什么句型**。原来是先把答案递过去、
+   再叫它别用,这是"别想大象";而查一个词的辞書形本来就不需要知道题目考什么。
+   目标句型现在只留给上面那道形态兜底做校验,不进提示词——不知道答案的模型泄不了答案。
+   代价是少了一点语境,个别多义词可能选得不如以前贴切,拿它换"结构上泄不了题"值得。
+   (`targetDesc` 这个入参也因此一起去掉了,别再传回来。) */
+export async function translateTaskWord(sentence, word, targetPattern) {
   const sys = `あなたは日本語教師です。请给出中文短语在给定语境下最贴切的日语说法和假名读音。只输出JSON,不要输出任何其他文字。重要:JSON字符串内部如果需要引用假名,一律使用「」或中文引号包裹,绝对不能使用英文直引号,否则会破坏JSON格式。`;
   const user = `完整句子: ${sentence}
 要查的词/短语: ${word}
-这道题正在考的语法点: ${targetDesc || "(无)"}
 
 这是一道翻译练习,学习者要自己把整句话译成日语,你只是在帮他查其中一个词的意思。请严格遵守:
 1. 只翻译"要查的词/短语"这一小段文字本身,不要把句子里相邻的其它部分(前后的动词、状语、句尾)也翻进来。
-2. 绝对不能在译文里使用上面"正在考的语法点"那个句型——那正是学习者要自己想出来的部分,提前给出来这道题就废了。给这个词本身的说法就行。
-3. 动词/形容词一律给辞書形(基本形),不要给て形、た形、ます形等句子里实际会用到的活用形——怎么变形是学习者要练的。
-4. 不要补充原文里没有的开场白、语气词、寒暄语,不要扩写成一句完整的自然对话。
+2. 动词/形容词一律给辞書形(基本形),不要给て形、た形、ます形等句子里实际会用到的活用形——怎么变形是学习者要练的。
+3. 不要补充原文里没有的开场白、语气词、寒暄语,不要扩写成一句完整的自然对话。
 输出JSON: {"jp":"这个词/短语本身最贴切的日语说法(汉字/假名都可以,长度应与原词大致相当)","yomi":"这个说法对应的假名读音;如果jp本来就是纯假名,yomi和jp写一样的就行"}`;
   const r = await callAI(sys, user, 400);
   if (!r.jp) throw new Error("bad word translation");
   const yomi = r.yomi || r.jp;
 
-  // 兜底一:长度。提示词说了也不保证每次都听话,结果明显长过原词就大概率是把邻近内容
-  // 或整句答案搭了进来。这种情况宁可不给提示,也不能把答案糊到界面上
-  // (rt 没有宽度限制,超长内容还会视觉溢出盖住旁边的字)。
-  const lenCap = Math.max(6, word.length * 3);
-  if (r.jp.length > lenCap || yomi.length > lenCap) {
+  // 兜底一:长度。结果明显长过原词就大概率是把邻近内容或整句答案搭了进来,
+  // 这种情况宁可不给提示,也不能把答案糊到界面上(rt 没有宽度限制,超长内容
+  // 还会视觉溢出盖住旁边的字)。jp 和 yomi 必须分开卡,理由见上面那段注释:
+  // 同一个词的假名读音比汉字写法长得多,拿汉字的尺子量假名会把正确答案毙掉。
+  const jpCap = Math.max(6, word.length * 3);
+  const yomiCap = Math.max(10, word.length * 4);
+  if (r.jp.length > jpCap || yomi.length > yomiCap) {
     throw new Error("word translation too long, likely echoed neighbouring text");
   }
   // 兜底二:语义。结果里出现了正在考的句型形态,说明答案被提前泄出来了,一律拒绝。
@@ -2415,7 +2493,7 @@ function WordHintText({ text, words, onHintWord, className }) {
    光给汉字对学习者没有新信息,真正有用的是"这个词读作什么"。只有读音和写法不同
    (说明这个词用了别的汉字/假名)时,才把写法也带上,格式"よみ(漢字)"。
    segments 为空(还没到位)时原样显示纯文本。 */
-function ChineseTaskText({ text, segments, sentence, targetDesc, targetPattern, onReveal, className }) {
+function ChineseTaskText({ text, segments, sentence, targetPattern, onReveal, className }) {
   const [entries, setEntries] = useState({}); // i -> {status:"loading"|"shown"|"hidden", jp, yomi}
   /* 兜底:题面是照着 segments 渲染的,所以 segments 拼起来必须和原题面一字不差,
      否则显示出来的题目就不是真正的题目了(漏字/漏标点都会让人按错的题意作答,
@@ -2441,7 +2519,7 @@ function ChineseTaskText({ text, segments, sentence, targetDesc, targetPattern, 
       return;
     }
     setEntries((s) => ({ ...s, [i]: { status: "loading" } }));
-    translateTaskWord(sentence, surface, targetDesc, targetPattern)
+    translateTaskWord(sentence, surface, targetPattern)
       .then((tr) => {
         setCachedWordTr(sentence, surface, tr);
         setEntries((s) => ({ ...s, [i]: { status: "shown", ...tr } }));
@@ -3048,15 +3126,12 @@ function AppInner() {
 
   /* 翻译/造句/複合作文题的中文题面逐词点查:分词(taskSegments)出题时已经跟着题目
      一起到位了,不用等;AI这次漏给分词时用 naiveSegmentChinese 现切,同样不用等AI。
-     真正的日语翻译是点开某个词才现查(见 ChineseTaskText),这里只负责把"分词结果"和
-     "这道题的语法点描述"这两样准备好交给渲染,不需要单独的 state/effect。 */
+     真正的日语翻译是点开某个词才现查(见 ChineseTaskText),这里只负责把分词结果
+     准备好交给渲染,不需要单独的 state/effect。 */
   const taskSegmentsFor = (question) => {
     if (!question || question.type === "listening" || question.jpTask || !question.task) return null;
     return segmentsForTask(question.task, question.taskSegments);
   };
-  const taskTargetDescFor = (item) => item && item.p ? `${item.p.pattern}(${item.p.conn} / ${item.p.meaning})`
-    : item && item.p1 ? `${item.p1.pattern}(${item.p1.meaning}) + ${item.p2.pattern}(${item.p2.meaning})`
-    : "";
   /* 点词提示的"不许泄露"检查要用的原始 pattern 字段(不带 conn/meaning 那些说明文字,
      那些是中文,拿去和日语结果做包含匹配没有意义)。複合作文一次考两个句型,两个都要防。 */
   const taskTargetPatternFor = (item) => item && item.p ? item.p.pattern
@@ -6087,7 +6162,7 @@ function AppInner() {
                       ) : (
                         <>
                           <div className={"q-task serif" + (gq.jpTask ? " q-task-instr" : "")}>
-                            <ChineseTaskText key={i + ":" + gq.task} text={gq.task} segments={taskSegmentsFor(gq)} sentence={gq.task} targetDesc={taskTargetDescFor({ p: groupState.p })} targetPattern={taskTargetPatternFor({ p: groupState.p })} onReveal={markHinted} />
+                            <ChineseTaskText key={i + ":" + gq.task} text={gq.task} segments={taskSegmentsFor(gq)} sentence={gq.task} targetPattern={taskTargetPatternFor({ p: groupState.p })} onReveal={markHinted} />
                           </div>
                           <textarea
                             className="answer-box serif"
@@ -6223,7 +6298,7 @@ function AppInner() {
                      哪怕两题词数不同也一样(表现就是上一题的提示还留在界面上没消失)。
                      用 idx+task 而不是只用 idx:同一题号上"重试"重新出的题,内容也变了,
                      同样需要清空。 */}
-                  <ChineseTaskText key={idx + ":" + q.task} text={q.task} segments={taskSegmentsFor(q)} sentence={q.task} targetDesc={taskTargetDescFor(cur)} targetPattern={taskTargetPatternFor(cur)} onReveal={markHinted} />
+                  <ChineseTaskText key={idx + ":" + q.task} text={q.task} segments={taskSegmentsFor(q)} sentence={q.task} targetPattern={taskTargetPatternFor(cur)} onReveal={markHinted} />
                 </div>
               )}
 
@@ -6711,7 +6786,6 @@ function AppInner() {
                   text={cfQuiz.questions[cfQuizIdx].task}
                   segments={segmentsForTask(cfQuiz.questions[cfQuizIdx].task, cfQuiz.questions[cfQuizIdx].taskSegments)}
                   sentence={cfQuiz.questions[cfQuizIdx].task}
-                  targetDesc={`${cfQuiz.items[cfQuizIdx].head}(${cfQuiz.items[cfQuizIdx].sub}): ${cfQuiz.items[cfQuizIdx].note}`}
                   // 練習帳的知识辨析没有句型库那种 pattern 字段,考点写在 head/sub 里
                   // (比如「〜たら / 〜ば」),同样拿去防泄露
                   targetPattern={`${cfQuiz.items[cfQuizIdx].head}／${cfQuiz.items[cfQuizIdx].sub}`}

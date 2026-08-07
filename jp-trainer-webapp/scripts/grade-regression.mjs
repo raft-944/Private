@@ -288,20 +288,36 @@ async function main() {
       results.push({ name: c.name, run, fail, g });
       const tag = fail ? "✗ FAIL" : "✓ pass";
       console.log(`${tag}  ${c.name}${REPEAT > 1 ? ` (第${run}次)` : ""}`);
-      if (fail) {
-        console.log(`        原因: ${fail}`);
-        if (g) {
-          console.log(`        verdict=${g.verdict} errorScope=${g.errorScope} selfCheck=${g.selfCheck}`);
-          console.log(`        参考: ${g.reference}`);
-          console.log(`        讲评: ${(g.explanation || "").slice(0, 120)}`);
-        }
-        if (c.note) console.log(`        (用例来历: ${c.note})`);
+      /* 通过的用例也把判卷结果原样打出来。这个脚本是要花钱的(跑一轮约一毛),
+         而且现在每次只在本地手动跑——只在失败时才打详情,等于一次付费运行只换回
+         一行 pass,判卷到底怎么说的、讲评有没有夹带无关内容,全看不见。
+         把讲评一并打出来,一次运行就能同时回答"判得对不对"和"话说得干不干净"。 */
+      if (g) {
+        console.log(`        verdict=${g.verdict} errorScope=${g.errorScope} selfCheck=${g.selfCheck}${g.review ? ` review=${g.review.first}→${g.review.second}` : ""}`);
+        console.log(`        参考: ${g.reference}`);
+        console.log(`        讲评: ${(g.explanation || "").replace(/\s+/g, " ")}`);
       }
+      if (fail) {
+        console.log(`        ✗ 原因: ${fail}`);
+        if (c.note) console.log(`        (用例来历: ${String(c.note).replace(/\s+/g, " ")})`);
+      }
+      console.log("");
     }
   }
 
   const failed = results.filter((r) => r.fail);
   console.log(`\n===== ${results.length - failed.length}/${results.length} 通过,共调用 AI ${calls} 次(约 ¥${(calls * 0.003).toFixed(2)}) =====`);
+
+  /* 顺手统计"讲评里提没提文体"。2026-08 反复出现的噪音就是这一类:题目跟文体毫无关系,
+     讲评却要交代一句"文体统一/虽未用敬体"。规则里已经明令禁止,但那是提示词层面的约束,
+     只有真的跑一轮才知道压没压住——这几行不额外花钱,顺带就统计了。 */
+  const styleWords = /敬体|简体|敬體|簡體|文体|文體/;
+  const mentioned = results.filter((r) => r.g && styleWords.test(r.g.explanation || ""));
+  console.log(`讲评里提到文体的: ${mentioned.length}/${results.length} 条`);
+  if (mentioned.length) {
+    for (const r of mentioned) console.log(`  · ${r.name}`);
+    console.log("  (这些用例本身若不涉及文体混用,就说明「没查出问题就别提文体」那条还没压住)");
+  }
 
   /* 上游整个连不上时,每个用例都会失败,但那不是判卷judgment的问题——单独拎出来说清楚,
      免得看到满屏 FAIL 以为是判卷退化了。 */

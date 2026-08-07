@@ -1957,29 +1957,33 @@ ${GRADING_FAIRNESS_RULE}
   }
   const v = second && second.verdict;
   if (!VERDICT_RANK.hasOwnProperty(v)) return g; // 复核没给出能用的判定,原判成立
-  const label = (x) => (x === "correct" ? "正解" : x === "partial" ? "接近" : "再来");
-  const note = (text) => `${g.explanation}\n\n【复核】${text}`;
+  /* 复核结果写成独立字段,**不要拼进 explanation**。以前是往讲评正文尾巴上接一段
+     "【复核】另一次独立判卷认为…",结果两段话在同一个框里抢注意力,而复核给的理由
+     和初核的讲评讲的往往是同一件事(实际截图里:初核说「開く」该改成「開いている」,
+     复核又原样说了一遍),讲评本该"言简意赅、直指错误"的初衷就没了。
+     拆成 review 字段之后:讲评正文保持干净,复核意见在界面上单独占一小块次要位置,
+     真正有信息量的"判定被改了"反而看得清楚了。
+     first/second 都存下来,界面上才说得清"初核X→复核Y→按Z计分",而不是只剩一个结论。 */
+  const review = { first: g.verdict, second: v, reason: second.reason || "" };
 
   if (dir === "strict") {
-    if (v === "wrong") return g; // 复核也认为 wrong,原判成立
+    if (v === "wrong") return g; // 复核也认为 wrong,原判成立,连 review 都不用留
     return {
       ...g,
       verdict: v,
       selfCheck: false, // 两位"阅卷人"有分歧 → 留在错题本标"建议复核"
-      explanation: note(`另一次独立判卷认为这道题应判「${label(v)}」:${second.reason || "(未说明理由)"}。两次判定不一致,已按较宽松的一次计分,并把这道题留在错题本里等你自己确认。`),
+      review,
     };
   }
-  // dir === "loose":原判 correct 且自查起疑
-  if (v === "correct") {
-    // 独立复核也认为没问题。标记不撤(参考答案改字这类问题复核只看判定、看不到)——
-    // 但把这句写进讲评,你扫一眼就能放心地点"确认无误"
-    return { ...g, explanation: note(`另一次独立判卷也认为这句没问题(${second.reason || "未说明理由"})。判定本身应该是对的,上面的提示多半只是讲评措辞偏重。`) };
-  }
+  // dir === "loose":原判 correct 且自查起疑。
+  // 复核也认为没问题时判定不动(标记不撤——参考答案偷偷改字这类问题复核只看判定、看不到),
+  // 但 review 留着,界面上显示"复核也认为是正解",你扫一眼就能放心点"确认无误"
+  if (v === "correct") return { ...g, review };
   return {
     ...g,
     verdict: "partial", // 封顶到 partial,不直接按复核的 wrong 计分
     selfCheck: false,
-    explanation: note(`另一次独立判卷认为这道题应判「${label(v)}」:${second.reason || "(未说明理由)"}。第一次判的是「正解」,两次不一致,已按「接近」计分(取两者之间,不直接按较严的算),这道题留在错题本里等你自己确认。`),
+    review,
   };
 }
 
@@ -2681,6 +2685,28 @@ function hitSnippet(p, field, q) {
    教材内的句型还能翻课本,教材外的补充句型(ext)就完全没地方学,做题只能靠猜。
    这里把它们显示出来:补充句型给 study 那套教材式讲解(接续/分用法+例句/注意),
    所有句型都显示 explain 和 contrasts。 */
+/* 二次核验的结论。刻意做得比讲评正文轻:一行状态 + 一句理由,不占主视线。
+   真正的信息量在"判定被改成了什么";理由那句往往和上面的讲评重复(两个阅卷人看的是
+   同一个错),所以用更小更淡的字排在后面,扫一眼跳过也不影响理解。 */
+const VERDICT_LABEL = { correct: "正解", partial: "接近", wrong: "再来" };
+function ReviewNote({ review }) {
+  if (!review || !review.first || !review.second) return null;
+  const same = review.first === review.second;
+  // 判太松那侧是封顶到 partial 计分的(见 secondOpinion),"按几分算"不能直接取复核的判定
+  const applied = review.first === "correct" ? "partial" : review.second;
+  return (
+    <div className="review-note">
+      <span className="review-note-tag">复核</span>
+      <span className="review-note-body">
+        {same
+          ? `另一次独立判卷也认为是「${VERDICT_LABEL[review.second]}」`
+          : `初核「${VERDICT_LABEL[review.first]}」· 复核「${VERDICT_LABEL[review.second]}」→ 按「${VERDICT_LABEL[applied]}」计分`}
+        {review.reason ? <span className="review-note-reason">{review.reason}</span> : null}
+      </span>
+    </div>
+  );
+}
+
 function PatternLecture({ p, defaultOpen }) {
   const [open, setOpen] = useState(!!defaultOpen);
   const st = p.study;
@@ -4334,7 +4360,7 @@ function AppInner() {
         if (groupGenRef.current !== myGen) return;
         // 主动"不会写"一律按 wrong 计,不能让 AI 判成"只是句型之外的小错"从而照常拉长复习间隔
         const gr = giveUpText ? { ...gr0, verdict: "wrong", errorScope: "pattern" } : gr0;
-        const rec = { q: cq, ans: ansText, verdict: gr.verdict, errorScope: gr.errorScope, selfCheck: gr.selfCheck, reference: gr.reference, explanation: gr.explanation, breakdown: gr.breakdown || null, needsReview: gr.verdict === "correct" && gr.selfCheck === false };
+        const rec = { q: cq, ans: ansText, verdict: gr.verdict, errorScope: gr.errorScope, selfCheck: gr.selfCheck, reference: gr.reference, explanation: gr.explanation, review: gr.review || null, breakdown: gr.breakdown || null, needsReview: gr.verdict === "correct" && gr.selfCheck === false };
         setGroupState((cur) => (cur ? { ...cur, statuses: cur.statuses.map((s, j) => (j === i ? "done" : s)), results: cur.results.map((r, j) => (j === i ? rec : r)) } : cur));
         // 和普通到期复习同一套记账口径,每道题判完立刻记,不等整组结完账才一次性补记
         setDb((d) => { const nd = { ...d, stats: { ...d.stats } }; nd.stats.total += 1; if (gr.verdict === "correct") nd.stats.ok += 1; bumpDailyStats(nd, t, gr.verdict === "correct"); return nd; });
@@ -4752,7 +4778,7 @@ function AppInner() {
         /* lastPracticed 记的是"这条错题最近一次被拿出来重练是哪天",给 sortMistakesForDrill
            排序用。只有真的作为重练做过(item.mistakeId 存在)才更新;新记下来的错题留空,
            代表"从没被重练过",在挑题时排最前面。 */
-        const base = { task: cq.task, type: cq.type, ans: (cAnswer || "").trim() || "(未作答)", ref: g.reference, exp: g.explanation, breakdown: g.breakdown || null, date: t, needsReview, streak: 0, nonPattern: outsideOnly, ...(item.mistakeId ? { lastPracticed: t } : {}) };
+        const base = { task: cq.task, type: cq.type, ans: (cAnswer || "").trim() || "(未作答)", ref: g.reference, exp: g.explanation, review: g.review || null, breakdown: g.breakdown || null, date: t, needsReview, streak: 0, nonPattern: outsideOnly, ...(item.mistakeId ? { lastPracticed: t } : {}) };
         const idPart = isCombo ? { pid: item.p1.id, pid2: item.p2.id } : { pid: item.p.id };
         if (item.mistakeId) {
           // 重练了还是不对/仍需复核:刷新原来那条记录,而不是再叠加一条新的
@@ -4802,7 +4828,7 @@ function AppInner() {
       nd.meta.newDone += 1;
       if (verdict !== "correct" || anyNeedsReview) {
         const bad = [...results].reverse().find((r) => r.verdict !== "correct" || r.needsReview) || results[results.length - 1];
-        nd.mistakes.unshift({ task: bad.q.task, type: bad.q.type, ans: bad.ans || "(未作答)", ref: bad.reference, exp: bad.explanation, breakdown: bad.breakdown, pid: p.id, date: t, needsReview: bad.needsReview, streak: 0 });
+        nd.mistakes.unshift({ task: bad.q.task, type: bad.q.type, ans: bad.ans || "(未作答)", ref: bad.reference, exp: bad.explanation, review: bad.review || null, breakdown: bad.breakdown, pid: p.id, date: t, needsReview: bad.needsReview, streak: 0 });
         nd.mistakes = pruneMistakes(nd.mistakes, nd.prog);
       }
       return nd;
@@ -4822,7 +4848,7 @@ function AppInner() {
       nd.prog[p.id] = finalizeStubbornRound(nd.prog[p.id], allCorrect, t);
       if (!allCorrect) {
         const bad = [...results].reverse().find((r) => !repOk(r));
-        nd.mistakes.unshift({ task: bad.q.task, type: bad.q.type, ans: bad.ans || "(未作答)", ref: bad.reference, exp: bad.explanation, breakdown: bad.breakdown, pid: p.id, date: t, needsReview: bad.needsReview, streak: 0 });
+        nd.mistakes.unshift({ task: bad.q.task, type: bad.q.type, ans: bad.ans || "(未作答)", ref: bad.reference, exp: bad.explanation, review: bad.review || null, breakdown: bad.breakdown, pid: p.id, date: t, needsReview: bad.needsReview, streak: 0 });
         nd.mistakes = pruneMistakes(nd.mistakes, nd.prog);
       }
       return nd;
@@ -5599,6 +5625,7 @@ function AppInner() {
           <>
             <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{furiganaify(r.reference)}</div></div>
             <div className="exp-block"><label>先生の講評</label><div>{r.explanation}</div></div>
+            <ReviewNote review={r.review} />
             <BreakdownBlock breakdown={r.breakdown} />
             <FollowUpAsk key={gi} contextSummary={buildFollowUpContext(c.item, c.q, c.answer, r)} />
             <ReportGradeBtn
@@ -6007,6 +6034,7 @@ function AppInner() {
                               <div className="your-ans"><label>你的答案</label><div className="serif">{r.ans}</div></div>
                               <div className="ref-block"><label>参考答案</label><div className="serif ref-jp">{furiganaify(r.reference)}</div></div>
                               <div className="exp-block"><label>先生の講評</label><div>{r.explanation}</div></div>
+                              <ReviewNote review={r.review} />
                               <BreakdownBlock breakdown={r.breakdown} />
                               <FollowUpAsk key={i} contextSummary={buildFollowUpContext({ p: groupState.p }, gq, r.ans, r)} />
                               <ReportGradeBtn
@@ -6928,6 +6956,7 @@ function AppInner() {
                 <div className="mk-line"><label>当时答</label><span className="serif">{m.ans}</span></div>
                 <div className="mk-line"><label>参考</label><span className="serif shu">{furiganaify(m.ref)}</span></div>
                 <div className="mk-exp">{m.exp}</div>
+                <ReviewNote review={m.review} />
                 <BreakdownBlock breakdown={m.breakdown} />
                 <div className="btn-row">
                   {!noRetryBtn && <button className="btn-mini" onClick={() => (p2 ? startComboFree(p, p2, m.id) : m.type === "listening" ? startListenFree(p, m.id) : startFree(p, m.id))}>{p2 ? "重练这组合" : m.type === "listening" ? "重新听一次" : "重练这个句型"}</button>}
@@ -7782,6 +7811,15 @@ html,body{overflow-x:hidden}
    描边跟着文字颜色走),只加个手型光标和按下变色,不用另起一套视觉语言 */
 .btn-mark-result-stubborn{cursor:pointer;white-space:nowrap}
 .btn-mark-result-stubborn:hover{background:var(--tint-red-bg)}
+/* 二次核验的结论条。刻意压得比讲评正文低一档:小字、淡色、左侧一道细边,
+   一眼能认出"这是附加信息"而不是又一段讲评。理由那句再降一档,因为它经常和
+   上面的讲评说的是同一个错。 */
+.review-note{display:flex;gap:8px;align-items:flex-start;margin-top:8px;padding:8px 11px;
+  background:var(--tint-panel);border-left:2px solid var(--line);border-radius:0 8px 8px 0}
+.review-note-tag{flex:0 0 auto;font-size:11px;font-weight:700;color:var(--ink-soft);
+  letter-spacing:1px;padding-top:1px}
+.review-note-body{font-size:12px;color:var(--ink-soft);line-height:1.7}
+.review-note-reason{display:block;opacity:.75;margin-top:2px}
 .result-item-q{font-size:15px;color:var(--ink);line-height:1.7;margin-bottom:4px}
 .done-extra-note{font-size:12px;color:var(--tint-green-fg);background:var(--tint-green-bg);border-radius:10px;padding:8px 12px;margin-bottom:12px}
 .done-note{font-size:13px;color:var(--ink-soft);margin-bottom:8px}

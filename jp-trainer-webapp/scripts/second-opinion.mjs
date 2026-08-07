@@ -78,7 +78,8 @@ const base = { selfCheck: true, errorScope: "none", explanation: "讲评", break
   check("判正解+参考答案改了字 → 会触发复核", proCalls === 1, `pro 调用 ${proCalls} 次`);
   check("复核认为不对 → 降级到 partial(不直接按更严的算)", g.verdict === "partial", g.verdict);
   check("降级后仍留标记等人工确认", g.selfCheck === false, String(g.selfCheck));
-  check("讲评里写清了是复核改的", /【复核】/.test(g.explanation) && /の」多余/.test(g.explanation), g.explanation.slice(-90));
+  check("复核意见走独立字段,不污染讲评正文", !/【复核】/.test(g.explanation) && g.explanation === "讲评", g.explanation);
+  check("review 记下了初核/复核/理由", g.review && g.review.first === "correct" && g.review.second === "partial" && /の」多余/.test(g.review.reason), JSON.stringify(g.review));
   check("errorScope 跟着 verdict 归一化", g.errorScope === "pattern", g.errorScope);
 }
 
@@ -99,7 +100,8 @@ const base = { selfCheck: true, errorScope: "none", explanation: "讲评", break
   });
   check("复核也认可 → verdict 保持 correct", g.verdict === "correct", g.verdict);
   check("复核也认可 → 标记不撤(参考答案改字它看不到)", g.selfCheck === false, String(g.selfCheck));
-  check("讲评里告诉你可以放心确认", /也认为这句没问题/.test(g.explanation), g.explanation.slice(-80));
+  check("复核也认可时 review 里两边一致", g.review && g.review.first === "correct" && g.review.second === "correct", JSON.stringify(g.review));
+  check("讲评正文仍然干净", g.explanation === "讲评", g.explanation);
 }
 
 /* ---------- 4. 干净的 correct 不该白花一次 pro ---------- */
@@ -121,19 +123,20 @@ const base = { selfCheck: true, errorScope: "none", explanation: "讲评", break
   check("判 wrong 仍然触发复核", proCalls === 1, `pro 调用 ${proCalls} 次`);
   check("判 wrong 时取较宽松的一侧", g.verdict === "partial", g.verdict);
   check("判 wrong 复核后同样留标记", g.selfCheck === false, String(g.selfCheck));
+  check("判 wrong 方向也走 review 字段", g.review && g.review.first === "wrong" && g.review.second === "partial", JSON.stringify(g.review));
 }
 {
   const { g } = await grade({
     first: { ...base, verdict: "wrong", errorScope: "pattern" }, reference: REF, answer: ANS,
     second: { verdict: "wrong", reason: "确实不成立" },
   });
-  check("复核也认为 wrong → 原判成立,不加复核说明", g.verdict === "wrong" && !/【复核】/.test(g.explanation), g.verdict);
+  check("复核也认为 wrong → 原判成立,连 review 都不留", g.verdict === "wrong" && !g.review, g.verdict + "/" + JSON.stringify(g.review));
 }
 
 /* ---------- 6. 复核调用本身失败,不能牵连原判 ---------- */
 {
   const { g } = await grade({ first: { ...base, verdict: "correct" }, reference: REF, answer: ANS, second: null });
-  check("复核失败时沿用原判(correct 方向)", g.verdict === "correct" && !/【复核】/.test(g.explanation), g.verdict);
+  check("复核失败时沿用原判(correct 方向)", g.verdict === "correct" && !g.review, g.verdict);
   const r2 = await grade({ first: { ...base, verdict: "wrong", errorScope: "pattern" }, reference: REF, answer: ANS, second: null });
   check("复核失败时沿用原判(wrong 方向)", r2.g.verdict === "wrong", r2.g.verdict);
 }

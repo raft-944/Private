@@ -448,6 +448,12 @@ const MISTAKE_MAX = 150;
    每答一题就整份重新上传一次,而 breakdown 是单条错题里最占体积的部分——
    旧错题你不会回头去读那 4 段,留着只是拖慢每次存盘。去掉之后条数放宽 50% 反而更小。 */
 const MISTAKE_BREAKDOWN_KEEP = 30;
+/* 「一键练习」一次最多排这么多道。以前是把錯題本里所有能重练的题一次性排成队列——
+   攒到 74 条时那就是一次做 74 道题,等于这个按钮实际上没法用。
+   截断本身不会漏掉谁:挑的是 sortMistakesForDrill 排在最前面的(最久没重练过的),
+   做完之后它们的 lastPracticed 被刷新、自动沉到队尾,再点一次就是下一批——
+   连点几次就能把整本过一遍,而且每一轮都是一场做得完的量。 */
+const MISTAKE_DRILL_MAX = 10;
 
 /* 同一个句型的错题归到一组。練習帳(source==="confusion")和読解来的错题没有 pid,
    不挂钩具体句型,返回 null 表示"不参与按句型去重"。複合作文有两个句型,合起来当一组。 */
@@ -600,6 +606,7 @@ const MANUAL_SECTIONS = [
       "答错的题会自动进錯題本,可以随时回去重练。",
       "重练答对一次不会马上移除——要连续答对 " + MISTAKE_CLEAR_STREAK + " 次才算真的掌握、从本子里消失。中间错一次就重新计数。这是为了避免蒙对一次就当学会了。",
       "毎日の宿題会自动带上錯題本里的题,挑的是「最久没重练过」的那几条,而不是最新的几条——这样排在后面的旧错题也轮得到,不会一直堆着。",
+      "錯題本页面上的「一键练习」一次最多排 " + MISTAKE_DRILL_MAX + " 道,同样是挑最久没重练过的。做完再点一次就是下一批,连点几次能把整本过一遍——比一次甩给你几十道现实得多。",
       "同一个句型最多留 " + MISTAKE_PER_PATTERN_MAX + " 条错题:同一个句型反复错的话,该做的是顽固句型特训,而不是在本子里堆一长串大同小异的记录。",
       "錯題本最多保留 " + MISTAKE_MAX + " 条。满了之后先清掉「已经在顽固特训里的句型」的记录(那边正专门练它),而不是无脑清最旧的——最旧的往往正是一直没解决的那些。",
     ],
@@ -3828,8 +3835,9 @@ function AppInner() {
     beginListenItem(item);
   };
 
-  /* 錯題本"一键练习全部":把錯題本里能直接重练的条目(排除練習帳来的——那些没有 pid,
-     要走各自的知识辨析/场景对话/邮件重练入口,没法塞进这个统一队列)一次性排成一个队列。
+  /* 錯題本"一键练习":把錯題本里能直接重练的条目(排除練習帳来的——那些没有 pid,
+     要走各自的知识辨析/场景对话/邮件重练入口,没法塞进这个统一队列)排成一个队列,
+     一次最多 MISTAKE_DRILL_MAX 道(见那个常量的说明:以前不截断,攒到 74 条就没法用了)。
      每道题的形状(combo/listening/普通)不一样,靠 beginDrillItem 按各自的形状分派——
      和 beginHomeworkItem 是同一个思路,因为作业本身也是"一队里混着好几种题型"。
      刻意设成 freeMode=true:这样 applyResult 里"排期更新"那段(靠 !freeMode 判断)
@@ -3839,10 +3847,12 @@ function AppInner() {
      已经写好的"存在 item.mistakeId 就按错题处理"通用分支,不需要另写一套。 */
   const startMistakeDrill = () => {
     sessionGenRef.current++; // 开新一轮会话,让上一轮还没返回的批量预取结果作废
-    // 顺序同样按"最久没被重练过的排前面"(见 sortMistakesForDrill):这一批全都会做到,
-    // 但中途退出时至少先做掉了最该练的那几条,而不是又从最新的开始
+    // 按"最久没被重练过的排前面"(见 sortMistakesForDrill)取前 MISTAKE_DRILL_MAX 条。
+    // 截断不会漏掉谁:做完这批之后它们的 lastPracticed 被刷新、自动沉到队尾,
+    // 再点一次就是下一批,连点几次能把整本过一遍。
     const items = sortMistakesForDrill(db.mistakes)
       .filter((m) => m.source !== "confusion" && PATTERNS[m.pid]) // 練習帳来的错题没有 pid,走它自己的重练入口
+      .slice(0, MISTAKE_DRILL_MAX)
       .map((m) => m.pid2 !== undefined
         ? { sub: "combo", p1: PATTERNS[m.pid], p2: PATTERNS[m.pid2], mistakeId: m.id }
         : m.type === "listening"
@@ -6829,7 +6839,18 @@ function AppInner() {
                 <div className="drill-note">这些错题会优先混入「毎日の宿題」,做对了自动移除,不用额外再点什么</div>
                 {drillCount > 0 && (
                   <>
-                    <button className="btn-outline" onClick={startMistakeDrill}>▶ 一键练习全部错题({drillCount})</button>
+                    {/* 按钮文案要和实际行为对齐:超过上限时明确写"这一批练几道、一共还剩多少",
+                        而不是含糊地写"全部"——以前写"全部"、真的排了 74 道,点下去就傻眼了 */}
+                    <button className="btn-outline" onClick={startMistakeDrill}>
+                      {drillCount <= MISTAKE_DRILL_MAX
+                        ? `▶ 一键练习错题(${drillCount})`
+                        : `▶ 练一批最该复习的(${MISTAKE_DRILL_MAX} 道 / 共 ${drillCount} 条)`}
+                    </button>
+                    {/* 两句话分开成两行:挤在一个段落里读着像一长串,而上面那句是解释
+                        "为什么只给我 10 道"、下面那句是原本就有的免责说明,本来就是两件事 */}
+                    {drillCount > MISTAKE_DRILL_MAX && (
+                      <div className="drill-note drill-note-sub">挑的是最久没重练过的 {MISTAKE_DRILL_MAX} 条。做完再点一次就是下一批,连点几次能把整本过一遍。</div>
+                    )}
                     <div className="drill-note drill-note-sub">不影响任何句型的复习进度,也不影响今天的学习任务量——连续答对{MISTAKE_CLEAR_STREAK}次会移出錯題本,答错会继续留着</div>
                   </>
                 )}

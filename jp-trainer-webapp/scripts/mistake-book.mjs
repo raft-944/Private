@@ -152,6 +152,15 @@ const run = (fn, ...args) => page.evaluate(([f, a]) => window.__fns[f](...a), [f
   const daily = MISTAKES_REAL.map((m) => ({ ...m }));
   const picked = (await run("sortMistakesForDrill", daily)).slice(0, 9).map((m) => m.date);
   check("每日作業取到的是最老的一批,不是最新的", picked.every((d) => d === "2026-07-29"), picked.join(","));
+
+  /* 「一键练习」截断到 10 条不会漏掉谁,靠的是"做完一批就沉到队尾"。
+     这里模拟连点两次:第一批做完(lastPracticed 标成今天),第二批必须换成另外 10 条。 */
+  const book = MISTAKES_REAL.map((m) => ({ ...m }));
+  const first = (await run("sortMistakesForDrill", book)).slice(0, 10).map((m) => m.id);
+  book.forEach((m) => { if (first.includes(m.id)) m.lastPracticed = "2026-08-07"; });
+  const second = (await run("sortMistakesForDrill", book)).slice(0, 10).map((m) => m.id);
+  const overlap = second.filter((x) => first.includes(x)).length;
+  check("做完一批后再点,换成另外 10 条(连点能过一遍)", overlap === 0, `两批重叠 ${overlap} 条`);
 }
 
 /* ---------- 4. missTotal 累加与顽固特训触发 ---------- */
@@ -173,6 +182,73 @@ const run = (fn, ...args) => page.evaluate(([f, a]) => window.__fns[f](...a), [f
 
   const p3 = await run("bumpMissOnly", null, "2026-08-06");
   check("没学过的句型不凭空造排期", p3 === null, String(p3));
+}
+
+/* ---------- 5. 「一键练习」的上限(走真实界面) ----------
+   前面几组测的是纯函数,这一组必须开真的 App:要验的是"点下去到底排了几道题",
+   而那是 startMistakeDrill + 队列渲染合起来的行为,光看函数看不出来。 */
+{
+  const page2 = await browser.newPage({ viewport: { width: 400, height: 780 } });
+  const errs = [];
+  page2.on("pageerror", (e) => errs.push(e.message));
+  // 判卷/出题都拦下来给固定答复,这组只关心排了几道题
+  await page2.route("**/api/generate", (r) => {
+    const u = JSON.parse(r.request().postData() || "{}").user || "";
+    const text = /判定标准|学生的答案/.test(u)
+      ? '{"verdict":"correct","selfCheck":true,"errorScope":"none","reference":"参考","explanation":"好","breakdown":null}'
+      : /JSON数组/.test(u)
+      ? JSON.stringify(Array.from({ length: Number((u.match(/长度必须正好是 (\d+)/) || [])[1] || 1) }, (_, i) => ({ n: i + 1, task: "题面" + i, taskSegments: ["题面"] })))
+      : '{"type":"translation","task":"现场题面","taskSegments":["现场"]}';
+    r.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ content: [{ type: "text", text }] }) });
+  });
+  // 74 条错题(改完错题本之后的真实量级),分布在 30 个句型上;lastPracticed 从没练过
+  await page2.addInitScript(() => {
+    const prog = {}, mistakes = [];
+    for (let i = 0; i < 74; i++) {
+      const pid = i % 30;
+      prog[pid] = { lv: 3, ok: 5, ng: 1, learnedDate: "2026-07-01", due: "2026-09-01" };
+      mistakes.push({ id: "m" + i, pid, streak: 0, date: "2026-07-" + String(10 + (i % 20)).padStart(2, "0"),
+        task: "错题" + i, type: "translation", ans: "答", ref: "参考", exp: "讲评" });
+    }
+    localStorage.setItem("e2e:jp_srs_v1", JSON.stringify({ prog, mistakes, settings: { newPerDay: 0 }, meta: {} }));
+  });
+  await page2.goto(`http://localhost:${PORT}/e2e-harness.html`);
+  await page2.waitForSelector("text=錯題本", { timeout: 20000 });
+  await page2.click("text=錯題本");
+  await page2.waitForSelector(".drill-bar .btn-outline", { timeout: 10000 });
+
+  const label = await page2.locator(".drill-bar .btn-outline").innerText();
+  check("按钮文案说清这一批练几道、一共多少", /10 道 \/ 共 74 条/.test(label), label);
+  check("按钮不再写「全部」", !/全部/.test(label), label);
+
+  await page2.locator(".drill-bar .btn-outline").click();
+  await page2.waitForSelector(".progress-text", { timeout: 15000 });
+  const prog1 = await page2.locator(".progress-text").innerText();
+  check("一次只排 10 道,不是 74 道", prog1.trim() === "1 / 10", prog1.trim());
+  check("界面没有报错", errs.length === 0, errs.join(" / "));
+
+  await page2.close();
+
+  /* 没到上限时不该显示"共 N 条"那套话术,就是普通的"练这几道"。
+     必须另开一个页面重新种数据——addInitScript 在每次导航时都会重跑,
+     在页内改完 localStorage 再 reload 会被它原样盖回去。 */
+  const page3 = await browser.newPage({ viewport: { width: 400, height: 780 } });
+  await page3.addInitScript(() => {
+    const prog = {}, mistakes = [];
+    for (let i = 0; i < 4; i++) {
+      prog[i] = { lv: 3, ok: 5, ng: 1, learnedDate: "2026-07-01", due: "2026-09-01" };
+      mistakes.push({ id: "s" + i, pid: i, streak: 0, date: "2026-07-20", task: "错题" + i,
+        type: "translation", ans: "答", ref: "参考", exp: "讲评" });
+    }
+    localStorage.setItem("e2e:jp_srs_v1", JSON.stringify({ prog, mistakes, settings: { newPerDay: 0 }, meta: {} }));
+  });
+  await page3.goto(`http://localhost:${PORT}/e2e-harness.html`);
+  await page3.waitForSelector("text=錯題本", { timeout: 20000 });
+  await page3.click("text=錯題本");
+  await page3.waitForSelector(".drill-bar .btn-outline", { timeout: 10000 });
+  const smallLabel = await page3.locator(".drill-bar .btn-outline").innerText();
+  check("条数没到上限时文案是普通的", smallLabel.includes("一键练习错题(4)") && !smallLabel.includes("共"), smallLabel);
+  await page3.close();
 }
 
 console.log("\n" + results.join("\n") + "\n");

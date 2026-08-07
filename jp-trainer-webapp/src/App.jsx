@@ -1165,6 +1165,21 @@ const GRADING_FAIRNESS_RULE = `判卷尺度(很重要,这几条直接关系到�
 - **判罚要和错误的严重程度匹配**。"wrong" 只留给真正严重的情况:根本没用目标句型、句子语法不成立、或者意思和题目要求南辕北辙。如果目标句型本身用对了、句子也读得通,只是某个词选得不合适(比如量词搭错、用词不够地道),那最多是 "partial",绝不能判 "wrong"。
 - **同类问题前后标准要一致**:同一个语法结构,这次判对了,下次遇到同样的结构就不能判错。`;
 
+/* 讲评的输出纪律,压在所有判卷规则的最后。
+   前面那几条(文体一致性/错误归属/判罚尺度/参考答案自洽)都是在告诉 AI"去检查什么",
+   而告诉模型检查 X,它就会倾向于**汇报自己检查过 X**——哪怕结论是"本题不涉及"。
+   用户实际遇到的:句子里出现个「たら」,讲评里就冒出一句敬体简体该不该混用,
+   而那道题跟文体毫无关系。explanation 只有 120 字,被无关规则占掉的每一句,
+   都是本该用来讲这道题的。
+
+   所以这条是**做减法**——它缩短输出、不增加,也是往后再加判卷规则时的对冲:
+   规则库越长,越需要有人在最后一句提醒"清单是给你自己用的,不是讲评的提纲"。 */
+const EXPLANATION_FOCUS_RULE = `讲评怎么写(同样重要):上面那些规则是你自己判卷时用的检查清单,**不是讲评的提纲**。explanation 里只写这道题**实际存在**的问题,绝对不要为了表明你检查过某条规则就把它写进去:
+- 这道题不存在文体(敬体/简体)混用,就一个字都不要提文体;
+- 这道题没有踩到易混淆句型,就不要写"没有和XX混淆"这类话;
+- 不要罗列学生**没有**犯的错,也不要写与本题无关的泛泛提醒。
+判对了就简短说明好在哪(一两句即可);判得不对就直接指出错在哪、该怎么改。宁可短,不要为了凑字数把无关的规则复述一遍。`;
+
 /* 判卷结果的自洽性兜底。提示词里已经明令禁止上面那两种矛盾(见 REFERENCE_CONSISTENCY_RULE),
    这里是它没听话时的兜底,两个方向各处理一种:
 
@@ -1432,6 +1447,8 @@ ${STYLE_CONSISTENCY_RULE}
 ${GRADING_FAIRNESS_RULE}
 
 ${REFERENCE_CONSISTENCY_RULE}
+
+${EXPLANATION_FOCUS_RULE}
 
 给出 verdict 之后,请把 verdict / explanation / reference 三者放在一起重新审视一遍做自我核验,只要出现下面任何一种自相矛盾,就把 selfCheck 设为 false(代表这条需要人工复核),三者一致时才设 true:
 - explanation 里提到了语法瑕疵、用词不够地道、或其他值得注意的问题,verdict 判的却是 "correct";
@@ -1870,6 +1887,8 @@ ${GRADING_FAIRNESS_RULE}
 
 ${REFERENCE_CONSISTENCY_RULE}
 
+${EXPLANATION_FOCUS_RULE}
+
 给出 verdict 之后,请把 verdict / explanation / reference 三者放在一起重新审视一遍做自我核验,只要出现下面任何一种自相矛盾,就把 selfCheck 设为 false(代表这条需要人工复核),三者一致时才设 true:
 - explanation 里提到了语法瑕疵、用词不够地道、或其他值得注意的问题,verdict 判的却是 "correct";
 - reference 相对学生的答案改动了任何一个词(助词、量词、汉字写法都算),verdict 判的却是 "correct"、explanation 还说"无需修改";
@@ -2139,6 +2158,8 @@ ${GRADING_FAIRNESS_RULE}
 
 ${REFERENCE_CONSISTENCY_RULE}
 
+${EXPLANATION_FOCUS_RULE}
+
 注意:explanation 字段必须全部用中文写,绝对不可以用日语写讲解,引用日语词汇/例句除外。
 输出JSON: {"verdict":"correct|partial|wrong","formCorrect":true|false,"reference":"一个自然的参考答案(日语);verdict 不是 correct 时必须是改过之后的句子、不能和学生答案一模一样;反过来,只要你在这里改动了学生的任何一个词,就不能判 correct+无需修改","explanation":"针对学生答案的具体讲解,先说变形对不对,再说其他,用中文,120字以内"}` : head + `
 判定标准:
@@ -2154,6 +2175,8 @@ ${STYLE_CONSISTENCY_RULE}
 ${GRADING_FAIRNESS_RULE}
 
 ${REFERENCE_CONSISTENCY_RULE}
+
+${EXPLANATION_FOCUS_RULE}
 
 注意:explanation 字段必须全部用中文写,绝对不可以用日语写讲解,引用日语词汇/例句除外。
 输出JSON: {"verdict":"correct|partial|wrong","reference":"一个自然的参考答案(日语);verdict 不是 correct 时必须是改过之后的句子、不能和学生答案一模一样;反过来,只要你在这里改动了学生的任何一个词,就不能判 correct+无需修改","explanation":"针对学生答案的具体讲解,用中文,120字以内,若存在更优答案请说明为什么优选它"}`;

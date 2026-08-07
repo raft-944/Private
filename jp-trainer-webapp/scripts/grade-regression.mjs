@@ -12,7 +12,7 @@
    判卷逻辑写在 src/App.jsx 里(和 React 组件同一个文件),Node 直接 import 会连
    React/supabaseClient 一起拉进来。所以这里起一个 vite dev server,用 Playwright 打开
    e2e-harness.html,在页面里 import 真正的 App.jsx 调 gradeAnswer——测到的就是线上
-   跑的那一份代码(含 reconcileGradeReference、secondOpinionOnWrong 这些兜底),
+   跑的那一份代码(含 reconcileGradeReference、secondOpinion 这些兜底),
    而不是在脚本里另抄一份提示词。抄一份就会各走各的,测过也不作数。 */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -59,6 +59,31 @@ const CASES = [
     answer: "こどもに２枚ずつ寿司を配ってください",
     expect: (g) => g.verdict === "wrong"
       ? "判成了 wrong(句型本身用对了,只是量词选错,最多该 partial)"
+      : null,
+  },
+  {
+    name: "連体修飾里多余的「の」不该判正解",
+    note: `2026-08 真实反馈:「電車に入るの放送」判了正解,讲评还说「の」作为名词化用法可以接受。
+           动词普通形直接修饰名词(連体修飾)中间不能加「の」;「の」做名词化是「電車が入るのが聞こえます」
+           那种用法,后面接的是助词而不是名词。这条是探针:就算不专门为它写规则,也要能看出
+           当前提示词下判得准不准。`,
+    pattern: "見えます／聞こえます",
+    task: "从车站能听到列车进站的广播。",
+    answer: "駅から電車に入るの放送が聞こえます。",
+    expect: (g) => g.verdict === "correct" && g.selfCheck !== false
+      ? "判了正解且没标建议复核(連体修飾里的「の」是多余的,至少该 partial 或标出来复核)"
+      : null,
+  },
+  {
+    name: "汉字写成假名不该被当成用词错误(回/かい)",
+    note: `2026-08 真实反馈:「どのかいのチケット」被判正解,但讲评说"「どのかい」应为「どの回」…
+           建议巩固「回」的量词用法"。かい 就是 回 的读音,这属于判定标准里明确允许的
+           "汉字/假名书写差异",顶多提一句写成汉字更清楚,不该说成量词用错。`,
+    pattern: "疑問詞+Vたらいいですか",
+    task: "周末想去看电影，该买哪场的票才好呢？",
+    answer: "週末は映画を見たいんですが、どのかいのチケットを買ったらいいですか。",
+    expect: (g) => /量词|量詞/.test(g.explanation || "") && g.verdict === "correct"
+      ? "判正解却在讲评里说量词用错(这只是假名写法,不是用词错误)"
       : null,
   },
   {

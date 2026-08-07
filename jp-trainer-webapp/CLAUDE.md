@@ -113,6 +113,7 @@ Browser → `POST /api/generate` (`api/generate.js`, Vercel serverless function)
 - 服务端环境变量是 `DEEPSEEK_API_KEY`(不是 `GEMINI_API_KEY`),配在 Vercel 项目设置里,浏览器永远看不到。
 - 客户端有一个并发池(`MAX_CONCURRENT`)而不是纯串行节流,同时最多几个请求在飞,详见 `App.jsx` 里 `acquireSlot`/`releaseSlot` 附近的注释。429 重试时,等待秒数从 DeepSeek 响应头的 `Retry-After` 里取(OpenAI 兼容接口的惯例,不在 JSON body 里)。
 - 服务端不管客户端要多少 token,都保底给够 2048 输出 token,因为 DeepSeek 有时候比 Claude 更啰嗦,少了容易在写判卷讲解时把 JSON 截断。
+- **`EXPLANATION_FOCUS_RULE`(讲评的输出纪律,压在所有判卷规则的最后,四个 grader 都插)**——前面那几条规则都是在告诉 AI"去检查什么",而告诉模型检查 X,它就会倾向于**汇报自己检查过 X**,哪怕结论是"本题不涉及":真实表现是句子里出现个「たら」、讲评里就冒出一句敬体简体,而那题跟文体毫无关系。`explanation` 只有 120 字,被无关规则占掉的每一句都是本该用来讲这道题的。这条是**做减法**(缩短输出、不增加),也是往后再加判卷规则时的对冲——**规则库越长越要保留它**。相应地,遇到新的判卷 bug 时**优先考虑加回归用例当探针,而不是再往提示词里堆一条知识规则**:无条件规则会一直变长、稀释注意力、把讲评挤走。真到了要按语法点分情况指导的时候,做法是"规则库 + 按学生答案里的形态条件注入",而不是全都无条件拼进去。
 - Prompts explicitly forbid the AI from using straight double quotes inside JSON string values (must use 「」 or Chinese quotes) — this is a real recurring failure mode, not defensive boilerplate; don't relax it.
 - Responses are parsed by scanning for the first balanced `{...}` or `[...]` (`extractFirstJsonObject`/`extractFirstJsonArray`), not `JSON.parse` on the raw text, because the model sometimes wraps JSON in prose/Markdown despite instructions.
 - **判卷结果必须自洽,`verdict`/`explanation`/`reference` 三者不能互相打架**。2026-08 连着报上来两个方向相反的真实 case,都很伤信任度,所以现在提示词(`REFERENCE_CONSISTENCY_RULE`,凡是带 reference 的 grader 都要插)和客户端兜底(`reconcileGradeReference()`)各自都覆盖两个方向:
